@@ -73,21 +73,33 @@ class Position:
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
     current_price: Optional[float] = None
+    capital_at_risk: Optional[float] = None  # Actual capital at risk
     
     @property
     def unrealized_pnl(self) -> Optional[float]:
-        """Calculate unrealized PnL."""
+        """Calculate unrealized PnL based on actual capital at risk."""
         if self.current_price is None:
             return None
         
+        # Calculate price change percentage
         if self.side == 'long':
-            return (self.current_price - self.entry_price) * self.size
+            price_change_pct = (self.current_price - self.entry_price) / self.entry_price
         else:
-            return (self.entry_price - self.current_price) * self.size
+            price_change_pct = (self.entry_price - self.current_price) / self.entry_price
+        
+        # PnL is the price change percentage applied to the capital at risk
+        if self.capital_at_risk is not None:
+            return self.capital_at_risk * price_change_pct
+        else:
+            # Fallback to notional calculation if capital_at_risk is not set
+            if self.side == 'long':
+                return (self.current_price - self.entry_price) * self.size
+            else:
+                return (self.entry_price - self.current_price) * self.size
     
     @property
     def unrealized_pnl_percentage(self) -> Optional[float]:
-        """Calculate unrealized PnL percentage."""
+        """Calculate unrealized PnL percentage based on capital at risk."""
         if self.current_price is None:
             return None
         
@@ -95,6 +107,18 @@ class Position:
             return ((self.current_price - self.entry_price) / self.entry_price) * 100
         else:
             return ((self.entry_price - self.current_price) / self.entry_price) * 100
+    
+    @property
+    def capital_at_risk_pnl_percentage(self) -> Optional[float]:
+        """Calculate PnL percentage based on capital at risk."""
+        if self.current_price is None or self.capital_at_risk is None:
+            return None
+        
+        pnl = self.unrealized_pnl
+        if pnl is None:
+            return None
+        
+        return (pnl / self.capital_at_risk) * 100
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert position to dictionary."""
@@ -108,8 +132,10 @@ class Position:
             'stop_loss': self.stop_loss,
             'take_profit': self.take_profit,
             'current_price': self.current_price,
+            'capital_at_risk': self.capital_at_risk,
             'unrealized_pnl': self.unrealized_pnl,
             'unrealized_pnl_percentage': self.unrealized_pnl_percentage,
+            'capital_at_risk_pnl_percentage': self.capital_at_risk_pnl_percentage,
         }
     
     @classmethod
@@ -125,4 +151,5 @@ class Position:
             stop_loss=data.get('stop_loss'),
             take_profit=data.get('take_profit'),
             current_price=data.get('current_price'),
+            capital_at_risk=data.get('capital_at_risk'),
         ) 

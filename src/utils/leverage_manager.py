@@ -107,27 +107,28 @@ class LeverageManager:
         # Calculate risk amount (2% of capital)
         risk_amount = available_capital * self.risk_percentage
         
-        # Calculate maximum position value with leverage
-        max_position_value = available_capital * leverage
+        # Calculate position size based on ACTUAL DOLLARS AT RISK (not notional value)
+        # max_position_size represents the actual capital at risk, not the leveraged position value
+        capital_at_risk = min(risk_amount, self.max_position_size)
         
-        # Calculate position size based on risk and leverage
-        # For aggressive scalping, we can risk more due to tight stops
-        position_value = min(risk_amount * leverage * 2, max_position_value)  # 2x risk for aggressive scalping
+        # Calculate position size in units based on capital at risk
+        # Position size = (Capital at risk) / (Current price)
+        position_size = capital_at_risk / current_price
         
-        # Calculate position size in units
-        position_size = position_value / current_price
-        
-        # Calculate margin required
-        margin_required = position_value / leverage
+        # Calculate margin required (this is the actual capital at risk)
+        margin_required = capital_at_risk
         
         # Apply margin buffer
         margin_required *= (1 + self.margin_buffer)
         
-        # Ensure we don't exceed max position size
-        if position_value > self.max_position_size:
-            position_value = self.max_position_size
-            position_size = position_value / current_price
-            margin_required = position_value / leverage * (1 + self.margin_buffer)
+        # Ensure we don't exceed max position size (capital at risk)
+        if margin_required > self.max_position_size:
+            margin_required = self.max_position_size
+            capital_at_risk = self.max_position_size / (1 + self.margin_buffer)
+            position_size = capital_at_risk / current_price
+        
+        self.logger.info(f"Position calculation for {symbol}: Capital at risk: ${capital_at_risk:.2f}, "
+                        f"Position size: {position_size:.4f}, Leverage: {leverage:.1f}x")
         
         return position_size, margin_required, leverage
     
@@ -179,6 +180,51 @@ class LeverageManager:
             return entry_price * (1 + leverage_adjusted_tp)
         else:
             return entry_price * (1 - leverage_adjusted_tp)
+    
+    def calculate_stop_loss_with_capital_at_risk(self, entry_price: float, side: str, capital_at_risk: float, max_loss_amount: float) -> float:
+        """
+        Calculate stop loss price based on capital at risk and maximum loss amount.
+        
+        Args:
+            entry_price: Entry price
+            side: 'long' or 'short'
+            capital_at_risk: Actual capital at risk
+            max_loss_amount: Maximum dollar amount willing to lose
+            
+        Returns:
+            Stop loss price
+        """
+        # Calculate the maximum loss percentage based on capital at risk
+        max_loss_percentage = max_loss_amount / capital_at_risk
+        
+        # Ensure the loss percentage doesn't exceed 100%
+        max_loss_percentage = min(max_loss_percentage, 1.0)
+        
+        if side == 'long':
+            return entry_price * (1 - max_loss_percentage)
+        else:
+            return entry_price * (1 + max_loss_percentage)
+    
+    def calculate_take_profit_with_capital_at_risk(self, entry_price: float, side: str, capital_at_risk: float, target_profit_amount: float) -> float:
+        """
+        Calculate take profit price based on capital at risk and target profit amount.
+        
+        Args:
+            entry_price: Entry price
+            side: 'long' or 'short'
+            capital_at_risk: Actual capital at risk
+            target_profit_amount: Target dollar amount to profit
+            
+        Returns:
+            Take profit price
+        """
+        # Calculate the target profit percentage based on capital at risk
+        target_profit_percentage = target_profit_amount / capital_at_risk
+        
+        if side == 'long':
+            return entry_price * (1 + target_profit_percentage)
+        else:
+            return entry_price * (1 - target_profit_percentage)
     
     def check_liquidation_risk(self, symbol: str, current_price: float, position_size: float, entry_price: float, side: str) -> Tuple[bool, float]:
         """
