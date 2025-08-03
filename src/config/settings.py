@@ -44,7 +44,7 @@ def load_config() -> Dict[str, Any]:
             "stop_loss_percentage": float(os.getenv("STOP_LOSS_PERCENTAGE", "2.0")),
             
             # Order monitoring settings
-            "order_timeout_minutes": int(os.getenv("ORDER_TIMEOUT_MINUTES", "30")),
+            "order_timeout_minutes": float(os.getenv("ORDER_TIMEOUT_MINUTES", "30")),
             "enable_stale_order_cleanup": os.getenv("ENABLE_STALE_ORDER_CLEANUP", "true").lower() == "true",
             "position_sync_interval": int(os.getenv("POSITION_SYNC_INTERVAL", "60")),  # seconds
             "enable_position_validation": os.getenv("ENABLE_POSITION_VALIDATION", "true").lower() == "true",

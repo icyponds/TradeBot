@@ -500,22 +500,20 @@ class HyperliquidSDKAPI:
             return []
         
         try:
-            # Try to get user state using the SDK
-            if hasattr(self.exchange_client, 'user_state'):
-                user_state = self.exchange_client.user_state()
+            # Use the Info client to get open orders
+            if hasattr(self.info_client, 'open_orders'):
+                # Get open orders directly
+                open_orders_data = self.info_client.open_orders(self.wallet_address)
+            elif hasattr(self.info_client, 'user_state'):
+                # Fallback: get user state and extract open orders
+                user_state = self.info_client.user_state(self.wallet_address)
+                open_orders_data = user_state.get('openOrders', [])
             else:
-                # Fallback: try alternative method names
-                if hasattr(self.exchange_client, 'get_user_state'):
-                    user_state = self.exchange_client.get_user_state()
-                elif hasattr(self.exchange_client, 'get_open_orders'):
-                    # Direct method call
-                    return self.exchange_client.get_open_orders()
-                else:
-                    self.logger.warning("Exchange client does not support open order retrieval")
-                    return []
+                self.logger.warning("Info client does not support open order retrieval")
+                return []
             
             open_orders = []
-            for order in user_state.get('openOrders', []):
+            for order in open_orders_data:
                 open_orders.append({
                     'order_id': order.get('oid', ''),
                     'symbol': order.get('name', ''),
@@ -583,19 +581,12 @@ class HyperliquidSDKAPI:
             return []
         
         try:
-            # Try to get user state using the SDK
-            if hasattr(self.exchange_client, 'user_state'):
-                user_state = self.exchange_client.user_state()
+            # Use the Info client to get user state
+            if hasattr(self.info_client, 'user_state'):
+                user_state = self.info_client.user_state(self.wallet_address)
             else:
-                # Fallback: try alternative method names
-                if hasattr(self.exchange_client, 'get_user_state'):
-                    user_state = self.exchange_client.get_user_state()
-                elif hasattr(self.exchange_client, 'get_positions'):
-                    # Direct method call
-                    return self.exchange_client.get_positions()
-                else:
-                    self.logger.warning("Exchange client does not support position retrieval")
-                    return []
+                self.logger.warning("Info client does not support position retrieval")
+                return []
             
             positions = []
             for position in user_state.get('assetPositions', []):
@@ -679,3 +670,39 @@ class HyperliquidSDKAPI:
         """
         # For now, consider data available if we can get current price
         return self.get_current_price(symbol) is not None
+    
+    def get_account_balance(self) -> Optional[Dict[str, Any]]:
+        """
+        Get account balance and portfolio value from Hyperliquid.
+        
+        Returns:
+            Dictionary with balance information or None if error
+        """
+        if not self.exchange_client:
+            self.logger.error("Exchange client not initialized")
+            return None
+        
+        try:
+            # Use the Info client to get user state
+            if hasattr(self.info_client, 'user_state'):
+                user_state = self.info_client.user_state(self.wallet_address)
+            else:
+                self.logger.warning("Info client does not support balance retrieval")
+                return None
+            
+            # Extract balance information from user state
+            balance_info = {
+                'wallet_address': self.wallet_address,
+                'total_equity': float(user_state.get('marginSummary', {}).get('accountValue', 0)),
+                'free_margin': float(user_state.get('marginSummary', {}).get('freeCollateral', 0)),
+                'used_margin': float(user_state.get('marginSummary', {}).get('totalNtlPos', 0)),
+                'unrealized_pnl': float(user_state.get('marginSummary', {}).get('unrealizedPnl', 0)),
+                'realized_pnl': float(user_state.get('marginSummary', {}).get('realizedPnl', 0)),
+            }
+            
+            self.logger.info(f"Account balance retrieved: ${balance_info['total_equity']:.2f} total equity")
+            return balance_info
+            
+        except Exception as e:
+            self.logger.error(f"Error getting account balance: {e}")
+            return None

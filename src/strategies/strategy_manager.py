@@ -57,7 +57,7 @@ class StrategyManager:
         self.total_pnl = 0.0
         self.winning_trades = 0
         self.total_trades = 0
-        self.available_capital = 1000.0  # Default capital, should be fetched from API
+        self.available_capital = 0.0  # Will be fetched from API
         
         # Configuration
         self.timeframe = config['strategies']['timeframe']
@@ -108,6 +108,26 @@ class StrategyManager:
         signal.signal(signal.SIGTERM, signal_handler)  # Termination signal
         
         self.logger.info("Kill switch enabled: Press Ctrl+C to close all positions and exit")
+    
+    def _update_account_balance(self):
+        """Fetch and update the account balance from the exchange."""
+        try:
+            balance_info = self.market_api.get_account_balance()
+            if balance_info:
+                # Use total equity as available capital
+                self.available_capital = balance_info['total_equity']
+                self.logger.info(f"Updated available capital: ${self.available_capital:.2f}")
+                
+                # Log additional balance information
+                self.logger.info(f"Free margin: ${balance_info['free_margin']:.2f}")
+                self.logger.info(f"Used margin: ${balance_info['used_margin']:.2f}")
+                self.logger.info(f"Unrealized PnL: ${balance_info['unrealized_pnl']:.2f}")
+            else:
+                self.logger.warning("Failed to fetch account balance, using default $1000")
+                self.available_capital = 1000.0
+        except Exception as e:
+            self.logger.error(f"Error updating account balance: {e}")
+            self.available_capital = 1000.0
     
     def _get_execution_interval(self) -> int:
         """Calculate execution interval based on timeframe."""
@@ -223,6 +243,9 @@ class StrategyManager:
         # Load existing positions from file
         self.load_positions_from_file()
         
+        # Fetch account balance and update available capital
+        self._update_account_balance()
+        
         # Start data collection
         self.market_api.start_data_collection()
         
@@ -235,6 +258,23 @@ class StrategyManager:
         
         # Start trading loop
         self._run_trading_loop()
+    
+    def _update_account_balance_periodic(self):
+        """Periodically update account balance during trading."""
+        try:
+            balance_info = self.market_api.get_account_balance()
+            if balance_info:
+                old_capital = self.available_capital
+                self.available_capital = balance_info['total_equity']
+                
+                # Only log if there's a significant change
+                if abs(self.available_capital - old_capital) > 1.0:
+                    self.logger.info(f"Account balance updated: ${self.available_capital:.2f} (change: ${self.available_capital - old_capital:+.2f})")
+                
+                # Update leverage manager with new capital
+                self.leverage_manager.update_available_margin(self.available_capital)
+        except Exception as e:
+            self.logger.error(f"Error updating account balance: {e}")
     
     def stop(self):
         """Stop the strategy manager."""
@@ -426,6 +466,16 @@ class StrategyManager:
                 # Update position prices and display PnL
                 self.update_position_prices()
                 self.display_positions_pnl()
+                
+                # Periodically update account balance (every 10 cycles)
+                if hasattr(self, '_balance_update_counter'):
+                    self._balance_update_counter += 1
+                else:
+                    self._balance_update_counter = 0
+                
+                if self._balance_update_counter >= 10:
+                    self._update_account_balance_periodic()
+                    self._balance_update_counter = 0
                 
                 # Wait for next execution cycle
                 time.sleep(self.execution_interval)
@@ -787,20 +837,20 @@ class StrategyManager:
     
     def _check_position_limit(self) -> bool:
         """
-        Check if we've reached the position limit.
+        Check if we've reached the position limit based on capital at risk.
         
         Returns:
             True if position limit reached, False otherwise
         """
-        current_positions = len(self.positions)
+        # Check portfolio allocation to see if we're at the limit
+        allocation = self._check_portfolio_allocation()
+        current_allocation = allocation['allocation_percentage']
         
-        # Calculate max positions based on portfolio percentage
-        # For 33.33% max positions, we should have max 3-4 positions for a $1000 portfolio
-        # Since we're now tracking actual capital at risk, we can be more conservative
-        max_positions = max(2, int(100 / self.max_positions_percentage))  # This gives us ~3 positions for 33.33%
+        # Log the current allocation status
+        self.logger.info(f"Position limit check: {len(self.positions)} positions, {current_allocation:.1f}% of portfolio at risk (max: {self.max_positions_percentage}%)")
         
-        self.logger.info(f"Position limit check: {current_positions}/{max_positions} positions ({self.max_positions_percentage}% of portfolio)")
-        return current_positions >= max_positions
+        # Return True if we're at or exceeding the allocation limit
+        return current_allocation >= self.max_positions_percentage
     
     def _get_position_profitability_score(self, symbol: str, new_signal_strength: float) -> float:
         """

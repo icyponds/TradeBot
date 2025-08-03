@@ -101,15 +101,27 @@ class LeverageManager:
         # Calculate dynamic leverage
         leverage = self.calculate_dynamic_leverage(symbol, strategy_name, signal_strength, market_volatility, current_price)
         
-        # Calculate position size based on risk percentage
-        risk_amount = available_capital * self.risk_percentage
-        position_value = risk_amount * leverage
+        # Calculate maximum capital at risk per trade
+        # Use $50 as the maximum risk per trade (not percentage-based)
+        max_risk_per_trade = self.max_position_size  # $50 max risk per trade
+        
+        # Calculate position value based on maximum risk
+        # With leverage, the position value = risk_amount * leverage
+        position_value = max_risk_per_trade * leverage
+        
+        # Calculate position size in units
         position_size = position_value / current_price
         
-        # Calculate margin required
-        margin_required = position_value / leverage
+        # Calculate margin required (this is the actual capital at risk)
+        margin_required = max_risk_per_trade
         
-        # Ensure position size doesn't exceed maximum
+        # Ensure we don't exceed the $50 max risk per trade
+        if margin_required > self.max_position_size:
+            margin_required = self.max_position_size
+            position_value = margin_required * leverage
+            position_size = position_value / current_price
+        
+        # Ensure we don't exceed maximum position size
         max_position_value = self.max_position_size * leverage
         max_position_size = max_position_value / current_price
         
