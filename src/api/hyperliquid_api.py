@@ -99,8 +99,19 @@ class HyperliquidAPI:
             Asset information dictionary or None if error
         """
         try:
+            # Hyperliquid API uses POST with specific request format
             url = f"{self.base_url}/info"
-            response = requests.get(url, timeout=self.config['api']['timeout'])
+            headers = {
+                'Content-Type': 'application/json',
+                'User-Agent': 'TradeBot/1.0'
+            }
+            
+            # Hyperliquid API expects a specific request format
+            request_data = {
+                "type": "meta"
+            }
+            
+            response = requests.post(url, headers=headers, json=request_data, timeout=self.config['api']['timeout'])
             response.raise_for_status()
             
             data = response.json()
@@ -132,7 +143,17 @@ class HyperliquidAPI:
             
             # Fallback to REST API if WebSocket data not available
             url = f"{self.base_url}/info"
-            response = requests.get(url, timeout=self.config['api']['timeout'])
+            headers = {
+                'Content-Type': 'application/json',
+                'User-Agent': 'TradeBot/1.0'
+            }
+            
+            # Hyperliquid API expects a specific request format
+            request_data = {
+                "type": "meta"
+            }
+            
+            response = requests.post(url, headers=headers, json=request_data, timeout=self.config['api']['timeout'])
             response.raise_for_status()
             
             data = response.json()

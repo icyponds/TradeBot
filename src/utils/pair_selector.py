@@ -87,30 +87,59 @@ class DynamicPairSelector:
         """
         eligible_assets = []
         
-        for asset in universe:
-            asset_name = asset.get('name', '')
+        # Get market data for all assets to check open interest
+        try:
+            meta_and_ctxs = self.market_api.info_client.meta_and_asset_ctxs()
+            if len(meta_and_ctxs) < 2:
+                self.logger.error("Invalid response from meta_and_asset_ctxs")
+                return []
             
-            # Skip if explicitly excluded
-            if asset_name in self.excluded_assets:
-                continue
+            asset_contexts = meta_and_ctxs[1]
             
-            # Skip if included assets are specified and this asset is not in the list
-            if self.included_assets and asset_name not in self.included_assets:
-                continue
-            
-            # Get open interest
-            open_interest = float(asset.get('openInterest', 0))
-            
-            # Check open interest thresholds
-            if open_interest < self.min_open_interest:
-                continue
-            
-            if open_interest > self.max_open_interest:
-                continue
-            
-            # Additional filtering criteria
-            if self._is_asset_eligible(asset):
-                eligible_assets.append(asset)
+            for i, asset in enumerate(universe):
+                asset_name = asset.get('name', '')
+                
+                # Skip if explicitly excluded
+                if asset_name in self.excluded_assets:
+                    continue
+                
+                # Skip if included assets are specified and this asset is not in the list
+                if self.included_assets and asset_name not in self.included_assets:
+                    continue
+                
+                # Get market data for this asset
+                if i < len(asset_contexts):
+                    asset_context = asset_contexts[i]
+                    open_interest = float(asset_context.get('openInterest', 0))
+                    volume_24h = float(asset_context.get('dayNtlVlm', 0))
+                    mark_price = float(asset_context.get('markPx', 0))
+                    
+                    # Check open interest thresholds
+                    if open_interest < self.min_open_interest or open_interest > self.max_open_interest:
+                        continue
+                    
+                    # Check minimum volume
+                    if volume_24h < 100000:  # $100k minimum daily volume
+                        continue
+                    
+                    # Check for valid price
+                    if mark_price <= 0:
+                        continue
+                    
+                    # Add market data to asset info
+                    asset_with_market_data = asset.copy()
+                    asset_with_market_data.update({
+                        'openInterest': open_interest,
+                        'volume24h': volume_24h,
+                        'markPrice': mark_price,
+                        'funding': float(asset_context.get('funding', 0)),
+                    })
+                    
+                    eligible_assets.append(asset_with_market_data)
+        
+        except Exception as e:
+            self.logger.error(f"Error filtering assets: {e}")
+            return []
         
         self.logger.info(f"Found {len(eligible_assets)} eligible assets after filtering")
         return eligible_assets
@@ -165,20 +194,16 @@ class DynamicPairSelector:
         # Create DataFrame for ranking
         df = pd.DataFrame(eligible_assets)
         
-        # Calculate ranking score
+        # Calculate ranking scores using real market data
         df['open_interest_score'] = df['openInterest'].astype(float) / 1000000  # Normalize to millions
         df['volume_score'] = df['volume24h'].astype(float) / 1000000  # Normalize to millions
-        
-        # Calculate volatility (if available)
-        if 'markPrice' in df.columns:
-            df['price'] = df['markPrice'].astype(float)
-            df['price_score'] = df['price'].rank(pct=True)  # Higher price = higher score
+        df['leverage_score'] = df['maxLeverage'].astype(float) / 100  # Normalize leverage
         
         # Calculate composite score
         df['composite_score'] = (
             df['open_interest_score'] * 0.5 +
             df['volume_score'] * 0.3 +
-            df.get('price_score', 0) * 0.2
+            df['leverage_score'] * 0.2
         )
         
         # Sort by composite score
@@ -193,6 +218,7 @@ class DynamicPairSelector:
                 f"Rank {i+1}: {row['name']} - "
                 f"OI: ${float(row['openInterest']):,.0f}, "
                 f"Volume: ${float(row['volume24h']):,.0f}, "
+                f"Leverage: {row['maxLeverage']}x, "
                 f"Score: {row['composite_score']:.3f}"
             )
         

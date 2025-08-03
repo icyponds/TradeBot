@@ -9,7 +9,7 @@ from datetime import datetime
 import pandas as pd
 import math
 
-from ..api.hyperliquid_api import HyperliquidAPI
+from ..api.hyperliquid_sdk_api import HyperliquidSDKAPI as HyperliquidAPI
 from ..utils.pair_selector import DynamicPairSelector
 from ..utils.leverage_manager import LeverageManager
 from .moving_average_strategy import MovingAverageStrategy
@@ -217,8 +217,8 @@ class StrategyManager:
                 for symbol in trading_pairs:
                     self._analyze_symbol(symbol)
                 
-                # Update pair performance
-                self.pair_selector.update_pair_performance(trading_pairs)
+                # Update pair performance (tracking but not updating PnL yet)
+                # self.pair_selector.update_pair_performance(trading_pairs)
                 
                 # Log margin summary
                 margin_summary = self.leverage_manager.get_margin_summary()
