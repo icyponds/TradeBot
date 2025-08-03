@@ -3,7 +3,7 @@ RSI (Relative Strength Index) Strategy.
 """
 
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import pandas as pd
 import numpy as np
 from .base_strategy import BaseStrategy
@@ -12,8 +12,8 @@ from .base_strategy import BaseStrategy
 class RSIStrategy(BaseStrategy):
     """RSI-based trading strategy."""
     
-    def __init__(self, config: Dict[str, Any], market_api):
-        super().__init__(config, market_api)
+    def __init__(self, config: Dict[str, Any]):
+        super().__init__(config)
         
         # Strategy parameters
         self.period = config['strategies']['rsi']['period']
@@ -21,6 +21,64 @@ class RSIStrategy(BaseStrategy):
         self.oversold = config['strategies']['rsi']['oversold']
         
         self.logger.info(f"Initialized RSI Strategy: period={self.period}, overbought={self.overbought}, oversold={self.oversold}")
+    
+    def generate_signal(self, ohlcv: pd.DataFrame) -> Optional[Dict[str, Any]]:
+        """
+        Generate trading signal based on OHLCV data using RSI.
+        
+        Args:
+            ohlcv: OHLCV data DataFrame
+            
+        Returns:
+            Signal dictionary or None if no signal
+        """
+        if ohlcv is None or len(ohlcv) < self.period + 1:
+            return None
+        
+        # Calculate RSI
+        rsi = self.calculate_rsi(ohlcv['close'], self.period)
+        current_price = ohlcv['close'].iloc[-1]
+        
+        # Get previous RSI for divergence detection
+        if len(ohlcv) >= self.period + 2:
+            prev_rsi = self.calculate_rsi(ohlcv['close'].iloc[:-1], self.period)
+        else:
+            prev_rsi = rsi
+        
+        # Determine signal
+        signal = 'hold'
+        reason = ''
+        
+        # Oversold condition (potential buy signal)
+        if rsi < self.oversold and prev_rsi >= self.oversold:
+            signal = 'buy'
+            reason = f'RSI oversold: {rsi:.2f} < {self.oversold} (bounce expected)'
+        
+        # Overbought condition (potential sell signal)
+        elif rsi > self.overbought and prev_rsi <= self.overbought:
+            signal = 'sell'
+            reason = f'RSI overbought: {rsi:.2f} > {self.overbought} (correction expected)'
+        
+        # Strong oversold (extreme buy signal)
+        elif rsi < 20:
+            signal = 'buy'
+            reason = f'RSI extremely oversold: {rsi:.2f} (strong buy signal)'
+        
+        # Strong overbought (extreme sell signal)
+        elif rsi > 80:
+            signal = 'sell'
+            reason = f'RSI extremely overbought: {rsi:.2f} (strong sell signal)'
+        
+        if signal == 'hold':
+            return None
+        
+        return {
+            'signal': signal,
+            'reason': reason,
+            'price': current_price,
+            'rsi': rsi,
+            'strategy': 'rsi',
+        }
     
     def calculate_rsi(self, prices: pd.Series, period: int = 14) -> float:
         """

@@ -29,6 +29,7 @@ def load_config() -> Dict[str, Any]:
         
         # Trading Configuration
         "trading": {
+            "symbols": [],  # Empty list for dynamic pair selection
             "dynamic_pair_selection": os.getenv("DYNAMIC_PAIR_SELECTION", "true").lower() == "true",
             "min_open_interest": float(os.getenv("MIN_OPEN_INTEREST", "1000000")),
             "max_open_interest": float(os.getenv("MAX_OPEN_INTEREST", "100000000")),
@@ -54,11 +55,15 @@ def load_config() -> Dict[str, Any]:
             "enabled": os.getenv("ENABLED_STRATEGIES", "moving_average,rsi").split(","),
             "timeframe": os.getenv("STRATEGY_TIMEFRAME", "1m"),
             "ohlcv_limit": int(os.getenv("OHLCV_LIMIT", "100")),
-            "ma_short_period": int(os.getenv("MA_SHORT_PERIOD", "5")),
-            "ma_long_period": int(os.getenv("MA_LONG_PERIOD", "10")),
-            "rsi_period": int(os.getenv("RSI_PERIOD", "14")),
-            "rsi_overbought": float(os.getenv("RSI_OVERBOUGHT", "70")),
-            "rsi_oversold": float(os.getenv("RSI_OVERSOLD", "30")),
+            "moving_average": {
+                "short_period": int(os.getenv("MA_SHORT_PERIOD", "5")),
+                "long_period": int(os.getenv("MA_LONG_PERIOD", "10")),
+            },
+            "rsi": {
+                "period": int(os.getenv("RSI_PERIOD", "14")),
+                "overbought": float(os.getenv("RSI_OVERBOUGHT", "70")),
+                "oversold": float(os.getenv("RSI_OVERSOLD", "30")),
+            },
         },
         
         # Database Configuration

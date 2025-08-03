@@ -34,7 +34,7 @@ class StrategyManager:
         self.market_api = HyperliquidAPI(config)
         
         # Initialize pair selector
-        self.pair_selector = DynamicPairSelector(config)
+        self.pair_selector = DynamicPairSelector(config, self.market_api)
         
         # Initialize leverage manager
         self.leverage_manager = LeverageManager(config)
