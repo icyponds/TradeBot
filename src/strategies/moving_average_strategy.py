@@ -105,7 +105,7 @@ class MovingAverageStrategy(BaseStrategy):
         short_ma_prev = short_ma.iloc[-2]
         long_ma_prev = long_ma.iloc[-2]
         
-        # Determine signal
+        # Determine signal - ONLY on crossovers
         signal = 'hold'
         reason = ''
         
@@ -118,15 +118,6 @@ class MovingAverageStrategy(BaseStrategy):
         elif (short_ma_prev >= long_ma_prev and short_ma_current < long_ma_current):
             signal = 'sell'
             reason = f'Bearish crossover: Short MA ({short_ma_current:.2f}) < Long MA ({long_ma_current:.2f})'
-        
-        # Strong trend signals
-        elif short_ma_current > long_ma_current and current_price > short_ma_current:
-            signal = 'buy'
-            reason = f'Strong uptrend: Price ({current_price:.2f}) > Short MA ({short_ma_current:.2f}) > Long MA ({long_ma_current:.2f})'
-        
-        elif short_ma_current < long_ma_current and current_price < short_ma_current:
-            signal = 'sell'
-            reason = f'Strong downtrend: Price ({current_price:.2f}) < Short MA ({short_ma_current:.2f}) < Long MA ({long_ma_current:.2f})'
         
         if signal == 'hold':
             return None
@@ -171,7 +162,7 @@ class MovingAverageStrategy(BaseStrategy):
         prev_short_ma = ohlcv['close'].rolling(window=self.short_period).mean().iloc[-2]
         prev_long_ma = ohlcv['close'].rolling(window=self.long_period).mean().iloc[-2]
         
-        # Determine signal
+        # Determine signal - ONLY on crossovers
         signal = 'hold'
         reason = ''
         
@@ -184,15 +175,6 @@ class MovingAverageStrategy(BaseStrategy):
         elif (prev_short_ma >= prev_long_ma and short_ma < long_ma):
             signal = 'sell'
             reason = f'Bearish crossover: Short MA ({short_ma:.2f}) < Long MA ({long_ma:.2f})'
-        
-        # Strong trend signals
-        elif short_ma > long_ma and current_price > short_ma:
-            signal = 'buy'
-            reason = f'Strong uptrend: Price ({current_price:.2f}) > Short MA ({short_ma:.2f}) > Long MA ({long_ma:.2f})'
-        
-        elif short_ma < long_ma and current_price < short_ma:
-            signal = 'sell'
-            reason = f'Strong downtrend: Price ({current_price:.2f}) < Short MA ({short_ma:.2f}) < Long MA ({long_ma:.2f})'
         
         return {
             'signal': signal,

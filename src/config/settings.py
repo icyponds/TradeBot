@@ -39,6 +39,7 @@ def load_config() -> Dict[str, Any]:
             "included_assets": [asset.strip() for asset in os.getenv("INCLUDED_ASSETS", "").split(",") if asset.strip()],
             "base_currency": os.getenv("BASE_CURRENCY", "USDC"),
             "max_position_size": float(os.getenv("MAX_POSITION_SIZE", "50")),
+            "max_positions_percentage": float(os.getenv("MAX_POSITIONS_PERCENTAGE", "33.33")),  # 1/3 of portfolio
             "risk_percentage": float(os.getenv("RISK_PERCENTAGE", "2.0")),
             "stop_loss_percentage": float(os.getenv("STOP_LOSS_PERCENTAGE", "2.0")),
         },

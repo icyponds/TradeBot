@@ -17,6 +17,7 @@ class Trade:
     size: float
     timestamp: datetime
     strategy: str
+    order_id: Optional[str] = None
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
     pnl: Optional[float] = None
@@ -32,6 +33,7 @@ class Trade:
             'size': self.size,
             'timestamp': self.timestamp.isoformat(),
             'strategy': self.strategy,
+            'order_id': self.order_id,
             'stop_loss': self.stop_loss,
             'take_profit': self.take_profit,
             'pnl': self.pnl,
@@ -49,6 +51,7 @@ class Trade:
             size=data['size'],
             timestamp=datetime.fromisoformat(data['timestamp']),
             strategy=data['strategy'],
+            order_id=data.get('order_id'),
             stop_loss=data.get('stop_loss'),
             take_profit=data.get('take_profit'),
             pnl=data.get('pnl'),
