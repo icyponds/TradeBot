@@ -128,4 +128,45 @@ data/
 backtest_results/
 trading_history/
 api_keys.txt
-secrets.json 
+secrets.json
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Data files
+*.csv
+*.json
+*.xlsx
+*.xls
+
+# Additional trading data
+positions/
+orders/
+trades/
+performance/
+reports/
+
+# Configuration files with sensitive data
+config.json
+settings.json
+credentials.json
+
+# Cache and temporary files
+cache/
+temp/
+tmp/
+*.tmp
+
+# Additional log directories
+logs/
+log/
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# macOS specific
+.DS_Store 
