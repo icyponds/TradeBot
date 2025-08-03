@@ -75,12 +75,27 @@ class HyperliquidSDKAPI:
             Asset information dictionary or None if error
         """
         try:
-            # Get meta information using the SDK
-            meta = self.info_client.meta()
+            # Get meta and asset contexts using the SDK
+            meta_and_ctxs = self.info_client.meta_and_asset_ctxs()
             
-            # Convert to our expected format
+            if len(meta_and_ctxs) < 2:
+                self.logger.error("Invalid response from meta_and_asset_ctxs")
+                return None
+            
+            meta = meta_and_ctxs[0]
+            asset_contexts = meta_and_ctxs[1]
+            
+            # Convert to our expected format with actual market data
             universe = []
-            for asset in meta['universe']:
+            for i, asset in enumerate(meta['universe']):
+                # Get corresponding asset context for market data
+                asset_context = asset_contexts[i] if i < len(asset_contexts) else {}
+                
+                # Calculate open interest in dollars (tokens * price)
+                open_interest_tokens = float(asset_context.get('openInterest', 0))
+                mark_price = float(asset_context.get('markPx', 0))
+                open_interest_dollars = open_interest_tokens * mark_price
+                
                 universe.append({
                     'name': asset['name'],
                     'maxLeverage': asset.get('maxLeverage', 0),
@@ -89,9 +104,11 @@ class HyperliquidSDKAPI:
                     'priceDecimals': asset.get('priceDecimals', 0),
                     'isLinear': asset.get('isLinear', True),
                     'oracle': asset.get('oracle', ''),
-                    'openInterest': 0,  # Will be fetched separately
-                    'volume24h': 0,     # Will be fetched separately
-                    'markPrice': 0,     # Will be fetched separately
+                    'openInterest': open_interest_dollars,
+                    'volume24h': float(asset_context.get('dayNtlVlm', 0)),
+                    'markPrice': mark_price,
+                    'bid': float(asset_context.get('impactPxs', [0, 0])[0] if asset_context.get('impactPxs') else 0),
+                    'ask': float(asset_context.get('impactPxs', [0, 0])[1] if asset_context.get('impactPxs') and len(asset_context.get('impactPxs')) > 1 else 0),
                 })
             
             result = {

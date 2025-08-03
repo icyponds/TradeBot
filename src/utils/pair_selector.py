@@ -119,7 +119,10 @@ class DynamicPairSelector:
                 mark_price = float(asset.get('markPrice', 0))
                 
                 # Check open interest thresholds
-                if open_interest < self.min_open_interest or open_interest > self.max_open_interest:
+                if open_interest < self.min_open_interest:
+                    continue
+                # Only check max open interest if it's set (greater than 0)
+                if self.max_open_interest > 0 and open_interest > self.max_open_interest:
                     continue
                 
                 # Check minimum volume
