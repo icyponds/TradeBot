@@ -356,18 +356,25 @@ class HyperliquidSDKAPI:
                 self.logger.warning(f"Order size {rounded_size} too small for {symbol}, skipping order")
                 return None
             
-            # Import order type enum
-            from hyperliquid.utils.signing import OrderType
-            
-            # Place order using correct SDK signature
-            order_response = self.exchange_client.order(
-                name=symbol,
-                is_buy=is_buy,
-                sz=rounded_size,
-                limit_px=price if price else 0,
-                order_type=OrderType.LIMIT if price else OrderType.MARKET,
-                reduce_only=False
-            )
+            # Place order using correct SDK signature based on official examples
+            if price:
+                # Limit order
+                order_response = self.exchange_client.order(
+                    symbol,
+                    is_buy,
+                    rounded_size,
+                    price,
+                    {"limit": {"tif": "Gtc"}}
+                )
+            else:
+                # Market order
+                order_response = self.exchange_client.order(
+                    symbol,
+                    is_buy,
+                    rounded_size,
+                    0,  # Market orders use 0 price
+                    {"market": {}}
+                )
             
             return {
                 "status": "success",
