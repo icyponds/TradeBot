@@ -33,7 +33,7 @@ def load_config() -> Dict[str, Any]:
             "dynamic_pair_selection": os.getenv("DYNAMIC_PAIR_SELECTION", "true").lower() == "true",
             "min_open_interest": float(os.getenv("MIN_OPEN_INTEREST", "1000000")),
             "max_open_interest": float(os.getenv("MAX_OPEN_INTEREST", "100000000")),
-            "max_pairs_to_trade": int(os.getenv("MAX_PAIRS_TO_TRADE", "10")),
+
             "scan_interval_minutes": int(os.getenv("SCAN_INTERVAL_MINUTES", "60")),
             "excluded_assets": [asset.strip() for asset in os.getenv("EXCLUDED_ASSETS", "").split(",") if asset.strip()],
             "included_assets": [asset.strip() for asset in os.getenv("INCLUDED_ASSETS", "").split(",") if asset.strip()],

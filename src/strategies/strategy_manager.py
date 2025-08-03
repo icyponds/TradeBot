@@ -62,12 +62,18 @@ class StrategyManager:
         self.max_position_size = config['trading']['max_position_size']
         self.base_currency = config['trading']['base_currency']
         
+        # Trading pairs management
+        self.max_pairs_to_trade = 20  # Default value, can be updated dynamically
+        
         # Calculate execution interval based on timeframe
         self.execution_interval = self._get_execution_interval()
         
         self.logger.info(f"Initialized strategy manager with {len(self.strategies)} strategies")
         self.logger.info(f"Timeframe: {self.timeframe}, Execution interval: {self.execution_interval}s")
         self.logger.info("Dynamic leverage management enabled")
+        
+        # Set strategy manager reference in pair selector
+        self.pair_selector.strategy_manager = self
     
     def _get_execution_interval(self) -> int:
         """Calculate execution interval based on timeframe."""
@@ -473,4 +479,39 @@ class StrategyManager:
     def force_pair_rescan(self):
         """Force a rescan of trading pairs."""
         self.pair_selector.force_rescan()
-        self.logger.info("Forced pair rescan") 
+        self.logger.info("Forced pair rescan")
+    
+    def set_max_pairs_to_trade(self, max_pairs: int):
+        """
+        Set the maximum number of trading pairs.
+        
+        Args:
+            max_pairs: Maximum number of pairs to trade
+        """
+        if max_pairs <= 0:
+            self.logger.error("Max pairs must be greater than 0")
+            return
+        
+        self.max_pairs_to_trade = max_pairs
+        self.logger.info(f"Updated max pairs to trade: {max_pairs}")
+        
+        # Force a rescan to apply the new limit
+        self.force_pair_rescan()
+    
+    def get_max_pairs_to_trade(self) -> int:
+        """
+        Get the current maximum number of trading pairs.
+        
+        Returns:
+            Current max pairs limit
+        """
+        return self.max_pairs_to_trade
+    
+    def get_current_pair_count(self) -> int:
+        """
+        Get the current number of trading pairs.
+        
+        Returns:
+            Current number of pairs being traded
+        """
+        return len(self.pair_selector.get_current_pairs()) 

@@ -11,23 +11,24 @@ import pandas as pd
 class DynamicPairSelector:
     """Selects trading pairs based on open interest and other criteria."""
     
-    def __init__(self, config: Dict[str, Any], market_api):
+    def __init__(self, config: Dict[str, Any], market_api, strategy_manager=None):
         """
         Initialize the dynamic pair selector.
         
         Args:
             config: Configuration dictionary
             market_api: Market data API instance
+            strategy_manager: Strategy manager instance (optional)
         """
         self.config = config
         self.market_api = market_api
+        self.strategy_manager = strategy_manager
         self.logger = logging.getLogger(__name__)
         
         # Trading configuration
         self.dynamic_selection = config['trading']['dynamic_pair_selection']
         self.min_open_interest = config['trading']['min_open_interest']
         self.max_open_interest = config['trading']['max_open_interest']
-        self.max_pairs_to_trade = config['trading']['max_pairs_to_trade']
         self.scan_interval_minutes = config['trading']['scan_interval_minutes']
         self.excluded_assets = config['trading']['excluded_assets']
         self.included_assets = config['trading']['included_assets']
@@ -38,6 +39,19 @@ class DynamicPairSelector:
         self.pair_history = {}  # Track pair performance
         
         self.logger.info(f"Initialized DynamicPairSelector with OI range: ${self.min_open_interest:,} - ${self.max_open_interest:,}")
+    
+    def _get_max_pairs_to_trade(self) -> int:
+        """
+        Get the maximum number of pairs to trade.
+        
+        Returns:
+            Maximum number of pairs to trade
+        """
+        if self.strategy_manager:
+            return self.strategy_manager.get_max_pairs_to_trade()
+        else:
+            # Fallback to config if strategy manager is not available
+            return self.config['trading'].get('max_pairs_to_trade', 20)
     
     def scan_and_select_pairs(self) -> List[str]:
         """
@@ -210,10 +224,11 @@ class DynamicPairSelector:
         df_sorted = df.sort_values('composite_score', ascending=False)
         
         # Select top pairs
-        selected_pairs = df_sorted.head(self.max_pairs_to_trade)['name'].tolist()
+        max_pairs = self._get_max_pairs_to_trade()
+        selected_pairs = df_sorted.head(max_pairs)['name'].tolist()
         
         # Log selection details
-        for i, (_, row) in enumerate(df_sorted.head(self.max_pairs_to_trade).iterrows()):
+        for i, (_, row) in enumerate(df_sorted.head(max_pairs).iterrows()):
             self.logger.info(
                 f"Rank {i+1}: {row['name']} - "
                 f"OI: ${float(row['openInterest']):,.0f}, "
