@@ -15,6 +15,7 @@ import pandas as pd
 from datetime import datetime
 import asyncio
 import aiohttp
+from .websocket_collector import WebSocketDataCollector
 
 
 class HyperliquidAPI:
@@ -47,7 +48,20 @@ class HyperliquidAPI:
         # Market data cache
         self.market_data = {}
         
+        # Initialize WebSocket data collector
+        self.data_collector = WebSocketDataCollector(config)
+        
         self.logger.info(f"Initialized Hyperliquid API for symbols: {self.symbols}")
+    
+    def start_data_collection(self):
+        """Start WebSocket data collection."""
+        self.data_collector.start()
+        self.logger.info("Started WebSocket data collection")
+    
+    def stop_data_collection(self):
+        """Stop WebSocket data collection."""
+        self.data_collector.stop()
+        self.logger.info("Stopped WebSocket data collection")
     
     def _get_signature(self, data: str) -> str:
         """
@@ -97,17 +111,26 @@ class HyperliquidAPI:
             self.logger.error(f"Error fetching asset info: {e}")
             return None
     
-    def get_market_data(self, symbol: str) -> Optional[Dict[str, Any]]:
+    def get_market_data(self, symbol: str, timeframe: str = None) -> Optional[Dict[str, Any]]:
         """
         Get market data for a specific symbol.
         
         Args:
             symbol: Trading symbol (e.g., 'BTC')
+            timeframe: Timeframe (not used, kept for compatibility)
             
         Returns:
             Market data dictionary or None if error
         """
         try:
+            # First try to get data from WebSocket collector
+            if self.data_collector.is_data_available(symbol):
+                market_data = self.data_collector.get_market_data(symbol)
+                if market_data:
+                    self.market_data[symbol] = market_data
+                    return market_data
+            
+            # Fallback to REST API if WebSocket data not available
             url = f"{self.base_url}/info"
             response = requests.get(url, timeout=self.config['api']['timeout'])
             response.raise_for_status()
@@ -136,6 +159,7 @@ class HyperliquidAPI:
                 'open_interest': float(asset_info.get('openInterest', 0)),
                 'funding_rate': float(asset_info.get('fundingRate', 0)),
                 'timestamp': datetime.now(),
+                'ohlcv': None,  # No historical data from REST API
             }
             
             self.market_data[symbol] = market_data
@@ -155,6 +179,12 @@ class HyperliquidAPI:
         Returns:
             Current price or None if error
         """
+        # Try WebSocket data first
+        price = self.data_collector.get_current_price(symbol)
+        if price:
+            return price
+        
+        # Fallback to REST API
         market_data = self.get_market_data(symbol)
         if market_data:
             return market_data['current_price']
@@ -163,8 +193,6 @@ class HyperliquidAPI:
     def get_ohlcv(self, symbol: str, timeframe: str = '1h', limit: int = 100) -> Optional[pd.DataFrame]:
         """
         Get OHLCV data for a symbol.
-        Note: Hyperliquid doesn't provide traditional OHLCV data via REST API.
-        This would need to be implemented via WebSocket or historical data endpoints.
         
         Args:
             symbol: Trading symbol
@@ -175,8 +203,12 @@ class HyperliquidAPI:
             DataFrame with OHLCV data or None if error
         """
         try:
-            # For now, create a simple OHLCV from current market data
-            # In a real implementation, you'd need to connect to WebSocket for historical data
+            # Get OHLCV from WebSocket collector
+            ohlcv = self.data_collector.get_ohlcv(symbol)
+            if ohlcv is not None and len(ohlcv) > 0:
+                return ohlcv
+            
+            # Fallback: create simple OHLCV from current market data
             market_data = self.get_market_data(symbol)
             if not market_data:
                 return None
@@ -184,14 +216,14 @@ class HyperliquidAPI:
             current_price = market_data['current_price']
             current_time = datetime.now()
             
-            # Create a simple OHLCV entry (this is a placeholder)
+            # Create a simple OHLCV entry (fallback)
             ohlcv_data = {
                 'timestamp': [current_time],
                 'open': [current_price],
                 'high': [current_price],
                 'low': [current_price],
                 'close': [current_price],
-                'volume': [market_data.get('volume_24h', 0) / 24],  # Approximate hourly volume
+                'volume': [market_data.get('volume_24h', 0) / 24],
             }
             
             df = pd.DataFrame(ohlcv_data)
@@ -357,65 +389,39 @@ class HyperliquidAPI:
     
     def start_websocket(self):
         """Start WebSocket connection for real-time data."""
-        try:
-            self.ws = websocket.WebSocketApp(
-                self.ws_url,
-                on_open=self._on_ws_open,
-                on_message=self._on_ws_message,
-                on_error=self._on_ws_error,
-                on_close=self._on_ws_close
-            )
-            
-            # Start WebSocket in a separate thread
-            ws_thread = threading.Thread(target=self.ws.run_forever)
-            ws_thread.daemon = True
-            ws_thread.start()
-            
-        except Exception as e:
-            self.logger.error(f"Error starting WebSocket: {e}")
+        # Start the data collector instead
+        self.start_data_collection()
     
-    def _on_ws_open(self, ws):
-        """WebSocket open callback."""
-        self.logger.info("WebSocket connected")
-        self.ws_connected = True
+    def get_data_summary(self) -> Dict[str, Any]:
+        """
+        Get summary of collected data.
         
-        # Subscribe to market data
-        for symbol in self.symbols:
-            subscribe_msg = {
-                "type": "subscribe",
-                "channel": "market",
-                "symbol": symbol
-            }
-            ws.send(json.dumps(subscribe_msg))
+        Returns:
+            Data summary dictionary
+        """
+        return self.data_collector.get_data_summary()
     
-    def _on_ws_message(self, ws, message):
-        """WebSocket message callback."""
-        try:
-            data = json.loads(message)
-            self.logger.debug(f"WebSocket message: {data}")
+    def wait_for_data(self, symbol: str, timeout: int = 60) -> bool:
+        """
+        Wait for data to become available for a symbol.
+        
+        Args:
+            symbol: Trading symbol
+            timeout: Timeout in seconds
             
-            # Handle different message types
-            if data.get('type') == 'market':
-                self._handle_market_data(data)
-                
-        except Exception as e:
-            self.logger.error(f"Error handling WebSocket message: {e}")
+        Returns:
+            True if data became available, False if timeout
+        """
+        return self.data_collector.wait_for_data(symbol, timeout)
     
-    def _on_ws_error(self, ws, error):
-        """WebSocket error callback."""
-        self.logger.error(f"WebSocket error: {error}")
-    
-    def _on_ws_close(self, ws, close_status_code, close_msg):
-        """WebSocket close callback."""
-        self.logger.info("WebSocket disconnected")
-        self.ws_connected = False
-    
-    def _handle_market_data(self, data):
-        """Handle market data from WebSocket."""
-        symbol = data.get('symbol')
-        if symbol and symbol in self.symbols:
-            self.market_data[symbol] = {
-                'symbol': symbol,
-                'current_price': float(data.get('price', 0)),
-                'timestamp': datetime.now(),
-            } 
+    def is_data_available(self, symbol: str) -> bool:
+        """
+        Check if sufficient data is available for a symbol.
+        
+        Args:
+            symbol: Trading symbol
+            
+        Returns:
+            True if sufficient data is available
+        """
+        return self.data_collector.is_data_available(symbol) 

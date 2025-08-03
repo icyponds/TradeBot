@@ -1,306 +1,277 @@
-# Trading Bot Setup Guide for Hyperliquid
+# Trading Bot Setup Guide
+
+## Overview
+
+This trading bot is designed for Hyperliquid perpetual futures trading with real-time data collection via WebSocket connections. The bot uses dynamic pair selection based on market conditions and implements multiple trading strategies optimized for scalping timeframes.
+
+## Features
+
+- **Real-time Data Collection**: WebSocket-based data collection for live market data
+- **Dynamic Pair Selection**: Automatically selects trading pairs based on open interest and liquidity
+- **Multiple Strategies**: Moving Average Crossover and RSI strategies
+- **Scalping Optimized**: Configured for 1-minute timeframes with rapid execution
+- **Risk Management**: Position sizing and stop-loss/take-profit mechanisms
+- **Performance Tracking**: Comprehensive trade and performance analytics
 
 ## Prerequisites
 
 - Python 3.8 or higher
-- pip (Python package installer)
-- Git
-- Hyperliquid wallet with private key
+- Hyperliquid account with API access
+- Private key and wallet address for authentication
 
 ## Installation
 
-1. **Clone the repository**
+1. **Clone the repository**:
    ```bash
    git clone <repository-url>
    cd TradeBot
    ```
 
-2. **Create a virtual environment**
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
-
-3. **Install dependencies**
+2. **Install dependencies**:
    ```bash
    pip install -r requirements.txt
    ```
 
-4. **Configure environment variables**
+3. **Set up environment variables**:
    ```bash
    cp env.example .env
-   # Edit .env with your Hyperliquid credentials and settings
    ```
 
-## Configuration
-
-### Hyperliquid Setup
-
-1. **Get Hyperliquid credentials**
-   - Create a Hyperliquid account at https://hyperliquid.xyz
-   - Export your wallet private key
-   - Note your wallet address
-
-2. **Update .env file**
+4. **Configure your `.env` file**:
    ```bash
+   # Hyperliquid API Configuration
+   HYPERLIQUID_API_URL=https://api.hyperliquid.xyz
+   HYPERLIQUID_WS_URL=wss://api.hyperliquid.xyz/ws
    HYPERLIQUID_PRIVATE_KEY=your_private_key_here
    HYPERLIQUID_WALLET_ADDRESS=your_wallet_address_here
+   
+   # Trading Configuration
+   BASE_CURRENCY=USDC
+   MAX_POSITION_SIZE=50
+   
+   # Strategy Configuration
+   STRATEGY_TIMEFRAME=1m
+   MA_SHORT_PERIOD=5
+   MA_LONG_PERIOD=10
+   RSI_PERIOD=14
+   RSI_OVERBOUGHT=70
+   RSI_OVERSOLD=30
+   
+   # Dynamic Pair Selection
+   DYNAMIC_PAIR_SELECTION=true
+   MIN_OPEN_INTEREST=1000000
+   MAX_OPEN_INTEREST=100000000
+   MAX_PAIRS_TO_TRADE=5
+   SCAN_INTERVAL_MINUTES=5
+   
+   # Asset Filtering (leave empty for no restrictions)
+   EXCLUDED_ASSETS=
+   INCLUDED_ASSETS=
+   
+   # Risk Management
+   STOP_LOSS_PERCENTAGE=5
+   TAKE_PROFIT_PERCENTAGE=10
+   
+   # Logging
+   LOG_LEVEL=INFO
    ```
 
-### Dynamic Trading Pair Selection
+## Hyperliquid Integration
 
-The bot now automatically selects trading pairs based on open interest and other criteria:
+### Authentication Setup
 
-#### **Open Interest Thresholds**
-- `MIN_OPEN_INTEREST`: Minimum open interest in USD (default: $1,000,000)
-- `MAX_OPEN_INTEREST`: Maximum open interest in USD (default: $100,000,000)
-- `MAX_PAIRS_TO_TRADE`: Maximum number of pairs to trade simultaneously (default: 10)
+1. **Generate Private Key**: Create a private key for your wallet
+2. **Get Wallet Address**: Your Hyperliquid wallet address
+3. **Configure API**: Add credentials to `.env` file
 
-#### **Scanning Configuration**
-- `DYNAMIC_PAIR_SELECTION`: Enable/disable dynamic selection (default: true)
-- `SCAN_INTERVAL_MINUTES`: How often to rescan for new pairs (default: 60 minutes)
+### WebSocket Data Collection
 
-#### **Asset Filtering**
-- `EXCLUDED_ASSETS`: Comma-separated list of assets to exclude (e.g., SHIB,DOGE)
-- `INCLUDED_ASSETS`: Comma-separated list of assets to include (optional, if empty all assets are considered)
+The bot uses WebSocket connections to collect real-time market data:
 
-#### **Example Configurations**
+- **Real-time Price Updates**: Live price feeds for all trading pairs
+- **OHLCV Candle Building**: Automatic construction of 1-minute candles
+- **Data Buffering**: Maintains rolling window of historical data
+- **Automatic Reconnection**: Handles connection drops gracefully
 
-**Conservative (High liquidity only):**
-```bash
-MIN_OPEN_INTEREST=5000000
-MAX_OPEN_INTEREST=50000000
-MAX_PAIRS_TO_TRADE=5
-```
+### Supported Assets
 
-**Aggressive (More opportunities):**
-```bash
-MIN_OPEN_INTEREST=500000
-MAX_OPEN_INTEREST=200000000
-MAX_PAIRS_TO_TRADE=15
-```
+The bot dynamically discovers and trades available assets based on:
 
-**Crypto-only:**
-```bash
-INCLUDED_ASSETS=BTC,ETH,SOL,MATIC,ADA,DOT,LINK,UNI,AAVE,COMP
-EXCLUDED_ASSETS=SPY,QQQ,GLD,SLV
-```
+- **Open Interest**: Minimum and maximum thresholds
+- **Volume**: 24-hour trading volume
+- **Liquidity**: Bid-ask spread analysis
+- **Market Conditions**: Real-time market data
 
-### Scalping Configuration
+## Dynamic Trading Pair Selection
 
-The bot is configured for **scalping** with the following optimized settings:
+The bot automatically selects trading pairs based on market conditions:
 
-#### **Timeframe Settings**
-- `STRATEGY_TIMEFRAME=1m`: 1-minute charts for rapid signal generation
-- `OHLCV_LIMIT=100`: Fetch 100 candles for analysis
+### Configuration Parameters
 
-#### **Strategy Parameters**
-- `MA_SHORT_PERIOD=5`: 5-period moving average (very short-term)
-- `MA_LONG_PERIOD=10`: 10-period moving average (short-term)
-- `RSI_PERIOD=14`: Standard 14-period RSI
+- `DYNAMIC_PAIR_SELECTION`: Enable/disable dynamic selection
+- `MIN_OPEN_INTEREST`: Minimum open interest threshold
+- `MAX_OPEN_INTEREST`: Maximum open interest threshold
+- `MAX_PAIRS_TO_TRADE`: Maximum number of pairs to trade simultaneously
+- `SCAN_INTERVAL_MINUTES`: How often to rescan for new pairs
 
-#### **Execution Frequency**
-- **1m timeframe**: Executes every 30 seconds
-- **5m timeframe**: Executes every 60 seconds
-- **15m timeframe**: Executes every 2 minutes
-- **30m timeframe**: Executes every 5 minutes
+### Selection Criteria
 
-#### **Position Sizing**
-- `MAX_POSITION_SIZE=50`: Maximum 50 USDC per position
-- `RISK_PERCENTAGE=2.0`: 2% risk per trade
-- `STOP_LOSS_PERCENTAGE=5.0`: 5% stop loss
-- `TAKE_PROFIT_PERCENTAGE=10.0`: 10% take profit
+1. **Open Interest**: Pairs with sufficient liquidity
+2. **Volume**: Active trading volume
+3. **Spread**: Tight bid-ask spreads
+4. **Performance**: Historical performance tracking
 
-### Trading Configuration
+### Asset Filtering
 
-Edit the following variables in your `.env` file:
+- `EXCLUDED_ASSETS`: Comma-separated list of assets to exclude
+- `INCLUDED_ASSETS`: Comma-separated list of assets to include only
 
-- `MAX_POSITION_SIZE`: Maximum position size in USDC (default: 50)
-- `RISK_PERCENTAGE`: Risk per trade as percentage
-- `STOP_LOSS_PERCENTAGE`: Stop loss percentage
-- `TAKE_PROFIT_PERCENTAGE`: Take profit percentage
+## Scalping Configuration
 
-### Strategy Configuration
+The bot is optimized for scalping with the following settings:
 
-Enable/disable strategies and configure parameters:
+### Timeframe Settings
+- **Strategy Timeframe**: 1-minute candles
+- **Execution Interval**: 30 seconds between analysis cycles
+- **Data Collection**: Real-time WebSocket feeds
 
-- `ENABLED_STRATEGIES`: Comma-separated list of strategies to use
-- `MA_SHORT_PERIOD`: Short moving average period
-- `MA_LONG_PERIOD`: Long moving average period
-- `RSI_PERIOD`: RSI calculation period
-- `RSI_OVERBOUGHT`: RSI overbought threshold
-- `RSI_OVERSOLD`: RSI oversold threshold
+### Strategy Parameters
+- **Moving Average**: 5-period short, 10-period long
+- **RSI**: 14-period with 70/30 thresholds
+- **Position Size**: Maximum 50 USDC per trade
+
+### Risk Management
+- **Stop Loss**: 5% of position value
+- **Take Profit**: 10% of position value
+- **Position Limits**: Maximum 50 USDC per position
 
 ## Usage
 
 ### Running the Bot
 
+1. **Start the bot**:
+   ```bash
+   python src/main.py
+   ```
+
+2. **Test WebSocket data collection**:
+   ```bash
+   python test_websocket.py
+   ```
+
+3. **Monitor logs**:
+   ```bash
+   tail -f logs/trading_bot.log
+   ```
+
+### Monitoring
+
+The bot provides comprehensive monitoring:
+
+- **Real-time Data**: WebSocket connection status
+- **Trade Execution**: Buy/sell signals and executions
+- **Performance Metrics**: P&L, win rate, total trades
+- **Pair Performance**: Individual asset performance tracking
+
+### Stopping the Bot
+
+Use `Ctrl+C` to gracefully stop the bot. The bot will:
+
+- Close all open positions
+- Stop WebSocket connections
+- Save performance data
+- Log shutdown information
+
+## Testing
+
+### WebSocket Data Test
+
+Test the WebSocket data collection:
+
 ```bash
-python src/main.py
+python test_websocket.py
 ```
 
-### Testing
+This will:
+- Connect to Hyperliquid WebSocket
+- Collect real-time data for 30 seconds
+- Verify OHLCV data availability
+- Test current price retrieval
+
+### Strategy Testing
+
+Test individual strategies:
 
 ```bash
-pytest tests/
+python -m pytest tests/test_strategies.py
 ```
-
-### Code Formatting
-
-```bash
-black src/
-flake8 src/
-```
-
-## Dynamic Pair Selection Features
-
-### **Automatic Asset Discovery**
-- Scans all available assets on Hyperliquid
-- Ranks assets by open interest, volume, and price
-- Automatically adapts to new assets added by Hyperliquid
-
-### **Smart Filtering**
-- **Liquidity Filter**: Only trades assets with sufficient open interest
-- **Volume Filter**: Minimum daily volume requirements
-- **Spread Filter**: Avoids assets with excessive bid-ask spreads
-- **Price Filter**: Ensures valid pricing data
-
-### **Performance Tracking**
-- Tracks PnL for each trading pair
-- Uses performance data to optimize future selections
-- Logs detailed selection criteria and rankings
-
-### **Flexible Configuration**
-- Adjustable open interest thresholds
-- Configurable scan intervals
-- Asset inclusion/exclusion lists
-- Maximum pair limits
-
-## Scalping Strategy Features
-
-### **Rapid Signal Generation**
-- **1-minute timeframe**: Captures short-term price movements
-- **Frequent execution**: Every 30 seconds for 1m timeframe
-- **Quick entries/exits**: Designed for fast profit taking
-
-### **Risk Management for Scalping**
-- **Small position sizes**: 50 USDC maximum per trade
-- **Tight stop losses**: 5% to minimize losses
-- **Quick take profits**: 10% for rapid profit capture
-- **Multiple opportunities**: Trades up to 10 pairs simultaneously
-
-### **Technical Analysis for Scalping**
-- **Short MA periods**: 5/10 for rapid crossover signals
-- **RSI oversold/overbought**: Quick reversal opportunities
-- **Volume confirmation**: Ensures liquidity for quick exits
-
-## Hyperliquid Features
-
-### Perpetual Futures Trading
-
-- Trade with leverage on various assets
-- Long and short positions
-- Real-time price updates via WebSocket
-- Funding rate considerations
-
-### Available Assets
-
-The bot supports all assets available on Hyperliquid, including:
-- Cryptocurrencies: BTC, ETH, SOL, MATIC, etc.
-- Traditional assets: SPY, QQQ, etc.
-- Commodities: GOLD, SILVER, etc.
-
-### WebSocket Integration
-
-- Real-time market data streaming
-- Live price updates
-- Order book updates
-- Position updates
-
-## Strategies
-
-### Moving Average Crossover
-
-- Uses two moving averages (short and long period)
-- Generates buy signals when short MA crosses above long MA
-- Generates sell signals when short MA crosses below long MA
-- Suitable for trending markets
-
-### RSI (Relative Strength Index)
-
-- Uses RSI oscillator to identify overbought/oversold conditions
-- Generates buy signals when RSI is oversold
-- Generates sell signals when RSI is overbought
-- Suitable for ranging markets
-
-## Risk Management
-
-The bot includes several risk management features:
-
-- **Position Sizing**: Calculates position size based on risk percentage
-- **Stop Loss**: Automatic stop loss orders
-- **Take Profit**: Automatic take profit orders
-- **Maximum Position Size**: Limits total position exposure
-- **Leverage Management**: Configurable leverage limits
-- **Dynamic Pair Selection**: Focuses on liquid assets only
-
-## Monitoring
-
-The bot logs all activities to:
-- Console output
-- Log files in `logs/` directory
-
-Key metrics tracked:
-- Trade execution
-- PnL calculations
-- Strategy performance
-- Error handling
-- WebSocket connection status
-- **Pair selection criteria and rankings**
-- **Performance by trading pair**
-
-## Safety Notes
-
-⚠️ **Important**: This trading bot is for educational purposes. Perpetual futures trading involves significant risk:
-
-- **Leverage Risk**: Leverage can amplify both gains and losses
-- **Liquidation Risk**: Positions can be liquidated if margin requirements aren't met
-- **Funding Rate Risk**: Perpetual futures have funding rates that affect PnL
-- **Dynamic Selection Risk**: New pairs may have different risk profiles
-- **Scalping Risk**: Rapid trading increases transaction costs and slippage
-- **Never invest more than you can afford to lose**
-- **Test thoroughly with small amounts first**
-- **Monitor the bot regularly**
-- **Understand the strategies before using real money**
-- **Consider paper trading first**
 
 ## Troubleshooting
 
 ### Common Issues
 
-1. **API Connection Failed**
-   - Check your wallet credentials
-   - Verify wallet has sufficient balance
-   - Check internet connection
-
-2. **WebSocket Connection Issues**
+1. **WebSocket Connection Failed**:
+   - Check network connectivity
    - Verify WebSocket URL in configuration
    - Check firewall settings
-   - Monitor connection logs
 
-3. **No Trading Pairs Selected**
-   - Check open interest thresholds
-   - Verify asset inclusion/exclusion lists
-   - Check minimum volume requirements
+2. **No Data Available**:
+   - Wait for initial data collection (10-30 seconds)
+   - Check symbol availability
+   - Verify API credentials
 
-4. **Strategy Errors**
-   - Verify strategy parameters
-   - Check log files for details
+3. **Authentication Errors**:
+   - Verify private key format
+   - Check wallet address
+   - Ensure API permissions
 
-### Getting Help
+### Log Analysis
 
-- Check the logs in `logs/` directory
-- Review the configuration in `.env`
-- Test individual components
-- Consult the Hyperliquid documentation
-- Join Hyperliquid community channels 
+Check logs for detailed information:
+
+```bash
+grep "ERROR" logs/trading_bot.log
+grep "WebSocket" logs/trading_bot.log
+grep "Signal" logs/trading_bot.log
+```
+
+## Performance Optimization
+
+### For Scalping
+
+- **Execution Speed**: 30-second intervals for rapid signals
+- **Data Quality**: Real-time WebSocket feeds
+- **Memory Usage**: Rolling data buffers
+- **CPU Usage**: Efficient OHLCV calculations
+
+### Monitoring Performance
+
+- **Data Collection**: WebSocket connection status
+- **Signal Generation**: Strategy execution frequency
+- **Trade Execution**: Order placement success rate
+- **Risk Management**: Stop-loss and take-profit effectiveness
+
+## Security Considerations
+
+- **Private Keys**: Store securely, never commit to version control
+- **API Permissions**: Use minimal required permissions
+- **Network Security**: Use secure connections
+- **Position Limits**: Set appropriate position size limits
+
+## Disclaimer
+
+This trading bot is for educational and research purposes. Trading involves substantial risk of loss. Always:
+
+- Test thoroughly with small amounts
+- Monitor performance continuously
+- Understand the strategies being used
+- Never risk more than you can afford to lose
+
+## Support
+
+For issues and questions:
+
+1. Check the logs for error messages
+2. Review the configuration settings
+3. Test WebSocket connectivity
+4. Verify API credentials and permissions 

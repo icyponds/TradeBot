@@ -1,303 +1,322 @@
 """
-Strategy Manager for coordinating multiple trading strategies.
+Strategy manager for orchestrating trading strategies.
 """
 
 import logging
 import time
-from typing import Dict, Any, List
+from typing import Dict, List, Any, Optional
 from datetime import datetime
+import pandas as pd
 
+from ..api.hyperliquid_api import HyperliquidAPI
+from ..utils.pair_selector import DynamicPairSelector
 from .moving_average_strategy import MovingAverageStrategy
 from .rsi_strategy import RSIStrategy
-from ..utils.pair_selector import DynamicPairSelector
+from ..models.trade import Trade, Position
 
 
 class StrategyManager:
-    """Manages multiple trading strategies and coordinates their execution."""
+    """Manages and orchestrates trading strategies."""
     
-    def __init__(self, config: Dict[str, Any], market_api):
+    def __init__(self, config: Dict[str, Any]):
         """
         Initialize the strategy manager.
         
         Args:
             config: Configuration dictionary
-            market_api: Market data API instance
         """
         self.config = config
-        self.market_api = market_api
         self.logger = logging.getLogger(__name__)
         
-        # Initialize dynamic pair selector
-        self.pair_selector = DynamicPairSelector(config, market_api)
+        # Initialize API client
+        self.market_api = HyperliquidAPI(config)
+        
+        # Initialize pair selector
+        self.pair_selector = DynamicPairSelector(config)
         
         # Initialize strategies
-        self.strategies = {}
-        self.enabled_strategies = config['strategies']['enabled']
-        
-        # Get timeframe configuration
-        self.timeframe = config['strategies']['timeframe']
-        self.ohlcv_limit = config['strategies']['ohlcv_limit']
-        
-        # Set execution frequency based on timeframe
-        self.execution_interval = self._get_execution_interval()
-        
-        self._initialize_strategies()
+        self.strategies = {
+            'moving_average': MovingAverageStrategy(config),
+            'rsi': RSIStrategy(config),
+        }
         
         # Trading state
+        self.positions = {}  # symbol -> Position
+        self.trades = []  # List of completed trades
         self.is_running = False
-        self.positions = {}
-        self.trades = []
         
-        self.logger.info(f"Strategy manager initialized with {self.timeframe} timeframe, executing every {self.execution_interval} seconds")
+        # Performance tracking
+        self.total_pnl = 0.0
+        self.winning_trades = 0
+        self.total_trades = 0
+        
+        # Configuration
+        self.timeframe = config['strategies']['timeframe']
+        self.ohlcv_limit = config['strategies']['ohlcv_limit']
+        self.max_position_size = config['trading']['max_position_size']
+        self.base_currency = config['trading']['base_currency']
+        
+        # Calculate execution interval based on timeframe
+        self.execution_interval = self._get_execution_interval()
+        
+        self.logger.info(f"Initialized strategy manager with {len(self.strategies)} strategies")
+        self.logger.info(f"Timeframe: {self.timeframe}, Execution interval: {self.execution_interval}s")
     
     def _get_execution_interval(self) -> int:
-        """
-        Get execution interval based on timeframe.
-        
-        Returns:
-            Execution interval in seconds
-        """
+        """Calculate execution interval based on timeframe."""
         timeframe_intervals = {
             '1m': 30,    # Execute every 30 seconds for 1m timeframe
-            '5m': 60,    # Execute every 60 seconds for 5m timeframe
-            '15m': 120,  # Execute every 2 minutes for 15m timeframe
-            '30m': 300,  # Execute every 5 minutes for 30m timeframe
-            '1h': 600,   # Execute every 10 minutes for 1h timeframe
-            '4h': 1800,  # Execute every 30 minutes for 4h timeframe
-            '1d': 3600,  # Execute every hour for 1d timeframe
+            '5m': 60,    # Execute every 1 minute for 5m timeframe
+            '15m': 300,  # Execute every 5 minutes for 15m timeframe
+            '30m': 600,  # Execute every 10 minutes for 30m timeframe
+            '1h': 1800,  # Execute every 30 minutes for 1h timeframe
+            '4h': 3600,  # Execute every hour for 4h timeframe
+            '1d': 14400, # Execute every 4 hours for 1d timeframe
         }
-        
         return timeframe_intervals.get(self.timeframe, 60)
     
-    def _initialize_strategies(self):
-        """Initialize all enabled strategies."""
-        strategy_classes = {
-            'moving_average': MovingAverageStrategy,
-            'rsi': RSIStrategy,
-        }
+    def start(self):
+        """Start the strategy manager."""
+        if self.is_running:
+            self.logger.warning("Strategy manager already running")
+            return
         
-        for strategy_name in self.enabled_strategies:
-            if strategy_name in strategy_classes:
-                try:
-                    strategy_class = strategy_classes[strategy_name]
-                    self.strategies[strategy_name] = strategy_class(self.config, self.market_api)
-                    self.logger.info(f"Initialized strategy: {strategy_name}")
-                except Exception as e:
-                    self.logger.error(f"Failed to initialize strategy {strategy_name}: {e}")
-            else:
-                self.logger.warning(f"Unknown strategy: {strategy_name}")
-    
-    def run(self):
-        """Run the strategy manager in a continuous loop."""
-        self.is_running = True
         self.logger.info("Starting strategy manager...")
         
-        # Test API connection
-        if not self.market_api.test_connection():
-            self.logger.error("Failed to connect to market API")
-            return
+        # Start data collection
+        self.market_api.start_data_collection()
         
-        try:
-            while self.is_running:
-                self._execute_trading_cycle()
-                time.sleep(self.execution_interval)  # Dynamic interval based on timeframe
-                
-        except KeyboardInterrupt:
-            self.logger.info("Strategy manager stopped by user")
-        except Exception as e:
-            self.logger.error(f"Error in strategy manager: {e}")
-        finally:
-            self.stop()
-    
-    def _execute_trading_cycle(self):
-        """Execute one trading cycle for all strategies."""
-        self.logger.info("Executing trading cycle...")
+        # Wait for initial data collection
+        self.logger.info("Waiting for initial data collection...")
+        time.sleep(10)  # Give WebSocket time to connect and collect data
         
-        # Get current trading pairs from dynamic selector
-        trading_pairs = self.pair_selector.get_current_pairs()
+        self.is_running = True
         
-        if not trading_pairs:
-            self.logger.warning("No trading pairs selected")
-            return
-        
-        self.logger.info(f"Trading {len(trading_pairs)} pairs: {trading_pairs}")
-        
-        # Get market data for all selected symbols
-        for symbol in trading_pairs:
-            try:
-                # Get market data with configured timeframe
-                market_data = self.market_api.get_market_data(symbol, self.timeframe)
-                if market_data is None:
-                    self.logger.warning(f"Failed to get market data for {symbol}")
-                    continue
-                
-                # Execute each strategy
-                for strategy_name, strategy in self.strategies.items():
-                    if not strategy.is_active:
-                        continue
-                    
-                    self._execute_strategy(strategy_name, strategy, market_data)
-                    
-            except Exception as e:
-                self.logger.error(f"Error processing {symbol}: {e}")
-    
-    def _execute_strategy(self, strategy_name: str, strategy, market_data: Dict[str, Any]):
-        """
-        Execute a single strategy.
-        
-        Args:
-            strategy_name: Name of the strategy
-            strategy: Strategy instance
-            market_data: Market data dictionary
-        """
-        try:
-            # Analyze market data
-            analysis = strategy.analyze(market_data)
-            
-            symbol = market_data['symbol']
-            current_price = market_data['current_price']
-            
-            # Check for buy signal
-            if strategy.should_buy(analysis):
-                self._execute_buy_signal(strategy_name, strategy, symbol, current_price, analysis)
-            
-            # Check for sell signal
-            elif strategy.should_sell(analysis):
-                self._execute_sell_signal(strategy_name, strategy, symbol, current_price, analysis)
-            
-            # Log analysis results
-            self.logger.info(f"{strategy_name} - {symbol}: {analysis.get('reason', 'No signal')}")
-            
-        except Exception as e:
-            self.logger.error(f"Error executing strategy {strategy_name}: {e}")
-    
-    def _execute_buy_signal(self, strategy_name: str, strategy, symbol: str, price: float, analysis: Dict[str, Any]):
-        """Execute a buy signal."""
-        # Check if we already have a position
-        position_key = f"{strategy_name}_{symbol}"
-        
-        if position_key in self.positions:
-            self.logger.info(f"Already have position in {symbol} for {strategy_name}")
-            return
-        
-        # Calculate position size
-        risk_amount = self.config['trading']['max_position_size'] * 0.1  # 10% of max position
-        position_size = strategy.calculate_position_size(price, risk_amount)
-        
-        # Calculate stop loss and take profit
-        stop_loss = strategy.calculate_stop_loss(price, 'buy')
-        take_profit = strategy.calculate_take_profit(price, 'buy')
-        
-        # Record the trade
-        trade = {
-            'strategy': strategy_name,
-            'symbol': symbol,
-            'side': 'buy',
-            'price': price,
-            'size': position_size,
-            'stop_loss': stop_loss,
-            'take_profit': take_profit,
-            'timestamp': datetime.now(),
-            'analysis': analysis,
-        }
-        
-        self.positions[position_key] = trade
-        self.trades.append(trade)
-        
-        # Record in strategy
-        strategy.record_trade(symbol, 'buy', price, position_size, datetime.now())
-        
-        self.logger.info(f"BUY signal executed: {symbol} at {price:.2f} (size: {position_size:.2f})")
-    
-    def _execute_sell_signal(self, strategy_name: str, strategy, symbol: str, price: float, analysis: Dict[str, Any]):
-        """Execute a sell signal."""
-        position_key = f"{strategy_name}_{symbol}"
-        
-        if position_key not in self.positions:
-            self.logger.info(f"No position to sell in {symbol} for {strategy_name}")
-            return
-        
-        # Get the original position
-        position = self.positions[position_key]
-        
-        # Calculate PnL
-        pnl = (price - position['price']) * position['size']
-        pnl_percentage = ((price - position['price']) / position['price']) * 100
-        
-        # Update pair performance tracking
-        self.pair_selector.update_pair_performance(symbol, pnl)
-        
-        # Record the sell trade
-        trade = {
-            'strategy': strategy_name,
-            'symbol': symbol,
-            'side': 'sell',
-            'price': price,
-            'size': position['size'],
-            'pnl': pnl,
-            'pnl_percentage': pnl_percentage,
-            'timestamp': datetime.now(),
-            'analysis': analysis,
-        }
-        
-        self.trades.append(trade)
-        
-        # Record in strategy
-        strategy.record_trade(symbol, 'sell', price, position['size'], datetime.now())
-        
-        # Remove position
-        del self.positions[position_key]
-        
-        self.logger.info(f"SELL signal executed: {symbol} at {price:.2f} (PnL: {pnl:.2f}, {pnl_percentage:.2f}%)")
-    
-    def get_performance_summary(self) -> Dict[str, Any]:
-        """Get performance summary for all strategies."""
-        summary = {
-            'total_trades': len(self.trades),
-            'open_positions': len(self.positions),
-            'strategies': {},
-            'pair_performance': self.pair_selector.get_pair_performance_summary(),
-            'current_pairs': self.pair_selector.get_current_pairs(),
-            'timeframe': self.timeframe,
-            'execution_interval': self.execution_interval,
-        }
-        
-        # Calculate overall PnL
-        total_pnl = 0
-        for trade in self.trades:
-            if trade['side'] == 'sell':
-                total_pnl += trade.get('pnl', 0)
-        
-        summary['total_pnl'] = total_pnl
-        
-        # Get individual strategy performance
-        for strategy_name, strategy in self.strategies.items():
-            metrics = strategy.get_performance_metrics()
-            summary['strategies'][strategy_name] = metrics
-        
-        return summary
+        # Start the main trading loop
+        self._run_trading_loop()
     
     def stop(self):
         """Stop the strategy manager."""
         self.is_running = False
-        
-        # Stop all strategies
-        for strategy in self.strategies.values():
-            strategy.stop()
-        
+        self.market_api.stop_data_collection()
         self.logger.info("Strategy manager stopped")
     
-    def reset(self):
-        """Reset the strategy manager."""
-        self.positions = {}
-        self.trades = []
+    def _run_trading_loop(self):
+        """Main trading loop."""
+        self.logger.info("Starting trading loop...")
         
-        for strategy in self.strategies.values():
-            strategy.reset()
+        while self.is_running:
+            try:
+                # Get current trading pairs
+                trading_pairs = self.pair_selector.get_current_pairs()
+                
+                if not trading_pairs:
+                    self.logger.warning("No trading pairs available")
+                    time.sleep(self.execution_interval)
+                    continue
+                
+                self.logger.info(f"Analyzing {len(trading_pairs)} trading pairs")
+                
+                # Analyze each pair
+                for symbol in trading_pairs:
+                    self._analyze_symbol(symbol)
+                
+                # Update pair performance
+                self.pair_selector.update_pair_performance(trading_pairs)
+                
+                # Wait for next execution
+                time.sleep(self.execution_interval)
+                
+            except KeyboardInterrupt:
+                self.logger.info("Received interrupt signal")
+                break
+            except Exception as e:
+                self.logger.error(f"Error in trading loop: {e}")
+                time.sleep(self.execution_interval)
+    
+    def _analyze_symbol(self, symbol: str):
+        """Analyze a single symbol and execute strategies."""
+        try:
+            # Check if we have sufficient data
+            if not self.market_api.is_data_available(symbol):
+                self.logger.debug(f"Insufficient data for {symbol}, skipping")
+                return
+            
+            # Get market data
+            market_data = self.market_api.get_market_data(symbol, self.timeframe)
+            if not market_data:
+                self.logger.warning(f"Could not get market data for {symbol}")
+                return
+            
+            # Get OHLCV data
+            ohlcv = self.market_api.get_ohlcv(symbol, self.timeframe, self.ohlcv_limit)
+            if ohlcv is None or len(ohlcv) < 20:  # Need at least 20 candles for analysis
+                self.logger.debug(f"Insufficient OHLCV data for {symbol}")
+                return
+            
+            current_price = market_data['current_price']
+            
+            # Run each strategy
+            for strategy_name, strategy in self.strategies.items():
+                self._execute_strategy(symbol, strategy_name, strategy, ohlcv, current_price)
+                
+        except Exception as e:
+            self.logger.error(f"Error analyzing {symbol}: {e}")
+    
+    def _execute_strategy(self, symbol: str, strategy_name: str, strategy, ohlcv: pd.DataFrame, current_price: float):
+        """Execute a single strategy."""
+        try:
+            # Generate signal
+            signal = strategy.generate_signal(ohlcv)
+            
+            if not signal:
+                return
+            
+            self.logger.info(f"{strategy_name} signal for {symbol}: {signal['action']} at {current_price}")
+            
+            # Check if we should act on the signal
+            if self._should_execute_signal(symbol, signal, current_price):
+                self._execute_trade(symbol, signal, current_price, strategy_name)
+                
+        except Exception as e:
+            self.logger.error(f"Error executing {strategy_name} strategy for {symbol}: {e}")
+    
+    def _should_execute_signal(self, symbol: str, signal: Dict[str, Any], current_price: float) -> bool:
+        """Determine if we should execute a trading signal."""
+        # Check if we already have a position
+        if symbol in self.positions:
+            position = self.positions[symbol]
+            
+            # If we have a position, only act on opposite signals
+            if position.side == 'long' and signal['action'] == 'buy':
+                return False
+            elif position.side == 'short' and signal['action'] == 'sell':
+                return False
         
-        self.logger.info("Strategy manager reset")
+        # Check position size limits
+        position_value = current_price * signal.get('size', 1.0)
+        if position_value > self.max_position_size:
+            self.logger.warning(f"Position size {position_value} exceeds limit {self.max_position_size}")
+            return False
+        
+        return True
+    
+    def _execute_trade(self, symbol: str, signal: Dict[str, Any], current_price: float, strategy_name: str):
+        """Execute a trade based on signal."""
+        try:
+            # Determine trade side
+            if signal['action'] == 'buy':
+                side = 'buy'
+                position_side = 'long'
+            elif signal['action'] == 'sell':
+                side = 'sell'
+                position_side = 'short'
+            else:
+                return
+            
+            # Calculate position size
+            size = signal.get('size', 1.0)
+            position_value = current_price * size
+            
+            # Place order
+            order_result = self.market_api.place_order(symbol, side, size, current_price)
+            
+            if order_result and order_result.get('status') == 'success':
+                # Create trade record
+                trade = Trade(
+                    symbol=symbol,
+                    side=side,
+                    size=size,
+                    price=current_price,
+                    timestamp=datetime.now(),
+                    strategy=strategy_name,
+                    order_id=order_result.get('order_id'),
+                )
+                
+                # Update position
+                position = Position(
+                    symbol=symbol,
+                    side=position_side,
+                    size=size,
+                    entry_price=current_price,
+                    entry_time=datetime.now(),
+                    strategy=strategy_name,
+                )
+                
+                self.positions[symbol] = position
+                self.trades.append(trade)
+                self.total_trades += 1
+                
+                self.logger.info(f"Executed {side} trade for {symbol}: {size} @ {current_price}")
+                
+            else:
+                self.logger.error(f"Failed to place order for {symbol}")
+                
+        except Exception as e:
+            self.logger.error(f"Error executing trade for {symbol}: {e}")
+    
+    def close_position(self, symbol: str, reason: str = "manual"):
+        """Close a position."""
+        if symbol not in self.positions:
+            self.logger.warning(f"No position to close for {symbol}")
+            return
+        
+        try:
+            position = self.positions[symbol]
+            current_price = self.market_api.get_current_price(symbol)
+            
+            if not current_price:
+                self.logger.error(f"Could not get current price for {symbol}")
+                return
+            
+            # Determine close side
+            close_side = 'sell' if position.side == 'long' else 'buy'
+            
+            # Place close order
+            order_result = self.market_api.place_order(symbol, close_side, position.size, current_price)
+            
+            if order_result and order_result.get('status') == 'success':
+                # Calculate P&L
+                if position.side == 'long':
+                    pnl = (current_price - position.entry_price) * position.size
+                else:
+                    pnl = (position.entry_price - current_price) * position.size
+                
+                # Update performance
+                self.total_pnl += pnl
+                if pnl > 0:
+                    self.winning_trades += 1
+                
+                # Remove position
+                del self.positions[symbol]
+                
+                self.logger.info(f"Closed position for {symbol}: P&L = {pnl:.2f} {self.base_currency}")
+                
+            else:
+                self.logger.error(f"Failed to close position for {symbol}")
+                
+        except Exception as e:
+            self.logger.error(f"Error closing position for {symbol}: {e}")
+    
+    def get_performance_summary(self) -> Dict[str, Any]:
+        """Get performance summary."""
+        # Get pair performance from selector
+        pair_performance = self.pair_selector.get_pair_performance_summary()
+        
+        # Calculate win rate
+        win_rate = (self.winning_trades / self.total_trades * 100) if self.total_trades > 0 else 0
+        
+        return {
+            'total_trades': self.total_trades,
+            'winning_trades': self.winning_trades,
+            'win_rate': win_rate,
+            'total_pnl': self.total_pnl,
+            'open_positions': len(self.positions),
+            'pair_performance': pair_performance,
+            'data_summary': self.market_api.get_data_summary(),
+        }
     
     def force_pair_rescan(self):
-        """Force a rescan of available trading pairs."""
+        """Force a rescan of trading pairs."""
         self.pair_selector.force_rescan()
-        self.logger.info("Forced pair rescan completed") 
+        self.logger.info("Forced pair rescan") 
