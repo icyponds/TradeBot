@@ -340,8 +340,15 @@ class StrategyManager:
             stop_loss = self.leverage_manager.calculate_stop_loss_with_leverage(
                 current_price, position_side, leverage
             )
+            
+            # Calculate strategy-specific take profit
+            strategy = self.strategies[strategy_name]
+            strategy_take_profit = strategy.calculate_take_profit(
+                current_price, position_side, ohlcv, signal_strength, market_volatility
+            )
+            
             take_profit = self.leverage_manager.calculate_take_profit_with_leverage(
-                current_price, position_side, leverage
+                current_price, position_side, leverage, strategy_take_profit
             )
             
             # Place order

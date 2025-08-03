@@ -17,8 +17,8 @@ An automated trading bot that connects to Hyperliquid perpetual futures exchange
 TradeBot/
 ├── src/
 │   ├── api/           # API clients for market data
-│   │   ├── hyperliquid_api.py  # Hyperliquid API client
-│   │   └── market_data.py      # Legacy Binance API client
+│   │   ├── hyperliquid_sdk_api.py  # Hyperliquid SDK API client
+│   │   └── websocket_collector.py  # WebSocket data collection
 │   ├── strategies/    # Trading strategy implementations
 │   ├── models/        # Data models and schemas
 │   ├── utils/         # Utility functions

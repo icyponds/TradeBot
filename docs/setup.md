@@ -73,7 +73,6 @@ This trading bot is designed for Hyperliquid perpetual futures trading with **ag
    # Risk Management (Aggressive)
    RISK_PERCENTAGE=2.0
    STOP_LOSS_PERCENTAGE=2.0
-   TAKE_PROFIT_PERCENTAGE=6.0
    
    # Leverage Configuration (AGGRESSIVE)
    MAX_LEVERAGE=20

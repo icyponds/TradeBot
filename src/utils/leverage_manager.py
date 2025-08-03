@@ -152,20 +152,27 @@ class LeverageManager:
         else:
             return entry_price * (1 + leverage_adjusted_stop)
     
-    def calculate_take_profit_with_leverage(self, entry_price: float, side: str, leverage: float) -> float:
+    def calculate_take_profit_with_leverage(self, entry_price: float, side: str, leverage: float, 
+                                         strategy_take_profit: float = None) -> float:
         """
-        Calculate take profit price considering leverage.
+        Calculate take profit price considering leverage and strategy-specific logic.
         
         Args:
             entry_price: Entry price
             side: 'long' or 'short'
             leverage: Leverage used
+            strategy_take_profit: Strategy-specific take profit price (if provided)
             
         Returns:
             Take profit price
         """
+        if strategy_take_profit is not None:
+            # Use strategy-specific take profit
+            return strategy_take_profit
+        
+        # Fallback to leverage-adjusted calculation
         # Higher leverage = higher profit targets
-        base_tp_percentage = self.config['trading']['take_profit_percentage'] / 100
+        base_tp_percentage = 0.06  # 6% default (removed from config)
         leverage_adjusted_tp = base_tp_percentage * math.sqrt(leverage / 10)
         
         if side == 'long':

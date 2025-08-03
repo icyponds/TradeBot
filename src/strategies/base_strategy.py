@@ -79,23 +79,31 @@ class BaseStrategy(ABC):
         else:
             return entry_price * (1 + stop_loss_percentage)
     
-    def calculate_take_profit(self, entry_price: float, side: str) -> float:
+    def calculate_take_profit(self, entry_price: float, side: str, ohlcv: pd.DataFrame = None, 
+                            signal_strength: float = 1.0, market_volatility: float = 1.0) -> float:
         """
-        Calculate take profit price.
+        Calculate take profit price based on strategy-specific logic.
         
         Args:
             entry_price: Entry price
             side: 'buy' or 'sell'
+            ohlcv: OHLCV data for strategy-specific calculations
+            signal_strength: Signal strength (0.0 to 1.0)
+            market_volatility: Market volatility factor
             
         Returns:
             Take profit price
         """
-        take_profit_percentage = self.config['trading']['take_profit_percentage'] / 100
+        # Default implementation - can be overridden by specific strategies
+        base_take_profit_percentage = 0.06  # 6% default
+        
+        # Adjust based on signal strength and volatility
+        adjusted_percentage = base_take_profit_percentage * signal_strength * market_volatility
         
         if side == 'buy':
-            return entry_price * (1 + take_profit_percentage)
+            return entry_price * (1 + adjusted_percentage)
         else:
-            return entry_price * (1 - take_profit_percentage)
+            return entry_price * (1 - adjusted_percentage)
     
     def record_trade(self, symbol: str, side: str, price: float, size: float, timestamp):
         """

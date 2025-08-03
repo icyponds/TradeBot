@@ -41,7 +41,6 @@ def load_config() -> Dict[str, Any]:
             "max_position_size": float(os.getenv("MAX_POSITION_SIZE", "50")),
             "risk_percentage": float(os.getenv("RISK_PERCENTAGE", "2.0")),
             "stop_loss_percentage": float(os.getenv("STOP_LOSS_PERCENTAGE", "2.0")),
-            "take_profit_percentage": float(os.getenv("TAKE_PROFIT_PERCENTAGE", "6.0")),
         },
         
         # Risk Management Configuration

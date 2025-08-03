@@ -9,6 +9,7 @@ import pandas as pd
 from datetime import datetime
 from hyperliquid.info import Info
 from hyperliquid.exchange import Exchange
+from eth_account import Account
 
 
 class HyperliquidSDKAPI:
@@ -40,10 +41,13 @@ class HyperliquidSDKAPI:
         # Initialize exchange client if credentials are provided
         if self.private_key and self.wallet_address:
             try:
+                # Create wallet object from private key
+                wallet = Account.from_key(self.private_key)
+                
+                # Initialize exchange client with wallet object
                 self.exchange_client = Exchange(
-                    self.base_url,
-                    self.private_key,
-                    self.wallet_address
+                    wallet=wallet,
+                    base_url=self.base_url
                 )
                 self.logger.info("Exchange client initialized with credentials")
             except Exception as e:
@@ -183,17 +187,59 @@ class HyperliquidSDKAPI:
         
         Args:
             symbol: Trading symbol (e.g., 'BTC')
-            timeframe: Timeframe (e.g., '1h', '1d')
+            timeframe: Timeframe (e.g., '1m', '5m', '1h', '1d')
             limit: Number of candles to fetch
             
         Returns:
             DataFrame with OHLCV data or None if error
         """
         try:
-            # Note: The SDK might not have direct OHLCV endpoint
-            # For now, return None - we'll need to implement this separately
-            self.logger.warning(f"OHLCV data not implemented for {symbol}")
-            return None
+            import time
+            from datetime import datetime, timedelta
+            
+            # Convert timeframe to milliseconds for the API
+            timeframe_ms = {
+                '1m': 60 * 1000,
+                '5m': 5 * 60 * 1000,
+                '15m': 15 * 60 * 1000,
+                '30m': 30 * 60 * 1000,
+                '1h': 60 * 60 * 1000,
+                '4h': 4 * 60 * 60 * 1000,
+                '1d': 24 * 60 * 60 * 1000,
+            }
+            
+            # Default to 1h if timeframe not recognized
+            interval_ms = timeframe_ms.get(timeframe, 60 * 60 * 1000)
+            
+            # Calculate time range
+            end_time = int(time.time() * 1000)
+            start_time = end_time - (limit * interval_ms)
+            
+            # Get candles data from SDK
+            candles = self.info_client.candles_snapshot(symbol, timeframe, start_time, end_time)
+            
+            if not candles:
+                self.logger.warning(f"No OHLCV data available for {symbol}")
+                return None
+            
+            # Convert to DataFrame
+            data = []
+            for candle in candles:
+                data.append({
+                    'timestamp': pd.to_datetime(candle['t'], unit='ms'),
+                    'open': float(candle['o']),
+                    'high': float(candle['h']),
+                    'low': float(candle['l']),
+                    'close': float(candle['c']),
+                    'volume': float(candle['v']),
+                    'trades': int(candle['n'])
+                })
+            
+            df = pd.DataFrame(data)
+            df.set_index('timestamp', inplace=True)
+            
+            self.logger.info(f"Retrieved {len(df)} OHLCV candles for {symbol} ({timeframe})")
+            return df
             
         except Exception as e:
             self.logger.error(f"Error fetching OHLCV for {symbol}: {e}")
@@ -395,4 +441,4 @@ class HyperliquidSDKAPI:
             True if sufficient data is available
         """
         # For now, consider data available if we can get current price
-        return self.get_current_price(symbol) is not None 
+        return self.get_current_price(symbol) is not None

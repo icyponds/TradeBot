@@ -22,6 +22,75 @@ class RSIStrategy(BaseStrategy):
         
         self.logger.info(f"Initialized RSI Strategy: period={self.period}, overbought={self.overbought}, oversold={self.oversold}")
     
+    def calculate_take_profit(self, entry_price: float, side: str, ohlcv: pd.DataFrame = None, 
+                            signal_strength: float = 1.0, market_volatility: float = 1.0) -> float:
+        """
+        Calculate take profit based on RSI momentum and extreme levels.
+        
+        Args:
+            entry_price: Entry price
+            side: 'buy' or 'sell'
+            ohlcv: OHLCV data for RSI analysis
+            signal_strength: Signal strength (0.0 to 1.0)
+            market_volatility: Market volatility factor
+            
+        Returns:
+            Take profit price
+        """
+        if ohlcv is None or len(ohlcv) < self.period + 1:
+            # Fallback to base implementation
+            return super().calculate_take_profit(entry_price, side, ohlcv, signal_strength, market_volatility)
+        
+        # Calculate RSI
+        rsi = self.calculate_rsi(ohlcv['close'], self.period)
+        
+        # Calculate RSI momentum (rate of change)
+        if len(ohlcv) >= self.period + 2:
+            prev_rsi = self.calculate_rsi(ohlcv['close'].iloc[:-1], self.period)
+            rsi_momentum = abs(rsi - prev_rsi)
+        else:
+            rsi_momentum = 0.0
+        
+        # Base take profit percentage
+        base_percentage = 0.06  # 6% base
+        
+        # RSI-based adjustments
+        rsi_factor = 1.0
+        
+        if side == 'buy':
+            # For buy signals, higher take profit if RSI is oversold
+            if rsi < 30:
+                rsi_factor = 1.5  # 50% increase for extreme oversold
+            elif rsi < 40:
+                rsi_factor = 1.3  # 30% increase for oversold
+            elif rsi > 70:
+                rsi_factor = 0.7  # 30% decrease for overbought (shorter target)
+        else:
+            # For sell signals, higher take profit if RSI is overbought
+            if rsi > 70:
+                rsi_factor = 1.5  # 50% increase for extreme overbought
+            elif rsi > 60:
+                rsi_factor = 1.3  # 30% increase for overbought
+            elif rsi < 30:
+                rsi_factor = 0.7  # 30% decrease for oversold (shorter target)
+        
+        # Momentum-based adjustment
+        momentum_factor = 1.0 + (rsi_momentum * 0.5)  # Up to 50% increase for high momentum
+        
+        # Volatility adjustment
+        volatility_factor = 1.0 + (market_volatility * 0.3)  # Up to 30% increase for high volatility
+        
+        # Final take profit percentage
+        take_profit_percentage = base_percentage * rsi_factor * momentum_factor * volatility_factor * signal_strength
+        
+        # Ensure reasonable bounds (2% to 20%)
+        take_profit_percentage = max(0.02, min(0.20, take_profit_percentage))
+        
+        if side == 'buy':
+            return entry_price * (1 + take_profit_percentage)
+        else:
+            return entry_price * (1 - take_profit_percentage)
+    
     def generate_signal(self, ohlcv: pd.DataFrame) -> Optional[Dict[str, Any]]:
         """
         Generate trading signal based on OHLCV data using RSI.
