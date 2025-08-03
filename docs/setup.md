@@ -2,15 +2,16 @@
 
 ## Overview
 
-This trading bot is designed for Hyperliquid perpetual futures trading with real-time data collection via WebSocket connections. The bot uses dynamic pair selection based on market conditions and implements multiple trading strategies optimized for scalping timeframes.
+This trading bot is designed for Hyperliquid perpetual futures trading with **aggressive leverage** (10-20x) and real-time data collection via WebSocket connections. The bot uses dynamic pair selection based on market conditions and implements multiple trading strategies optimized for scalping timeframes.
 
 ## Features
 
 - **Real-time Data Collection**: WebSocket-based data collection for live market data
 - **Dynamic Pair Selection**: Automatically selects trading pairs based on open interest and liquidity
 - **Multiple Strategies**: Moving Average Crossover and RSI strategies
+- **Aggressive Leverage**: 10-20x leverage for maximum profit potential
 - **Scalping Optimized**: Configured for 1-minute timeframes with rapid execution
-- **Risk Management**: Position sizing and stop-loss/take-profit mechanisms
+- **Advanced Risk Management**: Leverage-adjusted stop losses and take profits
 - **Performance Tracking**: Comprehensive trade and performance analytics
 
 ## Prerequisites
@@ -18,6 +19,7 @@ This trading bot is designed for Hyperliquid perpetual futures trading with real
 - Python 3.8 or higher
 - Hyperliquid account with API access
 - Private key and wallet address for authentication
+- **Risk Tolerance**: This bot uses aggressive leverage (10-20x) - only for experienced traders
 
 ## Installation
 
@@ -68,9 +70,18 @@ This trading bot is designed for Hyperliquid perpetual futures trading with real
    EXCLUDED_ASSETS=
    INCLUDED_ASSETS=
    
-   # Risk Management
-   STOP_LOSS_PERCENTAGE=5
-   TAKE_PROFIT_PERCENTAGE=10
+   # Risk Management (Aggressive)
+   RISK_PERCENTAGE=2.0
+   STOP_LOSS_PERCENTAGE=2.0
+   TAKE_PROFIT_PERCENTAGE=6.0
+   
+   # Leverage Configuration (AGGRESSIVE)
+   MAX_LEVERAGE=20
+   DEFAULT_LEVERAGE=15
+   MIN_LEVERAGE=10
+   LEVERAGE_PER_SYMBOL=BTC:20,ETH:18,SOL:15,MATIC:12,ADA:10
+   MARGIN_BUFFER_PERCENTAGE=20
+   LIQUIDATION_RISK_THRESHOLD=80
    
    # Logging
    LOG_LEVEL=INFO
@@ -126,6 +137,51 @@ The bot automatically selects trading pairs based on market conditions:
 - `EXCLUDED_ASSETS`: Comma-separated list of assets to exclude
 - `INCLUDED_ASSETS`: Comma-separated list of assets to include only
 
+## Aggressive Leverage Configuration
+
+### ⚠️ **HIGH RISK WARNING**
+
+This bot uses **aggressive leverage (10-20x)** which carries significant risk:
+
+- **Liquidation Risk**: Positions can be liquidated quickly
+- **Amplified Losses**: Losses are multiplied by leverage
+- **Margin Calls**: May require additional capital
+- **Volatility Risk**: High leverage amplifies price volatility
+
+### Leverage Settings
+
+- **MAX_LEVERAGE=20**: Maximum 20x leverage
+- **DEFAULT_LEVERAGE=15**: Default 15x leverage
+- **MIN_LEVERAGE=10**: Minimum 10x leverage
+- **LEVERAGE_PER_SYMBOL**: Symbol-specific leverage (BTC:20, ETH:18, etc.)
+
+### Risk Management
+
+- **Tighter Stops**: 2% stop loss (adjusted for leverage)
+- **Higher Targets**: 6% take profit (adjusted for leverage)
+- **Margin Buffer**: 20% margin buffer for safety
+- **Liquidation Monitoring**: Real-time liquidation risk tracking
+
+### Position Sizing
+
+The bot calculates position sizes based on:
+
+1. **Available Capital**: Total capital available
+2. **Risk Percentage**: 2% risk per trade
+3. **Leverage**: Symbol-specific leverage (10-20x)
+4. **Margin Requirements**: Adjusted for leverage
+5. **Position Limits**: Maximum 50 USDC per position
+
+### Example Position Calculation
+
+For a $1000 account with 15x leverage on BTC:
+
+- **Risk Amount**: $20 (2% of $1000)
+- **Position Value**: $600 (20 × 15x leverage)
+- **Margin Required**: $40 (600 ÷ 15 + 20% buffer)
+- **Stop Loss**: 1.3% (2% ÷ √15/10)
+- **Take Profit**: 7.3% (6% × √15/10)
+
 ## Scalping Configuration
 
 The bot is optimized for scalping with the following settings:
@@ -141,8 +197,8 @@ The bot is optimized for scalping with the following settings:
 - **Position Size**: Maximum 50 USDC per trade
 
 ### Risk Management
-- **Stop Loss**: 5% of position value
-- **Take Profit**: 10% of position value
+- **Stop Loss**: 2% of position value (leverage-adjusted)
+- **Take Profit**: 6% of position value (leverage-adjusted)
 - **Position Limits**: Maximum 50 USDC per position
 
 ## Usage
@@ -172,6 +228,8 @@ The bot provides comprehensive monitoring:
 - **Trade Execution**: Buy/sell signals and executions
 - **Performance Metrics**: P&L, win rate, total trades
 - **Pair Performance**: Individual asset performance tracking
+- **Margin Usage**: Real-time margin utilization
+- **Leverage Risk**: Liquidation risk monitoring
 
 ### Stopping the Bot
 
@@ -225,6 +283,11 @@ python -m pytest tests/test_strategies.py
    - Check wallet address
    - Ensure API permissions
 
+4. **Liquidation Risk**:
+   - Reduce leverage settings
+   - Increase margin buffer
+   - Monitor position sizes
+
 ### Log Analysis
 
 Check logs for detailed information:
@@ -233,16 +296,18 @@ Check logs for detailed information:
 grep "ERROR" logs/trading_bot.log
 grep "WebSocket" logs/trading_bot.log
 grep "Signal" logs/trading_bot.log
+grep "Leverage" logs/trading_bot.log
 ```
 
 ## Performance Optimization
 
-### For Scalping
+### For Aggressive Scalping
 
 - **Execution Speed**: 30-second intervals for rapid signals
 - **Data Quality**: Real-time WebSocket feeds
 - **Memory Usage**: Rolling data buffers
 - **CPU Usage**: Efficient OHLCV calculations
+- **Leverage Management**: Real-time margin monitoring
 
 ### Monitoring Performance
 
@@ -250,6 +315,7 @@ grep "Signal" logs/trading_bot.log
 - **Signal Generation**: Strategy execution frequency
 - **Trade Execution**: Order placement success rate
 - **Risk Management**: Stop-loss and take-profit effectiveness
+- **Margin Utilization**: Real-time margin usage tracking
 
 ## Security Considerations
 
@@ -257,15 +323,34 @@ grep "Signal" logs/trading_bot.log
 - **API Permissions**: Use minimal required permissions
 - **Network Security**: Use secure connections
 - **Position Limits**: Set appropriate position size limits
+- **Leverage Limits**: Monitor leverage usage carefully
+
+## ⚠️ **CRITICAL RISK WARNINGS**
+
+### Leverage Risks
+
+- **Liquidation**: Positions can be liquidated at any time
+- **Margin Calls**: May require additional capital
+- **Amplified Losses**: Losses are multiplied by leverage
+- **Volatility**: High leverage amplifies price movements
+
+### Recommended Usage
+
+- **Start Small**: Begin with small position sizes
+- **Monitor Closely**: Watch margin usage and liquidation risk
+- **Test First**: Use paper trading before live trading
+- **Understand Risks**: Only trade what you can afford to lose
 
 ## Disclaimer
 
-This trading bot is for educational and research purposes. Trading involves substantial risk of loss. Always:
+This trading bot uses **aggressive leverage (10-20x)** and is for **experienced traders only**. Trading involves substantial risk of loss. Always:
 
 - Test thoroughly with small amounts
 - Monitor performance continuously
 - Understand the strategies being used
 - Never risk more than you can afford to lose
+- Be prepared for liquidation events
+- Monitor margin requirements closely
 
 ## Support
 
@@ -274,4 +359,5 @@ For issues and questions:
 1. Check the logs for error messages
 2. Review the configuration settings
 3. Test WebSocket connectivity
-4. Verify API credentials and permissions 
+4. Verify API credentials and permissions
+5. Monitor leverage and margin usage 

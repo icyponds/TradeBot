@@ -39,8 +39,18 @@ def load_config() -> Dict[str, Any]:
             "base_currency": os.getenv("BASE_CURRENCY", "USDC"),
             "max_position_size": float(os.getenv("MAX_POSITION_SIZE", "50")),
             "risk_percentage": float(os.getenv("RISK_PERCENTAGE", "2.0")),
-            "stop_loss_percentage": float(os.getenv("STOP_LOSS_PERCENTAGE", "5.0")),
-            "take_profit_percentage": float(os.getenv("TAKE_PROFIT_PERCENTAGE", "10.0")),
+            "stop_loss_percentage": float(os.getenv("STOP_LOSS_PERCENTAGE", "2.0")),
+            "take_profit_percentage": float(os.getenv("TAKE_PROFIT_PERCENTAGE", "6.0")),
+        },
+        
+        # Leverage Configuration
+        "leverage": {
+            "max_leverage": float(os.getenv("MAX_LEVERAGE", "20")),
+            "default_leverage": float(os.getenv("DEFAULT_LEVERAGE", "15")),
+            "min_leverage": float(os.getenv("MIN_LEVERAGE", "10")),
+            "margin_buffer_percentage": float(os.getenv("MARGIN_BUFFER_PERCENTAGE", "20")),
+            "liquidation_risk_threshold": float(os.getenv("LIQUIDATION_RISK_THRESHOLD", "80")),
+            "leverage_per_symbol": _parse_leverage_per_symbol(),
         },
         
         # Strategy Configuration
@@ -48,15 +58,11 @@ def load_config() -> Dict[str, Any]:
             "enabled": os.getenv("ENABLED_STRATEGIES", "moving_average,rsi").split(","),
             "timeframe": os.getenv("STRATEGY_TIMEFRAME", "1m"),
             "ohlcv_limit": int(os.getenv("OHLCV_LIMIT", "100")),
-            "moving_average": {
-                "short_period": int(os.getenv("MA_SHORT_PERIOD", "5")),
-                "long_period": int(os.getenv("MA_LONG_PERIOD", "10")),
-            },
-            "rsi": {
-                "period": int(os.getenv("RSI_PERIOD", "14")),
-                "overbought": float(os.getenv("RSI_OVERBOUGHT", "70")),
-                "oversold": float(os.getenv("RSI_OVERSOLD", "30")),
-            },
+            "ma_short_period": int(os.getenv("MA_SHORT_PERIOD", "5")),
+            "ma_long_period": int(os.getenv("MA_LONG_PERIOD", "10")),
+            "rsi_period": int(os.getenv("RSI_PERIOD", "14")),
+            "rsi_overbought": float(os.getenv("RSI_OVERBOUGHT", "70")),
+            "rsi_oversold": float(os.getenv("RSI_OVERSOLD", "30")),
         },
         
         # Database Configuration
@@ -73,57 +79,76 @@ def load_config() -> Dict[str, Any]:
         # Backtesting Configuration
         "backtesting": {
             "enabled": os.getenv("BACKTESTING_ENABLED", "false").lower() == "true",
-            "start_date": os.getenv("BACKTEST_START_DATE", ""),
-            "end_date": os.getenv("BACKTEST_END_DATE", ""),
+            "start_date": os.getenv("BACKTEST_START_DATE", "2024-01-01"),
+            "end_date": os.getenv("BACKTEST_END_DATE", "2024-12-31"),
         },
     }
     
     return config
 
 
+def _parse_leverage_per_symbol() -> Dict[str, float]:
+    """
+    Parse leverage per symbol configuration.
+    
+    Returns:
+        Dictionary mapping symbols to leverage values
+    """
+    leverage_str = os.getenv("LEVERAGE_PER_SYMBOL", "BTC:20,ETH:18,SOL:15,MATIC:12,ADA:10")
+    leverage_dict = {}
+    
+    if leverage_str:
+        for pair in leverage_str.split(","):
+            if ":" in pair:
+                symbol, leverage = pair.strip().split(":")
+                leverage_dict[symbol.strip()] = float(leverage.strip())
+    
+    return leverage_dict
+
+
 def validate_config(config: Dict[str, Any]) -> bool:
     """
-    Validate the configuration settings.
+    Validate configuration settings.
     
     Args:
         config: Configuration dictionary
         
     Returns:
-        True if configuration is valid, False otherwise
+        True if valid, False otherwise
     """
-    required_fields = [
-        "api.private_key",
-        "api.wallet_address",
-    ]
-    
-    for field in required_fields:
-        keys = field.split(".")
-        value = config
-        for key in keys:
-            if key not in value:
-                print(f"Missing required configuration: {field}")
-                return False
-            value = value[key]
-        
-        if not value:
-            print(f"Empty required configuration: {field}")
+    try:
+        # Validate API configuration
+        if not config['api']['private_key'] or not config['api']['wallet_address']:
+            print("ERROR: Hyperliquid private key and wallet address are required")
             return False
-    
-    # Validate trading configuration
-    trading_config = config['trading']
-    if trading_config['min_open_interest'] >= trading_config['max_open_interest']:
-        print("MIN_OPEN_INTEREST must be less than MAX_OPEN_INTEREST")
-        return False
-    
-    if trading_config['max_pairs_to_trade'] <= 0:
-        print("MAX_PAIRS_TO_TRADE must be greater than 0")
-        return False
-    
-    # Validate timeframe
-    valid_timeframes = ['1m', '5m', '15m', '30m', '1h', '4h', '1d']
-    timeframe = config['strategies']['timeframe']
-    if timeframe not in valid_timeframes:
-        print(f"Invalid timeframe: {timeframe}. Valid options: {valid_timeframes}")
-        return False
-    
-    return True 
+        
+        # Validate trading configuration
+        if config['trading']['max_position_size'] <= 0:
+            print("ERROR: Max position size must be positive")
+            return False
+        
+        if config['trading']['risk_percentage'] <= 0 or config['trading']['risk_percentage'] > 100:
+            print("ERROR: Risk percentage must be between 0 and 100")
+            return False
+        
+        # Validate leverage configuration
+        if config['leverage']['max_leverage'] < config['leverage']['min_leverage']:
+            print("ERROR: Max leverage cannot be less than min leverage")
+            return False
+        
+        if config['leverage']['default_leverage'] < config['leverage']['min_leverage'] or \
+           config['leverage']['default_leverage'] > config['leverage']['max_leverage']:
+            print("ERROR: Default leverage must be between min and max leverage")
+            return False
+        
+        # Validate strategy configuration
+        valid_timeframes = ['1m', '5m', '15m', '30m', '1h', '4h', '1d']
+        if config['strategies']['timeframe'] not in valid_timeframes:
+            print(f"ERROR: Invalid timeframe. Must be one of: {valid_timeframes}")
+            return False
+        
+        return True
+        
+    except Exception as e:
+        print(f"ERROR: Configuration validation failed: {e}")
+        return False 

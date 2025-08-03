@@ -10,6 +10,7 @@ import pandas as pd
 
 from ..api.hyperliquid_api import HyperliquidAPI
 from ..utils.pair_selector import DynamicPairSelector
+from ..utils.leverage_manager import LeverageManager
 from .moving_average_strategy import MovingAverageStrategy
 from .rsi_strategy import RSIStrategy
 from ..models.trade import Trade, Position
@@ -34,6 +35,9 @@ class StrategyManager:
         # Initialize pair selector
         self.pair_selector = DynamicPairSelector(config)
         
+        # Initialize leverage manager
+        self.leverage_manager = LeverageManager(config)
+        
         # Initialize strategies
         self.strategies = {
             'moving_average': MovingAverageStrategy(config),
@@ -49,6 +53,7 @@ class StrategyManager:
         self.total_pnl = 0.0
         self.winning_trades = 0
         self.total_trades = 0
+        self.available_capital = 1000.0  # Default capital, should be fetched from API
         
         # Configuration
         self.timeframe = config['strategies']['timeframe']
@@ -61,6 +66,7 @@ class StrategyManager:
         
         self.logger.info(f"Initialized strategy manager with {len(self.strategies)} strategies")
         self.logger.info(f"Timeframe: {self.timeframe}, Execution interval: {self.execution_interval}s")
+        self.logger.info(f"Leverage: {config['leverage']['default_leverage']}x default, {config['leverage']['max_leverage']}x max")
     
     def _get_execution_interval(self) -> int:
         """Calculate execution interval based on timeframe."""
@@ -89,6 +95,9 @@ class StrategyManager:
         # Wait for initial data collection
         self.logger.info("Waiting for initial data collection...")
         time.sleep(10)  # Give WebSocket time to connect and collect data
+        
+        # Update available margin
+        self.leverage_manager.update_available_margin(self.available_capital)
         
         self.is_running = True
         
@@ -123,6 +132,10 @@ class StrategyManager:
                 
                 # Update pair performance
                 self.pair_selector.update_pair_performance(trading_pairs)
+                
+                # Log margin summary
+                margin_summary = self.leverage_manager.get_margin_summary()
+                self.logger.info(f"Margin usage: {margin_summary['margin_utilization']:.1f}% ({margin_summary['open_positions']} positions)")
                 
                 # Wait for next execution
                 time.sleep(self.execution_interval)
@@ -193,11 +206,19 @@ class StrategyManager:
             elif position.side == 'short' and signal['action'] == 'sell':
                 return False
         
-        # Check position size limits
-        position_value = current_price * signal.get('size', 1.0)
-        if position_value > self.max_position_size:
-            self.logger.warning(f"Position size {position_value} exceeds limit {self.max_position_size}")
+        # Calculate leveraged position size
+        position_size, margin_required, leverage = self.leverage_manager.calculate_leveraged_position_size(
+            symbol, current_price, self.available_capital
+        )
+        
+        # Check if we can open the position
+        if not self.leverage_manager.can_open_position(symbol, margin_required, self.available_capital):
             return False
+        
+        # Update signal with calculated size
+        signal['size'] = position_size
+        signal['leverage'] = leverage
+        signal['margin_required'] = margin_required
         
         return True
     
@@ -214,19 +235,28 @@ class StrategyManager:
             else:
                 return
             
-            # Calculate position size
-            size = signal.get('size', 1.0)
-            position_value = current_price * size
+            # Get leverage and position details
+            position_size = signal['size']
+            leverage = signal['leverage']
+            margin_required = signal['margin_required']
+            
+            # Calculate stop loss and take profit with leverage
+            stop_loss = self.leverage_manager.calculate_stop_loss_with_leverage(
+                current_price, position_side, leverage
+            )
+            take_profit = self.leverage_manager.calculate_take_profit_with_leverage(
+                current_price, position_side, leverage
+            )
             
             # Place order
-            order_result = self.market_api.place_order(symbol, side, size, current_price)
+            order_result = self.market_api.place_order(symbol, side, position_size, current_price)
             
             if order_result and order_result.get('status') == 'success':
                 # Create trade record
                 trade = Trade(
                     symbol=symbol,
                     side=side,
-                    size=size,
+                    size=position_size,
                     price=current_price,
                     timestamp=datetime.now(),
                     strategy=strategy_name,
@@ -237,17 +267,25 @@ class StrategyManager:
                 position = Position(
                     symbol=symbol,
                     side=position_side,
-                    size=size,
+                    size=position_size,
                     entry_price=current_price,
                     entry_time=datetime.now(),
                     strategy=strategy_name,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
+                )
+                
+                # Record position in leverage manager
+                self.leverage_manager.record_position(
+                    symbol, position_side, position_size, current_price, leverage, margin_required
                 )
                 
                 self.positions[symbol] = position
                 self.trades.append(trade)
                 self.total_trades += 1
                 
-                self.logger.info(f"Executed {side} trade for {symbol}: {size} @ {current_price}")
+                self.logger.info(f"Executed {side} trade for {symbol}: {position_size} @ {current_price} with {leverage}x leverage")
+                self.logger.info(f"Stop loss: {stop_loss:.2f}, Take profit: {take_profit:.2f}")
                 
             else:
                 self.logger.error(f"Failed to place order for {symbol}")
@@ -276,21 +314,19 @@ class StrategyManager:
             order_result = self.market_api.place_order(symbol, close_side, position.size, current_price)
             
             if order_result and order_result.get('status') == 'success':
-                # Calculate P&L
-                if position.side == 'long':
-                    pnl = (current_price - position.entry_price) * position.size
-                else:
-                    pnl = (position.entry_price - current_price) * position.size
+                # Close position in leverage manager
+                result = self.leverage_manager.close_position(symbol, current_price)
                 
-                # Update performance
-                self.total_pnl += pnl
-                if pnl > 0:
-                    self.winning_trades += 1
-                
-                # Remove position
-                del self.positions[symbol]
-                
-                self.logger.info(f"Closed position for {symbol}: P&L = {pnl:.2f} {self.base_currency}")
+                if result:
+                    # Update performance
+                    self.total_pnl += result['leveraged_pnl']
+                    if result['leveraged_pnl'] > 0:
+                        self.winning_trades += 1
+                    
+                    # Remove position
+                    del self.positions[symbol]
+                    
+                    self.logger.info(f"Closed position for {symbol}: {result['leveraged_pnl']:.2f} USDC ({result['leveraged_pnl_percentage']:.2f}%)")
                 
             else:
                 self.logger.error(f"Failed to close position for {symbol}")
@@ -303,6 +339,10 @@ class StrategyManager:
         # Get pair performance from selector
         pair_performance = self.pair_selector.get_pair_performance_summary()
         
+        # Get margin and risk summaries
+        margin_summary = self.leverage_manager.get_margin_summary()
+        risk_summary = self.leverage_manager.get_risk_summary()
+        
         # Calculate win rate
         win_rate = (self.winning_trades / self.total_trades * 100) if self.total_trades > 0 else 0
         
@@ -314,6 +354,13 @@ class StrategyManager:
             'open_positions': len(self.positions),
             'pair_performance': pair_performance,
             'data_summary': self.market_api.get_data_summary(),
+            'margin_summary': margin_summary,
+            'risk_summary': risk_summary,
+            'leverage_config': {
+                'default_leverage': self.config['leverage']['default_leverage'],
+                'max_leverage': self.config['leverage']['max_leverage'],
+                'leverage_per_symbol': self.config['leverage']['leverage_per_symbol'],
+            },
         }
     
     def force_pair_rescan(self):

@@ -1,70 +1,44 @@
 """
-Base strategy class for trading strategies.
+Base strategy class for all trading strategies.
 """
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 import pandas as pd
 
 
 class BaseStrategy(ABC):
     """Base class for all trading strategies."""
     
-    def __init__(self, config: Dict[str, Any], market_api):
+    def __init__(self, config: Dict[str, Any]):
         """
         Initialize the base strategy.
         
         Args:
             config: Configuration dictionary
-            market_api: Market data API instance
         """
         self.config = config
-        self.market_api = market_api
         self.logger = logging.getLogger(self.__class__.__name__)
-        self.name = self.__class__.__name__
         
         # Strategy state
-        self.positions = {}
-        self.trades = []
         self.is_active = True
+        self.trades = []
+        
+        # Configuration
+        self.timeframe = config['strategies']['timeframe']
+        self.ohlcv_limit = config['strategies']['ohlcv_limit']
     
     @abstractmethod
-    def analyze(self, market_data: Dict[str, Any]) -> Dict[str, Any]:
+    def generate_signal(self, ohlcv: pd.DataFrame) -> Optional[Dict[str, Any]]:
         """
-        Analyze market data and generate trading signals.
+        Generate trading signal based on market data.
         
         Args:
-            market_data: Market data dictionary
+            ohlcv: OHLCV data DataFrame
             
         Returns:
-            Dictionary containing analysis results and signals
-        """
-        pass
-    
-    @abstractmethod
-    def should_buy(self, analysis: Dict[str, Any]) -> bool:
-        """
-        Determine if we should buy based on analysis.
-        
-        Args:
-            analysis: Analysis results from analyze() method
-            
-        Returns:
-            True if should buy, False otherwise
-        """
-        pass
-    
-    @abstractmethod
-    def should_sell(self, analysis: Dict[str, Any]) -> bool:
-        """
-        Determine if we should sell based on analysis.
-        
-        Args:
-            analysis: Analysis results from analyze() method
-            
-        Returns:
-            True if should sell, False otherwise
+            Signal dictionary or None if no signal
         """
         pass
     
@@ -125,11 +99,11 @@ class BaseStrategy(ABC):
     
     def record_trade(self, symbol: str, side: str, price: float, size: float, timestamp):
         """
-        Record a trade for tracking.
+        Record a completed trade.
         
         Args:
             symbol: Trading symbol
-            side: 'buy' or 'sell'
+            side: Trade side
             price: Trade price
             size: Trade size
             timestamp: Trade timestamp
@@ -140,58 +114,51 @@ class BaseStrategy(ABC):
             'price': price,
             'size': size,
             'timestamp': timestamp,
-            'strategy': self.name,
         }
         
         self.trades.append(trade)
-        self.logger.info(f"Recorded {side} trade: {symbol} at {price}")
+        self.logger.info(f"Recorded {side} trade for {symbol} at {price}")
     
     def get_performance_metrics(self) -> Dict[str, Any]:
         """
-        Calculate performance metrics for the strategy.
+        Get performance metrics for the strategy.
         
         Returns:
-            Dictionary with performance metrics
+            Performance metrics dictionary
         """
         if not self.trades:
             return {
                 'total_trades': 0,
                 'win_rate': 0,
                 'total_pnl': 0,
-                'avg_trade_pnl': 0,
+                'average_trade_size': 0,
             }
         
-        # Calculate basic metrics
         total_trades = len(self.trades)
-        winning_trades = 0
-        total_pnl = 0
-        
-        for trade in self.trades:
-            # Simple PnL calculation (can be enhanced)
-            if trade['side'] == 'buy':
-                # For buy trades, assume we sold at a profit
-                pnl = trade['price'] * 0.01  # Simplified
-                total_pnl += pnl
-                winning_trades += 1
-        
-        win_rate = (winning_trades / total_trades) * 100 if total_trades > 0 else 0
-        avg_trade_pnl = total_pnl / total_trades if total_trades > 0 else 0
+        winning_trades = sum(1 for trade in self.trades if trade.get('pnl', 0) > 0)
+        win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
+        total_pnl = sum(trade.get('pnl', 0) for trade in self.trades)
+        avg_trade_size = sum(trade['size'] for trade in self.trades) / total_trades
         
         return {
             'total_trades': total_trades,
+            'winning_trades': winning_trades,
             'win_rate': win_rate,
             'total_pnl': total_pnl,
-            'avg_trade_pnl': avg_trade_pnl,
+            'average_trade_size': avg_trade_size,
         }
+    
+    def reset(self):
+        """Reset the strategy state."""
+        self.trades = []
+        self.logger.info("Strategy reset")
     
     def stop(self):
         """Stop the strategy."""
         self.is_active = False
-        self.logger.info(f"Strategy {self.name} stopped")
+        self.logger.info("Strategy stopped")
     
-    def reset(self):
-        """Reset strategy state."""
-        self.positions = {}
-        self.trades = []
+    def start(self):
+        """Start the strategy."""
         self.is_active = True
-        self.logger.info(f"Strategy {self.name} reset") 
+        self.logger.info("Strategy started") 
