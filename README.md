@@ -9,57 +9,41 @@ An automated trading bot that connects to Hyperliquid perpetual futures exchange
 - Configurable trading strategies for perpetual futures
 - Risk management and position sizing
 - Performance tracking and analytics
+- **Accurate position and order monitoring**
+- **Real-time position synchronization with exchange**
+- **Stale order cleanup and validation**
 - Modular architecture for easy strategy development
+
+## Position & Order Monitoring
+
+The bot includes comprehensive monitoring to ensure accurate tracking of positions and orders:
+
+### Position Monitoring
+- **Real-time synchronization** with exchange positions
+- **Automatic detection** of closed positions
+- **Size and price discrepancy** validation
+- **Position integrity checks** to prevent data corruption
+
+### Order Monitoring
+- **Open order tracking** and status monitoring
+- **Stale order detection** and automatic cleanup
+- **Order timeout management** (configurable)
+- **Order validation** to prevent invalid orders
+
+### Monitoring Tools
+- `position_monitor.py` - Comprehensive position and order validation script
+- `test_position_monitoring.py` - Test suite for monitoring functionality
+- `check_pnl.py` - Quick PnL checking with position validation
+
+### Configuration
+```bash
+# Order monitoring settings (optimized for scalping)
+ORDER_TIMEOUT_MINUTES=0.5          # 30 seconds before order is considered stale
+ENABLE_STALE_ORDER_CLEANUP=true    # Enable automatic stale order cleanup
+POSITION_SYNC_INTERVAL=10          # 10 seconds between position syncs
+ENABLE_POSITION_VALIDATION=true    # Enable position integrity checks
+```
 
 ## Project Structure
 
 ```
-TradeBot/
-├── src/
-│   ├── api/           # API clients for market data
-│   │   ├── hyperliquid_sdk_api.py  # Hyperliquid SDK API client
-│   │   └── websocket_collector.py  # WebSocket data collection
-│   ├── strategies/    # Trading strategy implementations
-│   ├── models/        # Data models and schemas
-│   ├── utils/         # Utility functions
-│   └── config/        # Configuration management
-├── tests/             # Test files
-├── docs/              # Documentation
-├── requirements.txt   # Python dependencies
-└── README.md         # This file
-```
-
-## Setup
-
-1. Clone the repository
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-3. Create a `.env` file with your Hyperliquid credentials
-4. Configure your trading parameters in `src/config/`
-
-## Usage
-
-```bash
-python src/main.py
-```
-
-## Development
-
-- Run tests: `pytest`
-- Format code: `black src/`
-- Lint code: `flake8 src/`
-
-## Hyperliquid Integration
-
-This bot is specifically designed for Hyperliquid, a decentralized perpetual futures exchange. Key features:
-
-- **Perpetual Futures Trading**: Trade with leverage on various assets
-- **WebSocket Real-time Data**: Live price updates and market data
-- **Wallet-based Authentication**: Uses private keys for secure trading
-- **Asset Universe**: Supports all assets available on Hyperliquid
-
-## Disclaimer
-
-This trading bot is for educational purposes. Trading perpetual futures involves significant risk and you should never invest more than you can afford to lose. Leverage can amplify both gains and losses. 

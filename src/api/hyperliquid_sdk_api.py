@@ -490,7 +490,7 @@ class HyperliquidSDKAPI:
 
     def get_open_orders(self) -> List[Dict[str, Any]]:
         """
-        Get all open orders.
+        Get all open orders using the SDK.
         
         Returns:
             List of open order dictionaries
@@ -500,10 +500,35 @@ class HyperliquidSDKAPI:
             return []
         
         try:
-            # For now, return empty list since we can't properly check open orders
-            # This is a limitation of the current SDK implementation
-            self.logger.warning("Open order checking not fully implemented")
-            return []
+            # Try to get user state using the SDK
+            if hasattr(self.exchange_client, 'user_state'):
+                user_state = self.exchange_client.user_state()
+            else:
+                # Fallback: try alternative method names
+                if hasattr(self.exchange_client, 'get_user_state'):
+                    user_state = self.exchange_client.get_user_state()
+                elif hasattr(self.exchange_client, 'get_open_orders'):
+                    # Direct method call
+                    return self.exchange_client.get_open_orders()
+                else:
+                    self.logger.warning("Exchange client does not support open order retrieval")
+                    return []
+            
+            open_orders = []
+            for order in user_state.get('openOrders', []):
+                open_orders.append({
+                    'order_id': order.get('oid', ''),
+                    'symbol': order.get('name', ''),
+                    'side': 'buy' if order.get('side', 0) == 0 else 'sell',
+                    'size': float(order.get('sz', 0)),
+                    'price': float(order.get('px', 0)),
+                    'order_type': 'limit',  # Hyperliquid primarily uses limit orders
+                    'timestamp': order.get('timestamp', 0),
+                    'status': 'open'
+                })
+            
+            self.logger.info(f"Found {len(open_orders)} open orders")
+            return open_orders
             
         except Exception as e:
             self.logger.error(f"Error getting open orders: {e}")
@@ -558,8 +583,19 @@ class HyperliquidSDKAPI:
             return []
         
         try:
-            # Get user state using the SDK
-            user_state = self.exchange_client.user_state()
+            # Try to get user state using the SDK
+            if hasattr(self.exchange_client, 'user_state'):
+                user_state = self.exchange_client.user_state()
+            else:
+                # Fallback: try alternative method names
+                if hasattr(self.exchange_client, 'get_user_state'):
+                    user_state = self.exchange_client.get_user_state()
+                elif hasattr(self.exchange_client, 'get_positions'):
+                    # Direct method call
+                    return self.exchange_client.get_positions()
+                else:
+                    self.logger.warning("Exchange client does not support position retrieval")
+                    return []
             
             positions = []
             for position in user_state.get('assetPositions', []):

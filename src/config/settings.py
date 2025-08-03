@@ -42,6 +42,12 @@ def load_config() -> Dict[str, Any]:
             "max_positions_percentage": float(os.getenv("MAX_POSITIONS_PERCENTAGE", "33.33")),  # 1/3 of portfolio
             "risk_percentage": float(os.getenv("RISK_PERCENTAGE", "2.0")),
             "stop_loss_percentage": float(os.getenv("STOP_LOSS_PERCENTAGE", "2.0")),
+            
+            # Order monitoring settings
+            "order_timeout_minutes": int(os.getenv("ORDER_TIMEOUT_MINUTES", "30")),
+            "enable_stale_order_cleanup": os.getenv("ENABLE_STALE_ORDER_CLEANUP", "true").lower() == "true",
+            "position_sync_interval": int(os.getenv("POSITION_SYNC_INTERVAL", "60")),  # seconds
+            "enable_position_validation": os.getenv("ENABLE_POSITION_VALIDATION", "true").lower() == "true",
         },
         
         # Risk Management Configuration

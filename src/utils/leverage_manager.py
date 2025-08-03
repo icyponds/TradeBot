@@ -1,5 +1,5 @@
 """
-Dynamic leverage management for trading strategies.
+Simplified leverage management for trading strategies.
 """
 
 import logging
@@ -35,7 +35,7 @@ class LeverageManager:
         self.total_margin_used = 0.0
         self.available_margin = 0.0
         
-        self.logger.info("Initialized dynamic leverage manager")
+        self.logger.info("Initialized simplified leverage manager")
     
     def calculate_dynamic_leverage(self, symbol: str, strategy_name: str, signal_strength: float, 
                                  market_volatility: float, current_price: float) -> float:
@@ -64,11 +64,9 @@ class LeverageManager:
         min_leverage, max_leverage = strategy_leverage_ranges.get(strategy_name, strategy_leverage_ranges['default'])
         
         # Adjust leverage based on signal strength
-        # Stronger signals get higher leverage
         signal_multiplier = 0.5 + (signal_strength * 0.5)  # 0.5 to 1.0
         
         # Adjust leverage based on volatility
-        # Lower volatility = higher leverage, higher volatility = lower leverage
         volatility_multiplier = max(0.3, 1.0 - market_volatility)  # 0.3 to 1.0
         
         # Calculate base leverage
@@ -80,8 +78,7 @@ class LeverageManager:
         # Ensure leverage is within reasonable bounds
         dynamic_leverage = max(5, min(25, dynamic_leverage))
         
-        self.logger.info(f"Dynamic leverage for {symbol} ({strategy_name}): {dynamic_leverage:.1f}x "
-                        f"(signal: {signal_strength:.2f}, volatility: {market_volatility:.2f})")
+        self.logger.info(f"Dynamic leverage for {symbol} ({strategy_name}): {dynamic_leverage:.1f}x")
         
         return dynamic_leverage
     
@@ -99,176 +96,127 @@ class LeverageManager:
             market_volatility: Market volatility measure
             
         Returns:
-            Tuple of (position_size, margin_required, leverage_used)
+            Tuple of (position_size, margin_required, leverage)
         """
         # Calculate dynamic leverage
         leverage = self.calculate_dynamic_leverage(symbol, strategy_name, signal_strength, market_volatility, current_price)
         
-        # Calculate risk amount (2% of capital)
+        # Calculate position size based on risk percentage
         risk_amount = available_capital * self.risk_percentage
+        position_value = risk_amount * leverage
+        position_size = position_value / current_price
         
-        # Calculate position size based on ACTUAL DOLLARS AT RISK (not notional value)
-        # max_position_size represents the actual capital at risk, not the leveraged position value
-        capital_at_risk = min(risk_amount, self.max_position_size)
+        # Calculate margin required
+        margin_required = position_value / leverage
         
-        # Calculate position size in units based on capital at risk
-        # Position size = (Capital at risk) / (Current price)
-        position_size = capital_at_risk / current_price
+        # Ensure position size doesn't exceed maximum
+        max_position_value = self.max_position_size * leverage
+        max_position_size = max_position_value / current_price
         
-        # Calculate margin required (this is the actual capital at risk)
-        margin_required = capital_at_risk
-        
-        # Apply margin buffer
-        margin_required *= (1 + self.margin_buffer)
-        
-        # Ensure we don't exceed max position size (capital at risk)
-        if margin_required > self.max_position_size:
-            margin_required = self.max_position_size
-            capital_at_risk = self.max_position_size / (1 + self.margin_buffer)
-            position_size = capital_at_risk / current_price
-        
-        self.logger.info(f"Position calculation for {symbol}: Capital at risk: ${capital_at_risk:.2f}, "
-                        f"Position size: {position_size:.4f}, Leverage: {leverage:.1f}x")
+        if position_size > max_position_size:
+            position_size = max_position_size
+            position_value = position_size * current_price
+            margin_required = position_value / leverage
         
         return position_size, margin_required, leverage
     
     def calculate_stop_loss_with_leverage(self, entry_price: float, side: str, leverage: float) -> float:
         """
-        Calculate stop loss price considering leverage.
+        Calculate stop loss price with leverage consideration.
         
         Args:
             entry_price: Entry price
-            side: 'long' or 'short'
+            side: Position side ('long' or 'short')
             leverage: Leverage used
             
         Returns:
             Stop loss price
         """
-        # Tighter stops for higher leverage
-        base_stop_percentage = self.stop_loss_percentage
-        leverage_adjusted_stop = base_stop_percentage / math.sqrt(leverage / 10)  # Adjust for leverage
+        # Calculate stop loss percentage based on leverage
+        # Higher leverage = tighter stop loss
+        base_stop_loss_pct = self.stop_loss_percentage / 100
+        leverage_adjusted_pct = base_stop_loss_pct / leverage
         
         if side == 'long':
-            return entry_price * (1 - leverage_adjusted_stop)
+            stop_loss = entry_price * (1 - leverage_adjusted_pct)
         else:
-            return entry_price * (1 + leverage_adjusted_stop)
+            stop_loss = entry_price * (1 + leverage_adjusted_pct)
+        
+        return stop_loss
     
     def calculate_take_profit_with_leverage(self, entry_price: float, side: str, leverage: float, 
                                          strategy_take_profit: float = None) -> float:
         """
-        Calculate take profit price considering leverage and strategy-specific logic.
+        Calculate take profit price with leverage consideration.
         
         Args:
             entry_price: Entry price
-            side: 'long' or 'short'
+            side: Position side ('long' or 'short')
             leverage: Leverage used
-            strategy_take_profit: Strategy-specific take profit price (if provided)
+            strategy_take_profit: Strategy-specific take profit (optional)
             
         Returns:
             Take profit price
         """
-        if strategy_take_profit is not None:
-            # Use strategy-specific take profit
+        if strategy_take_profit:
             return strategy_take_profit
         
-        # Fallback to leverage-adjusted calculation
-        # Higher leverage = higher profit targets
-        base_tp_percentage = 0.06  # 6% default (removed from config)
-        leverage_adjusted_tp = base_tp_percentage * math.sqrt(leverage / 10)
+        # Default take profit based on leverage
+        base_take_profit_pct = (self.stop_loss_percentage * 2) / 100  # 2x the stop loss
+        leverage_adjusted_pct = base_take_profit_pct / leverage
         
         if side == 'long':
-            return entry_price * (1 + leverage_adjusted_tp)
+            take_profit = entry_price * (1 + leverage_adjusted_pct)
         else:
-            return entry_price * (1 - leverage_adjusted_tp)
+            take_profit = entry_price * (1 - leverage_adjusted_pct)
+        
+        return take_profit
     
     def calculate_stop_loss_with_capital_at_risk(self, entry_price: float, side: str, capital_at_risk: float, max_loss_amount: float) -> float:
         """
-        Calculate stop loss price based on capital at risk and maximum loss amount.
+        Calculate stop loss based on capital at risk.
         
         Args:
             entry_price: Entry price
-            side: 'long' or 'short'
-            capital_at_risk: Actual capital at risk
-            max_loss_amount: Maximum dollar amount willing to lose
+            side: Position side ('long' or 'short')
+            capital_at_risk: Capital at risk
+            max_loss_amount: Maximum loss amount
             
         Returns:
             Stop loss price
         """
-        # Calculate the maximum loss percentage based on capital at risk
-        max_loss_percentage = max_loss_amount / capital_at_risk
-        
-        # Ensure the loss percentage doesn't exceed 100%
-        max_loss_percentage = min(max_loss_percentage, 1.0)
+        # Calculate price change needed to achieve max loss
+        price_change_pct = max_loss_amount / capital_at_risk
         
         if side == 'long':
-            return entry_price * (1 - max_loss_percentage)
+            stop_loss = entry_price * (1 - price_change_pct)
         else:
-            return entry_price * (1 + max_loss_percentage)
+            stop_loss = entry_price * (1 + price_change_pct)
+        
+        return stop_loss
     
     def calculate_take_profit_with_capital_at_risk(self, entry_price: float, side: str, capital_at_risk: float, target_profit_amount: float) -> float:
         """
-        Calculate take profit price based on capital at risk and target profit amount.
+        Calculate take profit based on capital at risk.
         
         Args:
             entry_price: Entry price
-            side: 'long' or 'short'
-            capital_at_risk: Actual capital at risk
-            target_profit_amount: Target dollar amount to profit
+            side: Position side ('long' or 'short')
+            capital_at_risk: Capital at risk
+            target_profit_amount: Target profit amount
             
         Returns:
             Take profit price
         """
-        # Calculate the target profit percentage based on capital at risk
-        target_profit_percentage = target_profit_amount / capital_at_risk
+        # Calculate price change needed to achieve target profit
+        price_change_pct = target_profit_amount / capital_at_risk
         
         if side == 'long':
-            return entry_price * (1 + target_profit_percentage)
+            take_profit = entry_price * (1 + price_change_pct)
         else:
-            return entry_price * (1 - target_profit_percentage)
-    
-    def check_liquidation_risk(self, symbol: str, current_price: float, position_size: float, entry_price: float, side: str) -> Tuple[bool, float]:
-        """
-        Check liquidation risk for a position.
+            take_profit = entry_price * (1 - price_change_pct)
         
-        Args:
-            symbol: Trading symbol
-            current_price: Current price
-            position_size: Position size
-            entry_price: Entry price
-            side: 'long' or 'short'
-            
-        Returns:
-            Tuple of (is_at_risk, risk_percentage)
-        """
-        # Get leverage from position info
-        if symbol not in self.open_positions:
-            return False, 0.0
-        
-        leverage = self.open_positions[symbol]['leverage']
-        
-        # Calculate unrealized PnL
-        if side == 'long':
-            pnl_percentage = (current_price - entry_price) / entry_price
-        else:
-            pnl_percentage = (entry_price - current_price) / entry_price
-        
-        # Calculate liquidation price (approximate)
-        # For long positions: liquidation_price = entry_price * (1 - 1/leverage)
-        # For short positions: liquidation_price = entry_price * (1 + 1/leverage)
-        if side == 'long':
-            liquidation_price = entry_price * (1 - 1/leverage)
-            distance_to_liquidation = (current_price - liquidation_price) / entry_price
-        else:
-            liquidation_price = entry_price * (1 + 1/leverage)
-            distance_to_liquidation = (liquidation_price - current_price) / entry_price
-        
-        # Calculate risk percentage
-        risk_percentage = (1 - distance_to_liquidation) * 100
-        
-        # Check if at risk
-        is_at_risk = risk_percentage > (self.liquidation_threshold * 100)
-        
-        return is_at_risk, risk_percentage
+        return take_profit
     
     def can_open_position(self, symbol: str, margin_required: float, available_capital: float) -> bool:
         """
@@ -276,23 +224,19 @@ class LeverageManager:
         
         Args:
             symbol: Trading symbol
-            margin_required: Margin required for the position
+            margin_required: Margin required for position
             available_capital: Available capital
             
         Returns:
             True if position can be opened
         """
-        # Check if we have enough margin
-        if margin_required > available_capital:
-            self.logger.warning(f"Insufficient margin for {symbol}: {margin_required} > {available_capital}")
+        # Check if we have enough capital
+        if margin_required > available_capital * (1 - self.margin_buffer):
             return False
         
-        # Check total margin usage
+        # Check if we're not over-leveraged
         total_margin_after = self.total_margin_used + margin_required
-        max_total_margin = available_capital * 0.8  # Use max 80% of capital
-        
-        if total_margin_after > max_total_margin:
-            self.logger.warning(f"Total margin usage too high: {total_margin_after} > {max_total_margin}")
+        if total_margin_after > available_capital * self.liquidation_threshold:
             return False
         
         return True
@@ -315,13 +259,10 @@ class LeverageManager:
             'entry_price': entry_price,
             'leverage': leverage,
             'margin_used': margin_used,
-            'entry_time': datetime.now(),
+            'entry_time': datetime.now()
         }
         
         self.total_margin_used += margin_used
-        self.available_margin -= margin_used
-        
-        self.logger.info(f"Recorded {side} position for {symbol}: {size} @ {entry_price} with {leverage:.1f}x leverage")
     
     def close_position(self, symbol: str, exit_price: float) -> Optional[Dict[str, Any]]:
         """
@@ -332,49 +273,51 @@ class LeverageManager:
             exit_price: Exit price
             
         Returns:
-            Position result dictionary or None if position not found
+            Position result dictionary or None
         """
         if symbol not in self.open_positions:
             return None
         
         position = self.open_positions[symbol]
+        entry_price = position['entry_price']
+        size = position['size']
+        side = position['side']
+        margin_used = position['margin_used']
         
         # Calculate PnL
-        if position['side'] == 'long':
-            pnl = (exit_price - position['entry_price']) * position['size']
-            pnl_percentage = ((exit_price - position['entry_price']) / position['entry_price']) * 100
+        if side == 'long':
+            pnl = (exit_price - entry_price) * size
         else:
-            pnl = (position['entry_price'] - exit_price) * position['size']
-            pnl_percentage = ((position['entry_price'] - exit_price) / position['entry_price']) * 100
+            pnl = (entry_price - exit_price) * size
         
-        # Calculate leveraged PnL
-        leveraged_pnl = pnl * position['leverage']
-        leveraged_pnl_percentage = pnl_percentage * position['leverage']
+        # Calculate PnL percentage
+        pnl_percentage = (pnl / margin_used) * 100
         
-        # Update margin
-        self.total_margin_used -= position['margin_used']
-        self.available_margin += position['margin_used']
+        # Update margin used
+        self.total_margin_used -= margin_used
         
         # Remove position
         del self.open_positions[symbol]
         
-        result = {
+        return {
             'symbol': symbol,
-            'side': position['side'],
-            'entry_price': position['entry_price'],
+            'side': side,
+            'entry_price': entry_price,
             'exit_price': exit_price,
-            'size': position['size'],
-            'leverage': position['leverage'],
+            'size': size,
             'pnl': pnl,
             'pnl_percentage': pnl_percentage,
-            'leveraged_pnl': leveraged_pnl,
-            'leveraged_pnl_percentage': leveraged_pnl_percentage,
-            'duration': (datetime.now() - position['entry_time']).total_seconds(),
+            'margin_used': margin_used
         }
+    
+    def update_available_margin(self, available_capital: float):
+        """
+        Update available margin.
         
-        self.logger.info(f"Closed position for {symbol}: {leveraged_pnl:.2f} USDC ({leveraged_pnl_percentage:.2f}%)")
-        
-        return result
+        Args:
+            available_capital: Available capital
+        """
+        self.available_margin = available_capital
     
     def get_margin_summary(self) -> Dict[str, Any]:
         """
@@ -386,40 +329,20 @@ class LeverageManager:
         return {
             'total_margin_used': self.total_margin_used,
             'available_margin': self.available_margin,
-            'margin_utilization': (self.total_margin_used / (self.total_margin_used + self.available_margin)) * 100 if (self.total_margin_used + self.available_margin) > 0 else 0,
-            'open_positions': len(self.open_positions),
-            'positions': list(self.open_positions.keys()),
+            'margin_utilization': (self.total_margin_used / self.available_margin * 100) if self.available_margin > 0 else 0,
+            'open_positions': len(self.open_positions)
         }
-    
-    def update_available_margin(self, available_capital: float):
-        """
-        Update available margin.
-        
-        Args:
-            available_capital: Available capital
-        """
-        self.available_margin = available_capital - self.total_margin_used
     
     def get_risk_summary(self) -> Dict[str, Any]:
         """
-        Get risk summary for all open positions.
+        Get risk summary.
         
         Returns:
             Risk summary dictionary
         """
-        risk_summary = {
-            'high_risk_positions': [],
-            'total_risk_score': 0,
-            'positions_at_risk': 0,
-        }
-        
-        for symbol, position in self.open_positions.items():
-            # This would need current price from market data
-            # For now, return basic position info
-            risk_summary['total_risk_score'] += position['leverage']
-            
-            if position['leverage'] > 15:  # High leverage positions
-                risk_summary['high_risk_positions'].append(symbol)
-                risk_summary['positions_at_risk'] += 1
-        
-        return risk_summary 
+        return {
+            'margin_buffer': self.margin_buffer * 100,
+            'liquidation_threshold': self.liquidation_threshold * 100,
+            'risk_percentage': self.risk_percentage * 100,
+            'stop_loss_percentage': self.stop_loss_percentage * 100
+        } 

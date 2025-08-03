@@ -66,6 +66,12 @@ class StrategyManager:
         self.max_positions_percentage = config['trading']['max_positions_percentage']
         self.base_currency = config['trading']['base_currency']
         
+        # Order monitoring configuration
+        self.order_timeout_minutes = config['trading']['order_timeout_minutes']
+        self.enable_stale_order_cleanup = config['trading']['enable_stale_order_cleanup']
+        self.position_sync_interval = config['trading']['position_sync_interval']
+        self.enable_position_validation = config['trading']['enable_position_validation']
+        
         # Trading pairs management
         self.max_pairs_to_trade = 20  # Default value, can be updated dynamically
         
@@ -236,6 +242,115 @@ class StrategyManager:
         self.market_api.stop_data_collection()
         self.logger.info("Strategy manager stopped")
     
+    def sync_positions_with_exchange(self):
+        """
+        Synchronize local positions with actual exchange positions.
+        This ensures accuracy by comparing local state with exchange state.
+        """
+        try:
+            # Get actual positions from exchange
+            exchange_positions = self.market_api.get_positions()
+            exchange_position_symbols = {pos['symbol'] for pos in exchange_positions}
+            
+            # Get local position symbols
+            local_position_symbols = set(self.positions.keys())
+            
+            # Find positions that exist locally but not on exchange (closed positions)
+            closed_positions = local_position_symbols - exchange_position_symbols
+            for symbol in closed_positions:
+                self.logger.info(f"Position {symbol} no longer exists on exchange, removing from local state")
+                if symbol in self.positions:
+                    del self.positions[symbol]
+            
+            # Find positions that exist on exchange but not locally (new positions)
+            new_positions = exchange_position_symbols - local_position_symbols
+            for symbol in new_positions:
+                exchange_pos = next(pos for pos in exchange_positions if pos['symbol'] == symbol)
+                self.logger.info(f"Found new position {symbol} on exchange, adding to local state")
+                
+                # Create new position object
+                position = Position(
+                    symbol=symbol,
+                    side=exchange_pos['side'],
+                    size=abs(exchange_pos['size']),
+                    entry_price=exchange_pos['entry_price'],
+                    entry_time=datetime.now(),  # We don't have exact entry time from exchange
+                    strategy='unknown',  # We don't know which strategy opened this
+                    current_price=exchange_pos['mark_price']
+                )
+                self.positions[symbol] = position
+            
+            # Update existing positions with current exchange data
+            for exchange_pos in exchange_positions:
+                symbol = exchange_pos['symbol']
+                if symbol in self.positions:
+                    local_pos = self.positions[symbol]
+                    # Update current price and size
+                    local_pos.current_price = exchange_pos['mark_price']
+                    local_pos.size = abs(exchange_pos['size'])
+                    
+                    # Check for significant discrepancies
+                    size_diff = abs(local_pos.size - abs(exchange_pos['size']))
+                    if size_diff > 0.001:  # Allow for small floating point differences
+                        self.logger.warning(f"Size discrepancy for {symbol}: local={local_pos.size}, exchange={exchange_pos['size']}")
+                        local_pos.size = abs(exchange_pos['size'])
+            
+            # Save updated positions to file
+            self.save_positions_to_file()
+            
+            self.logger.info(f"Position sync complete: {len(self.positions)} local positions, {len(exchange_positions)} exchange positions")
+            
+        except Exception as e:
+            self.logger.error(f"Error syncing positions with exchange: {e}")
+
+    def _cleanup_stale_orders(self):
+        """
+        Clean up stale orders that have been open for too long.
+        This helps prevent orders from getting stuck.
+        """
+        if not self.enable_stale_order_cleanup:
+            return
+            
+        try:
+            open_orders = self.market_api.get_open_orders()
+            
+            if not open_orders:
+                return
+            
+            current_time = datetime.now()
+            stale_orders = []
+            
+            for order in open_orders:
+                # Check if order is older than configured timeout (in minutes, converted to seconds)
+                order_timestamp = order.get('timestamp', 0)
+                if order_timestamp:
+                    order_time = datetime.fromtimestamp(order_timestamp / 1000)  # Convert from milliseconds
+                    time_diff = (current_time - order_time).total_seconds()  # Seconds
+                    timeout_seconds = self.order_timeout_minutes * 60  # Convert minutes to seconds
+                    
+                    if time_diff > timeout_seconds:
+                        stale_orders.append(order)
+                        self.logger.warning(f"Stale order detected: {order['symbol']} {order['side']} {order['size']} @ {order['price']} (age: {time_diff:.1f} seconds)")
+            
+            # Cancel stale orders
+            for order in stale_orders:
+                try:
+                    order_id = order.get('order_id')
+                    if order_id:
+                        success = self.market_api.cancel_order(order_id)
+                        if success:
+                            self.logger.info(f"Cancelled stale order: {order['symbol']} (ID: {order_id})")
+                        else:
+                            self.logger.error(f"Failed to cancel stale order: {order['symbol']} (ID: {order_id})")
+                except Exception as e:
+                    self.logger.error(f"Error cancelling stale order {order.get('symbol', 'unknown')}: {e}")
+            
+            if stale_orders:
+                self.logger.info(f"Cleaned up {len(stale_orders)} stale orders")
+                
+        except Exception as e:
+            self.logger.error(f"Error cleaning up stale orders: {e}")
+
     def _monitor_pending_orders(self):
         """Monitor any pending orders and update their status."""
         try:
@@ -254,6 +369,9 @@ class StrategyManager:
                     # Check if order is still valid (not too old)
                     # For now, we'll just log the status
                     self.logger.info(f"Open order: {symbol} {side} {size} @ {price} (ID: {order_id})")
+                    
+                    # TODO: Implement order timeout logic
+                    # TODO: Implement order cancellation for stale orders
             else:
                 # No open orders to monitor
                 pass
@@ -265,10 +383,29 @@ class StrategyManager:
         """Main trading loop."""
         self.logger.info("Starting trading loop...")
         
+        # Track last position sync time
+        last_position_sync = 0
+        
         while self.is_running:
             try:
+                current_time = time.time()
+                
+                # Sync positions with exchange at configured interval
+                if current_time - last_position_sync >= self.position_sync_interval:
+                    self.sync_positions_with_exchange()
+                    last_position_sync = current_time
+                
+                # Validate position integrity (if enabled)
+                if self.enable_position_validation:
+                    validation_results = self.validate_position_integrity()
+                    if validation_results['total_issues'] > 0:
+                        self.logger.error(f"Position validation found {validation_results['total_issues']} critical issues")
+                
                 # Monitor any pending orders
                 self._monitor_pending_orders()
+                
+                # Clean up stale orders
+                self._cleanup_stale_orders()
                 
                 # Get current trading pairs
                 trading_pairs = self.pair_selector.get_current_pairs()
@@ -1001,3 +1138,98 @@ class StrategyManager:
                 
         except Exception as e:
             self.logger.error(f"Error cleaning up open orders: {e}") 
+
+    def validate_position_integrity(self) -> Dict[str, Any]:
+        """
+        Validate position data integrity and detect anomalies.
+        
+        Returns:
+            Dictionary with validation results and any issues found
+        """
+        validation_results = {
+            'total_positions': len(self.positions),
+            'issues': [],
+            'warnings': [],
+            'anomalies': []
+        }
+        
+        try:
+            # Get exchange positions for comparison
+            exchange_positions = self.market_api.get_positions()
+            exchange_positions_dict = {pos['symbol']: pos for pos in exchange_positions}
+            
+            for symbol, local_position in self.positions.items():
+                # Check if position exists on exchange
+                if symbol not in exchange_positions_dict:
+                    validation_results['issues'].append(f"Position {symbol} exists locally but not on exchange")
+                    continue
+                
+                exchange_position = exchange_positions_dict[symbol]
+                
+                # Check size discrepancies
+                local_size = local_position.size
+                exchange_size = abs(exchange_position['size'])
+                size_diff = abs(local_size - exchange_size)
+                
+                if size_diff > 0.01:  # Allow for small differences
+                    validation_results['warnings'].append(
+                        f"Size discrepancy for {symbol}: local={local_size}, exchange={exchange_size}"
+                    )
+                
+                # Check price discrepancies
+                local_price = local_position.current_price
+                exchange_price = exchange_position['mark_price']
+                if local_price and exchange_price:
+                    price_diff_pct = abs(local_price - exchange_price) / exchange_price * 100
+                    if price_diff_pct > 1.0:  # More than 1% difference
+                        validation_results['anomalies'].append(
+                            f"Price discrepancy for {symbol}: local=${local_price}, exchange=${exchange_price} ({price_diff_pct:.2f}%)"
+                        )
+                
+                # Check for negative sizes (shouldn't happen)
+                if local_size < 0:
+                    validation_results['issues'].append(f"Negative size for {symbol}: {local_size}")
+                
+                # Check for unreasonable entry prices
+                if local_position.entry_price <= 0:
+                    validation_results['issues'].append(f"Invalid entry price for {symbol}: {local_position.entry_price}")
+                
+                # Check for positions that have been open too long (potential stuck positions)
+                time_open_hours = (datetime.now() - local_position.entry_time).total_seconds() / 3600
+                if time_open_hours > 168:  # More than 1 week
+                    validation_results['warnings'].append(f"Position {symbol} has been open for {time_open_hours:.1f} hours")
+            
+            # Check for positions on exchange that aren't tracked locally
+            local_symbols = set(self.positions.keys())
+            exchange_symbols = set(exchange_positions_dict.keys())
+            untracked_positions = exchange_symbols - local_symbols
+            
+            for symbol in untracked_positions:
+                validation_results['warnings'].append(f"Position {symbol} exists on exchange but not tracked locally")
+            
+            validation_results['total_issues'] = len(validation_results['issues'])
+            validation_results['total_warnings'] = len(validation_results['warnings'])
+            validation_results['total_anomalies'] = len(validation_results['anomalies'])
+            
+            # Log validation results
+            if validation_results['issues']:
+                self.logger.error(f"Position validation found {len(validation_results['issues'])} issues")
+                for issue in validation_results['issues']:
+                    self.logger.error(f"  - {issue}")
+            
+            if validation_results['warnings']:
+                self.logger.warning(f"Position validation found {len(validation_results['warnings'])} warnings")
+                for warning in validation_results['warnings']:
+                    self.logger.warning(f"  - {warning}")
+            
+            if validation_results['anomalies']:
+                self.logger.warning(f"Position validation found {len(validation_results['anomalies'])} anomalies")
+                for anomaly in validation_results['anomalies']:
+                    self.logger.warning(f"  - {anomaly}")
+            
+            return validation_results
+            
+        except Exception as e:
+            self.logger.error(f"Error validating position integrity: {e}")
+            validation_results['issues'].append(f"Validation error: {e}")
+            return validation_results 
