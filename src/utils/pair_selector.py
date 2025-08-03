@@ -94,23 +94,15 @@ class DynamicPairSelector:
         Filter assets based on criteria.
         
         Args:
-            universe: List of all available assets
+            universe: List of all available assets with market data
             
         Returns:
             List of eligible assets
         """
         eligible_assets = []
         
-        # Get market data for all assets to check open interest
         try:
-            meta_and_ctxs = self.market_api.info_client.meta_and_asset_ctxs()
-            if len(meta_and_ctxs) < 2:
-                self.logger.error("Invalid response from meta_and_asset_ctxs")
-                return []
-            
-            asset_contexts = meta_and_ctxs[1]
-            
-            for i, asset in enumerate(universe):
+            for asset in universe:
                 asset_name = asset.get('name', '')
                 
                 # Skip if explicitly excluded
@@ -121,35 +113,28 @@ class DynamicPairSelector:
                 if self.included_assets and asset_name not in self.included_assets:
                     continue
                 
-                # Get market data for this asset
-                if i < len(asset_contexts):
-                    asset_context = asset_contexts[i]
-                    open_interest = float(asset_context.get('openInterest', 0))
-                    volume_24h = float(asset_context.get('dayNtlVlm', 0))
-                    mark_price = float(asset_context.get('markPx', 0))
-                    
-                    # Check open interest thresholds
-                    if open_interest < self.min_open_interest or open_interest > self.max_open_interest:
-                        continue
-                    
-                    # Check minimum volume
-                    if volume_24h < 100000:  # $100k minimum daily volume
-                        continue
-                    
-                    # Check for valid price
-                    if mark_price <= 0:
-                        continue
-                    
-                    # Add market data to asset info
-                    asset_with_market_data = asset.copy()
-                    asset_with_market_data.update({
-                        'openInterest': open_interest,
-                        'volume24h': volume_24h,
-                        'markPrice': mark_price,
-                        'funding': float(asset_context.get('funding', 0)),
-                    })
-                    
-                    eligible_assets.append(asset_with_market_data)
+                # Extract market data from asset
+                open_interest = float(asset.get('openInterest', 0))
+                volume_24h = float(asset.get('volume24h', 0))
+                mark_price = float(asset.get('markPrice', 0))
+                
+                # Check open interest thresholds
+                if open_interest < self.min_open_interest or open_interest > self.max_open_interest:
+                    continue
+                
+                # Check minimum volume
+                if volume_24h < 100000:  # $100k minimum daily volume
+                    continue
+                
+                # Check for valid price
+                if mark_price <= 0:
+                    continue
+                
+                # Check additional eligibility criteria
+                if not self._is_asset_eligible(asset):
+                    continue
+                
+                eligible_assets.append(asset)
         
         except Exception as e:
             self.logger.error(f"Error filtering assets: {e}")
@@ -195,6 +180,8 @@ class DynamicPairSelector:
     def _rank_and_select_pairs(self, eligible_assets: List[Dict[str, Any]]) -> List[str]:
         """
         Rank eligible assets and select the best pairs.
+        Ranking is primarily based on open interest (80% weight),
+        with volume (15%) and leverage (5%) as secondary factors.
         
         Args:
             eligible_assets: List of eligible assets
@@ -211,16 +198,21 @@ class DynamicPairSelector:
         # Calculate ranking scores using real market data
         df['open_interest_score'] = df['openInterest'].astype(float) / 1000000  # Normalize to millions
         df['volume_score'] = df['volume24h'].astype(float) / 1000000  # Normalize to millions
-        df['leverage_score'] = df['maxLeverage'].astype(float) / 100  # Normalize leverage
         
-        # Calculate composite score
+        # Handle leverage score - use default if not available
+        if 'maxLeverage' in df.columns:
+            df['leverage_score'] = df['maxLeverage'].astype(float) / 100  # Normalize leverage
+        else:
+            df['leverage_score'] = 0.5  # Default leverage score
+        
+        # Calculate composite score - primarily based on open interest
         df['composite_score'] = (
-            df['open_interest_score'] * 0.5 +
-            df['volume_score'] * 0.3 +
-            df['leverage_score'] * 0.2
+            df['open_interest_score'] * 0.8 +  # 80% weight on open interest
+            df['volume_score'] * 0.15 +        # 15% weight on volume
+            df['leverage_score'] * 0.05        # 5% weight on leverage
         )
         
-        # Sort by composite score
+        # Sort by composite score (primarily open interest)
         df_sorted = df.sort_values('composite_score', ascending=False)
         
         # Select top pairs
@@ -229,11 +221,12 @@ class DynamicPairSelector:
         
         # Log selection details
         for i, (_, row) in enumerate(df_sorted.head(max_pairs).iterrows()):
+            leverage_info = f"{row['maxLeverage']}x" if 'maxLeverage' in row else "N/A"
             self.logger.info(
                 f"Rank {i+1}: {row['name']} - "
-                f"OI: ${float(row['openInterest']):,.0f}, "
+                f"OI: ${float(row['openInterest']):,.0f} (primary), "
                 f"Volume: ${float(row['volume24h']):,.0f}, "
-                f"Leverage: {row['maxLeverage']}x, "
+                f"Leverage: {leverage_info}, "
                 f"Score: {row['composite_score']:.3f}"
             )
         
