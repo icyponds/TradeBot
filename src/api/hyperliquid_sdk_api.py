@@ -340,9 +340,10 @@ class HyperliquidSDKAPI:
             sdk_side = 'B' if side == 'buy' else 'A'
             
             # Place order using the SDK
+            # The SDK expects the symbol as the first positional argument
             order_response = self.exchange_client.order(
-                symbol=symbol,
-                side=sdk_side,
+                symbol,  # First positional argument
+                sdk_side,
                 sz=size,
                 px=price if price else 0,  # 0 for market orders
                 reduce_only=False,
