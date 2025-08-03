@@ -339,16 +339,50 @@ class HyperliquidSDKAPI:
             # Convert side to SDK format
             sdk_side = 'B' if side == 'buy' else 'A'
             
-            # Place order using the SDK
-            # The SDK expects the symbol as the first positional argument
-            order_response = self.exchange_client.order(
-                symbol,  # First positional argument
-                sdk_side,
-                sz=size,
-                px=price if price else 0,  # 0 for market orders
-                reduce_only=False,
-                order_type='LIMIT' if price else 'MARKET'
-            )
+            # Get asset info to determine proper rounding
+            asset_info = self._get_asset_info(symbol)
+            if asset_info and 'szDecimals' in asset_info:
+                sz_decimals = asset_info['szDecimals']
+                # Round size to the asset's required decimal places
+                rounded_size = round(size, sz_decimals)
+                self.logger.info(f"Rounded {symbol} order size from {size} to {rounded_size} (szDecimals: {sz_decimals})")
+            else:
+                # Fallback to 2 decimal places if asset info not available
+                rounded_size = round(size, 2)
+                self.logger.warning(f"Asset info not available for {symbol}, using fallback rounding to 2 decimals")
+            
+            # Ensure minimum order size (0.01)
+            if rounded_size < 0.01:
+                self.logger.warning(f"Order size {rounded_size} too small for {symbol}, skipping order")
+                return None
+            
+            # Try with keyword arguments first
+            try:
+                order_response = self.exchange_client.order(
+                    symbol,
+                    sdk_side,
+                    sz=rounded_size,
+                    px=price if price else 0,
+                    reduce_only=False,
+                    order_type='LIMIT' if price else 'MARKET'
+                )
+            except (TypeError, AttributeError):
+                # Fallback to positional arguments
+                order_response = self.exchange_client.order(
+                    symbol,
+                    sdk_side,
+                    rounded_size,
+                    price if price else 0,
+                    False,
+                    'LIMIT' if price else 'MARKET'
+                )
+            except Exception as e:
+                # Try with minimal parameters
+                order_response = self.exchange_client.order(
+                    symbol,
+                    sdk_side,
+                    rounded_size
+                )
             
             return {
                 "status": "success",
@@ -362,6 +396,44 @@ class HyperliquidSDKAPI:
             
         except Exception as e:
             self.logger.error(f"Error placing order: {e}")
+            return None
+    
+    def _get_asset_info(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """
+        Get asset information including szDecimals for proper rounding.
+        
+        Args:
+            symbol: Trading symbol
+            
+        Returns:
+            Asset info dictionary or None if not found
+        """
+        try:
+            # Get meta and asset contexts
+            meta_and_ctxs = self.info_client.meta_and_asset_ctxs()
+            
+            if len(meta_and_ctxs) < 2:
+                return None
+            
+            meta = meta_and_ctxs[0]
+            asset_contexts = meta_and_ctxs[1]
+            
+            # Find the asset by name
+            for i, asset in enumerate(meta['universe']):
+                if asset['name'] == symbol:
+                    # Get corresponding asset context
+                    asset_context = asset_contexts[i] if i < len(asset_contexts) else {}
+                    return {
+                        'name': asset['name'],
+                        'szDecimals': asset.get('szDecimals', 2),  # Default to 2 if not found
+                        'pxDecimals': asset.get('pxDecimals', 2),  # Default to 2 if not found
+                        **asset_context
+                    }
+            
+            return None
+            
+        except Exception as e:
+            self.logger.error(f"Error getting asset info for {symbol}: {e}")
             return None
     
     def get_positions(self) -> List[Dict[str, Any]]:

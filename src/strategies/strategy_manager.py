@@ -278,7 +278,7 @@ class StrategyManager:
             if not signal:
                 return
             
-            self.logger.info(f"{strategy_name} signal for {symbol}: {signal['action']} at {current_price}")
+            self.logger.info(f"{strategy_name} signal for {symbol}: {signal['signal']} at {current_price}")
             
             # Check if we should act on the signal
             if self._should_execute_signal(symbol, signal, current_price, ohlcv, strategy_name):
@@ -295,9 +295,9 @@ class StrategyManager:
             position = self.positions[symbol]
             
             # If we have a position, only act on opposite signals
-            if position.side == 'long' and signal['action'] == 'buy':
+            if position.side == 'long' and signal['signal'] == 'buy':
                 return False
-            elif position.side == 'short' and signal['action'] == 'sell':
+            elif position.side == 'short' and signal['signal'] == 'sell':
                 return False
         
         # Calculate signal strength and volatility
@@ -326,10 +326,10 @@ class StrategyManager:
         """Execute a trade based on signal."""
         try:
             # Determine trade side
-            if signal['action'] == 'buy':
+            if signal['signal'] == 'buy':
                 side = 'buy'
                 position_side = 'long'
-            elif signal['action'] == 'sell':
+            elif signal['signal'] == 'sell':
                 side = 'sell'
                 position_side = 'short'
             else:
