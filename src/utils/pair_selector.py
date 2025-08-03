@@ -83,6 +83,12 @@ class DynamicPairSelector:
             self.last_scan_time = datetime.now()
             
             self.logger.info(f"Selected {len(selected_pairs)} pairs for trading: {selected_pairs}")
+            
+            # Subscribe to WebSocket feeds for selected pairs
+            for symbol in selected_pairs:
+                if hasattr(self.market_api, 'subscribe_symbol'):
+                    self.market_api.subscribe_symbol(symbol)
+            
             return selected_pairs
             
         except Exception as e:

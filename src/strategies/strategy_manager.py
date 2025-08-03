@@ -12,7 +12,7 @@ from datetime import datetime
 import pandas as pd
 import math
 
-from ..api.hyperliquid_sdk_api import HyperliquidSDKAPI as HyperliquidAPI
+from ..api.hyperliquid_websocket_api import HyperliquidWebSocketAPI as HyperliquidAPI
 from ..utils.pair_selector import DynamicPairSelector
 from ..utils.leverage_manager import LeverageManager
 from .moving_average_strategy import MovingAverageStrategy
@@ -35,6 +35,9 @@ class StrategyManager:
         
         # Initialize API client
         self.market_api = HyperliquidAPI(config)
+        
+        # Start WebSocket connection
+        self.market_api.start()
         
         # Initialize pair selector
         self.pair_selector = DynamicPairSelector(config, self.market_api)
@@ -279,7 +282,11 @@ class StrategyManager:
     def stop(self):
         """Stop the strategy manager."""
         self.is_running = False
-        self.market_api.stop_data_collection()
+        
+        # Stop WebSocket connection
+        if hasattr(self, 'market_api'):
+            self.market_api.stop()
+        
         self.logger.info("Strategy manager stopped")
     
     def sync_positions_with_exchange(self):
@@ -430,7 +437,8 @@ class StrategyManager:
             try:
                 current_time = time.time()
                 
-                # Sync positions with exchange at configured interval
+                # With WebSocket, positions are updated in real-time
+                # Only sync periodically to ensure accuracy
                 if current_time - last_position_sync >= self.position_sync_interval:
                     self.sync_positions_with_exchange()
                     last_position_sync = current_time
