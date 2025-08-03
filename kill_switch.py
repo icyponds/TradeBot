@@ -98,7 +98,7 @@ def main():
             # Place close order
             order_result = api.place_order(symbol, close_side, size, current_price)
             
-            if order_result and order_result.get('status') == 'success':
+            if order_result and order_result.get('status') in ['success', 'pending']:
                 # Calculate PnL
                 entry_price = position_data.get('entry_price', 0)
                 if entry_price > 0:
