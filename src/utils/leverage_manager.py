@@ -1,5 +1,5 @@
 """
-Leverage management for aggressive trading strategies.
+Dynamic leverage management for trading strategies.
 """
 
 import logging
@@ -9,7 +9,7 @@ import math
 
 
 class LeverageManager:
-    """Manages leverage positions and risk for aggressive trading."""
+    """Manages dynamic leverage based on strategy and trade conditions."""
     
     def __init__(self, config: Dict[str, Any]):
         """
@@ -21,13 +21,9 @@ class LeverageManager:
         self.config = config
         self.logger = logging.getLogger(__name__)
         
-        # Leverage configuration
-        self.max_leverage = config['leverage']['max_leverage']
-        self.default_leverage = config['leverage']['default_leverage']
-        self.min_leverage = config['leverage']['min_leverage']
-        self.margin_buffer = config['leverage']['margin_buffer_percentage'] / 100
-        self.liquidation_threshold = config['leverage']['liquidation_risk_threshold'] / 100
-        self.leverage_per_symbol = config['leverage']['leverage_per_symbol']
+        # Risk management configuration
+        self.margin_buffer = config['risk_management']['margin_buffer_percentage'] / 100
+        self.liquidation_threshold = config['risk_management']['liquidation_risk_threshold'] / 100
         
         # Trading configuration
         self.max_position_size = config['trading']['max_position_size']
@@ -39,39 +35,74 @@ class LeverageManager:
         self.total_margin_used = 0.0
         self.available_margin = 0.0
         
-        self.logger.info(f"Initialized leverage manager - Max: {self.max_leverage}x, Default: {self.default_leverage}x")
+        self.logger.info("Initialized dynamic leverage manager")
     
-    def get_leverage_for_symbol(self, symbol: str) -> float:
+    def calculate_dynamic_leverage(self, symbol: str, strategy_name: str, signal_strength: float, 
+                                 market_volatility: float, current_price: float) -> float:
         """
-        Get the appropriate leverage for a symbol.
+        Calculate dynamic leverage based on strategy and market conditions.
         
         Args:
             symbol: Trading symbol
+            strategy_name: Name of the strategy
+            signal_strength: Signal strength (0-1)
+            market_volatility: Market volatility measure
+            current_price: Current asset price
             
         Returns:
-            Leverage value for the symbol
+            Dynamic leverage value
         """
-        # Check symbol-specific leverage
-        if symbol in self.leverage_per_symbol:
-            leverage = self.leverage_per_symbol[symbol]
-            return min(leverage, self.max_leverage)
+        # Base leverage ranges for different strategies
+        strategy_leverage_ranges = {
+            'moving_average': (8, 15),  # Conservative for trend following
+            'rsi': (12, 20),            # Aggressive for mean reversion
+            'scalping': (15, 25),       # Very aggressive for scalping
+            'default': (10, 18),        # Default range
+        }
         
-        # Use default leverage
-        return self.default_leverage
+        # Get leverage range for strategy
+        min_leverage, max_leverage = strategy_leverage_ranges.get(strategy_name, strategy_leverage_ranges['default'])
+        
+        # Adjust leverage based on signal strength
+        # Stronger signals get higher leverage
+        signal_multiplier = 0.5 + (signal_strength * 0.5)  # 0.5 to 1.0
+        
+        # Adjust leverage based on volatility
+        # Lower volatility = higher leverage, higher volatility = lower leverage
+        volatility_multiplier = max(0.3, 1.0 - market_volatility)  # 0.3 to 1.0
+        
+        # Calculate base leverage
+        base_leverage = min_leverage + (max_leverage - min_leverage) * signal_multiplier
+        
+        # Apply volatility adjustment
+        dynamic_leverage = base_leverage * volatility_multiplier
+        
+        # Ensure leverage is within reasonable bounds
+        dynamic_leverage = max(5, min(25, dynamic_leverage))
+        
+        self.logger.info(f"Dynamic leverage for {symbol} ({strategy_name}): {dynamic_leverage:.1f}x "
+                        f"(signal: {signal_strength:.2f}, volatility: {market_volatility:.2f})")
+        
+        return dynamic_leverage
     
-    def calculate_leveraged_position_size(self, symbol: str, current_price: float, available_capital: float) -> Tuple[float, float, float]:
+    def calculate_leveraged_position_size(self, symbol: str, current_price: float, available_capital: float,
+                                        strategy_name: str, signal_strength: float, market_volatility: float) -> Tuple[float, float, float]:
         """
-        Calculate leveraged position size with risk management.
+        Calculate leveraged position size with dynamic leverage.
         
         Args:
             symbol: Trading symbol
             current_price: Current asset price
             available_capital: Available capital for trading
+            strategy_name: Name of the strategy
+            signal_strength: Signal strength (0-1)
+            market_volatility: Market volatility measure
             
         Returns:
             Tuple of (position_size, margin_required, leverage_used)
         """
-        leverage = self.get_leverage_for_symbol(symbol)
+        # Calculate dynamic leverage
+        leverage = self.calculate_dynamic_leverage(symbol, strategy_name, signal_strength, market_volatility, current_price)
         
         # Calculate risk amount (2% of capital)
         risk_amount = available_capital * self.risk_percentage
@@ -156,7 +187,11 @@ class LeverageManager:
         Returns:
             Tuple of (is_at_risk, risk_percentage)
         """
-        leverage = self.get_leverage_for_symbol(symbol)
+        # Get leverage from position info
+        if symbol not in self.open_positions:
+            return False, 0.0
+        
+        leverage = self.open_positions[symbol]['leverage']
         
         # Calculate unrealized PnL
         if side == 'long':
@@ -233,7 +268,7 @@ class LeverageManager:
         self.total_margin_used += margin_used
         self.available_margin -= margin_used
         
-        self.logger.info(f"Recorded {side} position for {symbol}: {size} @ {entry_price} with {leverage}x leverage")
+        self.logger.info(f"Recorded {side} position for {symbol}: {size} @ {entry_price} with {leverage:.1f}x leverage")
     
     def close_position(self, symbol: str, exit_price: float) -> Optional[Dict[str, Any]]:
         """

@@ -43,14 +43,10 @@ def load_config() -> Dict[str, Any]:
             "take_profit_percentage": float(os.getenv("TAKE_PROFIT_PERCENTAGE", "6.0")),
         },
         
-        # Leverage Configuration
-        "leverage": {
-            "max_leverage": float(os.getenv("MAX_LEVERAGE", "20")),
-            "default_leverage": float(os.getenv("DEFAULT_LEVERAGE", "15")),
-            "min_leverage": float(os.getenv("MIN_LEVERAGE", "10")),
+        # Risk Management Configuration
+        "risk_management": {
             "margin_buffer_percentage": float(os.getenv("MARGIN_BUFFER_PERCENTAGE", "20")),
             "liquidation_risk_threshold": float(os.getenv("LIQUIDATION_RISK_THRESHOLD", "80")),
-            "leverage_per_symbol": _parse_leverage_per_symbol(),
         },
         
         # Strategy Configuration
@@ -87,25 +83,6 @@ def load_config() -> Dict[str, Any]:
     return config
 
 
-def _parse_leverage_per_symbol() -> Dict[str, float]:
-    """
-    Parse leverage per symbol configuration.
-    
-    Returns:
-        Dictionary mapping symbols to leverage values
-    """
-    leverage_str = os.getenv("LEVERAGE_PER_SYMBOL", "BTC:20,ETH:18,SOL:15,MATIC:12,ADA:10")
-    leverage_dict = {}
-    
-    if leverage_str:
-        for pair in leverage_str.split(","):
-            if ":" in pair:
-                symbol, leverage = pair.strip().split(":")
-                leverage_dict[symbol.strip()] = float(leverage.strip())
-    
-    return leverage_dict
-
-
 def validate_config(config: Dict[str, Any]) -> bool:
     """
     Validate configuration settings.
@@ -129,16 +106,6 @@ def validate_config(config: Dict[str, Any]) -> bool:
         
         if config['trading']['risk_percentage'] <= 0 or config['trading']['risk_percentage'] > 100:
             print("ERROR: Risk percentage must be between 0 and 100")
-            return False
-        
-        # Validate leverage configuration
-        if config['leverage']['max_leverage'] < config['leverage']['min_leverage']:
-            print("ERROR: Max leverage cannot be less than min leverage")
-            return False
-        
-        if config['leverage']['default_leverage'] < config['leverage']['min_leverage'] or \
-           config['leverage']['default_leverage'] > config['leverage']['max_leverage']:
-            print("ERROR: Default leverage must be between min and max leverage")
             return False
         
         # Validate strategy configuration

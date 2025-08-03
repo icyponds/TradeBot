@@ -7,6 +7,7 @@ import time
 from typing import Dict, List, Any, Optional
 from datetime import datetime
 import pandas as pd
+import math
 
 from ..api.hyperliquid_api import HyperliquidAPI
 from ..utils.pair_selector import DynamicPairSelector
@@ -66,7 +67,7 @@ class StrategyManager:
         
         self.logger.info(f"Initialized strategy manager with {len(self.strategies)} strategies")
         self.logger.info(f"Timeframe: {self.timeframe}, Execution interval: {self.execution_interval}s")
-        self.logger.info(f"Leverage: {config['leverage']['default_leverage']}x default, {config['leverage']['max_leverage']}x max")
+        self.logger.info("Dynamic leverage management enabled")
     
     def _get_execution_interval(self) -> int:
         """Calculate execution interval based on timeframe."""
@@ -80,6 +81,92 @@ class StrategyManager:
             '1d': 14400, # Execute every 4 hours for 1d timeframe
         }
         return timeframe_intervals.get(self.timeframe, 60)
+    
+    def _calculate_signal_strength(self, ohlcv: pd.DataFrame, strategy_name: str) -> float:
+        """
+        Calculate signal strength based on strategy and market data.
+        
+        Args:
+            ohlcv: OHLCV data
+            strategy_name: Name of the strategy
+            
+        Returns:
+            Signal strength (0-1)
+        """
+        try:
+            if strategy_name == 'moving_average':
+                # Calculate MA crossover strength
+                if len(ohlcv) < 10:
+                    return 0.5
+                
+                short_ma = ohlcv['close'].rolling(window=5).mean()
+                long_ma = ohlcv['close'].rolling(window=10).mean()
+                
+                if len(short_ma) < 2 or len(long_ma) < 2:
+                    return 0.5
+                
+                # Calculate crossover strength
+                ma_diff = abs(short_ma.iloc[-1] - long_ma.iloc[-1]) / long_ma.iloc[-1]
+                signal_strength = min(1.0, ma_diff * 10)  # Scale to 0-1
+                
+                return signal_strength
+                
+            elif strategy_name == 'rsi':
+                # Calculate RSI signal strength
+                if len(ohlcv) < 14:
+                    return 0.5
+                
+                # Simple RSI calculation
+                delta = ohlcv['close'].diff()
+                gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+                loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+                rs = gain / loss
+                rsi = 100 - (100 / (1 + rs))
+                
+                if len(rsi) < 1:
+                    return 0.5
+                
+                current_rsi = rsi.iloc[-1]
+                
+                # Calculate distance from neutral (50)
+                rsi_distance = abs(current_rsi - 50) / 50
+                signal_strength = min(1.0, rsi_distance * 2)  # Scale to 0-1
+                
+                return signal_strength
+                
+            else:
+                return 0.5  # Default signal strength
+                
+        except Exception as e:
+            self.logger.error(f"Error calculating signal strength: {e}")
+            return 0.5
+    
+    def _calculate_market_volatility(self, ohlcv: pd.DataFrame) -> float:
+        """
+        Calculate market volatility measure.
+        
+        Args:
+            ohlcv: OHLCV data
+            
+        Returns:
+            Volatility measure (0-1)
+        """
+        try:
+            if len(ohlcv) < 20:
+                return 0.5
+            
+            # Calculate price volatility
+            returns = ohlcv['close'].pct_change().dropna()
+            volatility = returns.std() * math.sqrt(252)  # Annualized volatility
+            
+            # Normalize to 0-1 range (assuming max 100% annualized volatility)
+            normalized_volatility = min(1.0, volatility)
+            
+            return normalized_volatility
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating volatility: {e}")
+            return 0.5
     
     def start(self):
         """Start the strategy manager."""
@@ -188,13 +275,14 @@ class StrategyManager:
             self.logger.info(f"{strategy_name} signal for {symbol}: {signal['action']} at {current_price}")
             
             # Check if we should act on the signal
-            if self._should_execute_signal(symbol, signal, current_price):
-                self._execute_trade(symbol, signal, current_price, strategy_name)
+            if self._should_execute_signal(symbol, signal, current_price, ohlcv, strategy_name):
+                self._execute_trade(symbol, signal, current_price, strategy_name, ohlcv)
                 
         except Exception as e:
             self.logger.error(f"Error executing {strategy_name} strategy for {symbol}: {e}")
     
-    def _should_execute_signal(self, symbol: str, signal: Dict[str, Any], current_price: float) -> bool:
+    def _should_execute_signal(self, symbol: str, signal: Dict[str, Any], current_price: float, 
+                              ohlcv: pd.DataFrame, strategy_name: str) -> bool:
         """Determine if we should execute a trading signal."""
         # Check if we already have a position
         if symbol in self.positions:
@@ -206,23 +294,29 @@ class StrategyManager:
             elif position.side == 'short' and signal['action'] == 'sell':
                 return False
         
-        # Calculate leveraged position size
+        # Calculate signal strength and volatility
+        signal_strength = self._calculate_signal_strength(ohlcv, strategy_name)
+        market_volatility = self._calculate_market_volatility(ohlcv)
+        
+        # Calculate dynamic leveraged position size
         position_size, margin_required, leverage = self.leverage_manager.calculate_leveraged_position_size(
-            symbol, current_price, self.available_capital
+            symbol, current_price, self.available_capital, strategy_name, signal_strength, market_volatility
         )
         
         # Check if we can open the position
         if not self.leverage_manager.can_open_position(symbol, margin_required, self.available_capital):
             return False
         
-        # Update signal with calculated size
+        # Update signal with calculated size and leverage info
         signal['size'] = position_size
         signal['leverage'] = leverage
         signal['margin_required'] = margin_required
+        signal['signal_strength'] = signal_strength
+        signal['market_volatility'] = market_volatility
         
         return True
     
-    def _execute_trade(self, symbol: str, signal: Dict[str, Any], current_price: float, strategy_name: str):
+    def _execute_trade(self, symbol: str, signal: Dict[str, Any], current_price: float, strategy_name: str, ohlcv: pd.DataFrame):
         """Execute a trade based on signal."""
         try:
             # Determine trade side
@@ -239,6 +333,8 @@ class StrategyManager:
             position_size = signal['size']
             leverage = signal['leverage']
             margin_required = signal['margin_required']
+            signal_strength = signal['signal_strength']
+            market_volatility = signal['market_volatility']
             
             # Calculate stop loss and take profit with leverage
             stop_loss = self.leverage_manager.calculate_stop_loss_with_leverage(
@@ -284,7 +380,8 @@ class StrategyManager:
                 self.trades.append(trade)
                 self.total_trades += 1
                 
-                self.logger.info(f"Executed {side} trade for {symbol}: {position_size} @ {current_price} with {leverage}x leverage")
+                self.logger.info(f"Executed {side} trade for {symbol}: {position_size} @ {current_price} with {leverage:.1f}x leverage")
+                self.logger.info(f"Signal strength: {signal_strength:.2f}, Volatility: {market_volatility:.2f}")
                 self.logger.info(f"Stop loss: {stop_loss:.2f}, Take profit: {take_profit:.2f}")
                 
             else:
@@ -356,10 +453,13 @@ class StrategyManager:
             'data_summary': self.market_api.get_data_summary(),
             'margin_summary': margin_summary,
             'risk_summary': risk_summary,
-            'leverage_config': {
-                'default_leverage': self.config['leverage']['default_leverage'],
-                'max_leverage': self.config['leverage']['max_leverage'],
-                'leverage_per_symbol': self.config['leverage']['leverage_per_symbol'],
+            'dynamic_leverage': {
+                'enabled': True,
+                'strategy_ranges': {
+                    'moving_average': '8-15x',
+                    'rsi': '12-20x',
+                    'scalping': '15-25x',
+                },
             },
         }
     
