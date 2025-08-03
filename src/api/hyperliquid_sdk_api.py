@@ -336,8 +336,8 @@ class HyperliquidSDKAPI:
             return None
         
         try:
-            # Convert side to SDK format
-            sdk_side = 'B' if side == 'buy' else 'A'
+            # Convert side to SDK format (boolean instead of string)
+            is_buy = side == 'buy'
             
             # Get asset info to determine proper rounding
             asset_info = self._get_asset_info(symbol)
@@ -356,33 +356,18 @@ class HyperliquidSDKAPI:
                 self.logger.warning(f"Order size {rounded_size} too small for {symbol}, skipping order")
                 return None
             
-            # Try with keyword arguments first
-            try:
-                order_response = self.exchange_client.order(
-                    symbol,
-                    sdk_side,
-                    sz=rounded_size,
-                    px=price if price else 0,
-                    reduce_only=False,
-                    order_type='LIMIT' if price else 'MARKET'
-                )
-            except (TypeError, AttributeError):
-                # Fallback to positional arguments
-                order_response = self.exchange_client.order(
-                    symbol,
-                    sdk_side,
-                    rounded_size,
-                    price if price else 0,
-                    False,
-                    'LIMIT' if price else 'MARKET'
-                )
-            except Exception as e:
-                # Try with minimal parameters
-                order_response = self.exchange_client.order(
-                    symbol,
-                    sdk_side,
-                    rounded_size
-                )
+            # Import order type enum
+            from hyperliquid.utils.signing import OrderType
+            
+            # Place order using correct SDK signature
+            order_response = self.exchange_client.order(
+                name=symbol,
+                is_buy=is_buy,
+                sz=rounded_size,
+                limit_px=price if price else 0,
+                order_type=OrderType.LIMIT if price else OrderType.MARKET,
+                reduce_only=False
+            )
             
             return {
                 "status": "success",
