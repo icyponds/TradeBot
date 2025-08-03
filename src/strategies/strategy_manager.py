@@ -34,12 +34,40 @@ class StrategyManager:
         self.strategies = {}
         self.enabled_strategies = config['strategies']['enabled']
         
+        # Get timeframe configuration
+        self.timeframe = config['strategies']['timeframe']
+        self.ohlcv_limit = config['strategies']['ohlcv_limit']
+        
+        # Set execution frequency based on timeframe
+        self.execution_interval = self._get_execution_interval()
+        
         self._initialize_strategies()
         
         # Trading state
         self.is_running = False
         self.positions = {}
         self.trades = []
+        
+        self.logger.info(f"Strategy manager initialized with {self.timeframe} timeframe, executing every {self.execution_interval} seconds")
+    
+    def _get_execution_interval(self) -> int:
+        """
+        Get execution interval based on timeframe.
+        
+        Returns:
+            Execution interval in seconds
+        """
+        timeframe_intervals = {
+            '1m': 30,    # Execute every 30 seconds for 1m timeframe
+            '5m': 60,    # Execute every 60 seconds for 5m timeframe
+            '15m': 120,  # Execute every 2 minutes for 15m timeframe
+            '30m': 300,  # Execute every 5 minutes for 30m timeframe
+            '1h': 600,   # Execute every 10 minutes for 1h timeframe
+            '4h': 1800,  # Execute every 30 minutes for 4h timeframe
+            '1d': 3600,  # Execute every hour for 1d timeframe
+        }
+        
+        return timeframe_intervals.get(self.timeframe, 60)
     
     def _initialize_strategies(self):
         """Initialize all enabled strategies."""
@@ -72,7 +100,7 @@ class StrategyManager:
         try:
             while self.is_running:
                 self._execute_trading_cycle()
-                time.sleep(60)  # Wait 1 minute between cycles
+                time.sleep(self.execution_interval)  # Dynamic interval based on timeframe
                 
         except KeyboardInterrupt:
             self.logger.info("Strategy manager stopped by user")
@@ -97,7 +125,8 @@ class StrategyManager:
         # Get market data for all selected symbols
         for symbol in trading_pairs:
             try:
-                market_data = self.market_api.get_market_data(symbol)
+                # Get market data with configured timeframe
+                market_data = self.market_api.get_market_data(symbol, self.timeframe)
                 if market_data is None:
                     self.logger.warning(f"Failed to get market data for {symbol}")
                     continue
@@ -229,6 +258,8 @@ class StrategyManager:
             'strategies': {},
             'pair_performance': self.pair_selector.get_pair_performance_summary(),
             'current_pairs': self.pair_selector.get_current_pairs(),
+            'timeframe': self.timeframe,
+            'execution_interval': self.execution_interval,
         }
         
         # Calculate overall PnL

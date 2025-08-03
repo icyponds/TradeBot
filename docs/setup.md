@@ -86,11 +86,36 @@ INCLUDED_ASSETS=BTC,ETH,SOL,MATIC,ADA,DOT,LINK,UNI,AAVE,COMP
 EXCLUDED_ASSETS=SPY,QQQ,GLD,SLV
 ```
 
+### Scalping Configuration
+
+The bot is configured for **scalping** with the following optimized settings:
+
+#### **Timeframe Settings**
+- `STRATEGY_TIMEFRAME=1m`: 1-minute charts for rapid signal generation
+- `OHLCV_LIMIT=100`: Fetch 100 candles for analysis
+
+#### **Strategy Parameters**
+- `MA_SHORT_PERIOD=5`: 5-period moving average (very short-term)
+- `MA_LONG_PERIOD=10`: 10-period moving average (short-term)
+- `RSI_PERIOD=14`: Standard 14-period RSI
+
+#### **Execution Frequency**
+- **1m timeframe**: Executes every 30 seconds
+- **5m timeframe**: Executes every 60 seconds
+- **15m timeframe**: Executes every 2 minutes
+- **30m timeframe**: Executes every 5 minutes
+
+#### **Position Sizing**
+- `MAX_POSITION_SIZE=50`: Maximum 50 USDC per position
+- `RISK_PERCENTAGE=2.0`: 2% risk per trade
+- `STOP_LOSS_PERCENTAGE=5.0`: 5% stop loss
+- `TAKE_PROFIT_PERCENTAGE=10.0`: 10% take profit
+
 ### Trading Configuration
 
 Edit the following variables in your `.env` file:
 
-- `MAX_POSITION_SIZE`: Maximum position size in USDC
+- `MAX_POSITION_SIZE`: Maximum position size in USDC (default: 50)
 - `RISK_PERCENTAGE`: Risk per trade as percentage
 - `STOP_LOSS_PERCENTAGE`: Stop loss percentage
 - `TAKE_PROFIT_PERCENTAGE`: Take profit percentage
@@ -150,6 +175,24 @@ flake8 src/
 - Configurable scan intervals
 - Asset inclusion/exclusion lists
 - Maximum pair limits
+
+## Scalping Strategy Features
+
+### **Rapid Signal Generation**
+- **1-minute timeframe**: Captures short-term price movements
+- **Frequent execution**: Every 30 seconds for 1m timeframe
+- **Quick entries/exits**: Designed for fast profit taking
+
+### **Risk Management for Scalping**
+- **Small position sizes**: 50 USDC maximum per trade
+- **Tight stop losses**: 5% to minimize losses
+- **Quick take profits**: 10% for rapid profit capture
+- **Multiple opportunities**: Trades up to 10 pairs simultaneously
+
+### **Technical Analysis for Scalping**
+- **Short MA periods**: 5/10 for rapid crossover signals
+- **RSI oversold/overbought**: Quick reversal opportunities
+- **Volume confirmation**: Ensures liquidity for quick exits
 
 ## Hyperliquid Features
 
@@ -224,6 +267,7 @@ Key metrics tracked:
 - **Liquidation Risk**: Positions can be liquidated if margin requirements aren't met
 - **Funding Rate Risk**: Perpetual futures have funding rates that affect PnL
 - **Dynamic Selection Risk**: New pairs may have different risk profiles
+- **Scalping Risk**: Rapid trading increases transaction costs and slippage
 - **Never invest more than you can afford to lose**
 - **Test thoroughly with small amounts first**
 - **Monitor the bot regularly**
