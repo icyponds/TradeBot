@@ -29,7 +29,13 @@ def load_config() -> Dict[str, Any]:
         
         # Trading Configuration
         "trading": {
-            "symbols": os.getenv("TRADING_SYMBOLS", "BTC,ETH,SOL").split(","),
+            "dynamic_pair_selection": os.getenv("DYNAMIC_PAIR_SELECTION", "true").lower() == "true",
+            "min_open_interest": float(os.getenv("MIN_OPEN_INTEREST", "1000000")),  # $1M minimum
+            "max_open_interest": float(os.getenv("MAX_OPEN_INTEREST", "100000000")),  # $100M maximum
+            "max_pairs_to_trade": int(os.getenv("MAX_PAIRS_TO_TRADE", "10")),
+            "scan_interval_minutes": int(os.getenv("SCAN_INTERVAL_MINUTES", "60")),
+            "excluded_assets": os.getenv("EXCLUDED_ASSETS", "").split(",") if os.getenv("EXCLUDED_ASSETS") else [],
+            "included_assets": os.getenv("INCLUDED_ASSETS", "").split(",") if os.getenv("INCLUDED_ASSETS") else [],
             "base_currency": os.getenv("BASE_CURRENCY", "USDC"),
             "max_position_size": float(os.getenv("MAX_POSITION_SIZE", "1000")),
             "risk_percentage": float(os.getenv("RISK_PERCENTAGE", "2.0")),
@@ -86,7 +92,6 @@ def validate_config(config: Dict[str, Any]) -> bool:
     required_fields = [
         "api.private_key",
         "api.wallet_address",
-        "trading.symbols",
     ]
     
     for field in required_fields:
@@ -101,5 +106,15 @@ def validate_config(config: Dict[str, Any]) -> bool:
         if not value:
             print(f"Empty required configuration: {field}")
             return False
+    
+    # Validate trading configuration
+    trading_config = config['trading']
+    if trading_config['min_open_interest'] >= trading_config['max_open_interest']:
+        print("MIN_OPEN_INTEREST must be less than MAX_OPEN_INTEREST")
+        return False
+    
+    if trading_config['max_pairs_to_trade'] <= 0:
+        print("MAX_PAIRS_TO_TRADE must be greater than 0")
+        return False
     
     return True 

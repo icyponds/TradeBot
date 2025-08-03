@@ -9,6 +9,7 @@ from datetime import datetime
 
 from .moving_average_strategy import MovingAverageStrategy
 from .rsi_strategy import RSIStrategy
+from ..utils.pair_selector import DynamicPairSelector
 
 
 class StrategyManager:
@@ -25,6 +26,9 @@ class StrategyManager:
         self.config = config
         self.market_api = market_api
         self.logger = logging.getLogger(__name__)
+        
+        # Initialize dynamic pair selector
+        self.pair_selector = DynamicPairSelector(config, market_api)
         
         # Initialize strategies
         self.strategies = {}
@@ -81,8 +85,17 @@ class StrategyManager:
         """Execute one trading cycle for all strategies."""
         self.logger.info("Executing trading cycle...")
         
-        # Get market data for all symbols
-        for symbol in self.config['trading']['symbols']:
+        # Get current trading pairs from dynamic selector
+        trading_pairs = self.pair_selector.get_current_pairs()
+        
+        if not trading_pairs:
+            self.logger.warning("No trading pairs selected")
+            return
+        
+        self.logger.info(f"Trading {len(trading_pairs)} pairs: {trading_pairs}")
+        
+        # Get market data for all selected symbols
+        for symbol in trading_pairs:
             try:
                 market_data = self.market_api.get_market_data(symbol)
                 if market_data is None:
@@ -182,6 +195,9 @@ class StrategyManager:
         pnl = (price - position['price']) * position['size']
         pnl_percentage = ((price - position['price']) / position['price']) * 100
         
+        # Update pair performance tracking
+        self.pair_selector.update_pair_performance(symbol, pnl)
+        
         # Record the sell trade
         trade = {
             'strategy': strategy_name,
@@ -211,6 +227,8 @@ class StrategyManager:
             'total_trades': len(self.trades),
             'open_positions': len(self.positions),
             'strategies': {},
+            'pair_performance': self.pair_selector.get_pair_performance_summary(),
+            'current_pairs': self.pair_selector.get_current_pairs(),
         }
         
         # Calculate overall PnL
@@ -246,4 +264,9 @@ class StrategyManager:
         for strategy in self.strategies.values():
             strategy.reset()
         
-        self.logger.info("Strategy manager reset") 
+        self.logger.info("Strategy manager reset")
+    
+    def force_pair_rescan(self):
+        """Force a rescan of available trading pairs."""
+        self.pair_selector.force_rescan()
+        self.logger.info("Forced pair rescan completed") 

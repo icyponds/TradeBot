@@ -47,11 +47,49 @@
    HYPERLIQUID_WALLET_ADDRESS=your_wallet_address_here
    ```
 
+### Dynamic Trading Pair Selection
+
+The bot now automatically selects trading pairs based on open interest and other criteria:
+
+#### **Open Interest Thresholds**
+- `MIN_OPEN_INTEREST`: Minimum open interest in USD (default: $1,000,000)
+- `MAX_OPEN_INTEREST`: Maximum open interest in USD (default: $100,000,000)
+- `MAX_PAIRS_TO_TRADE`: Maximum number of pairs to trade simultaneously (default: 10)
+
+#### **Scanning Configuration**
+- `DYNAMIC_PAIR_SELECTION`: Enable/disable dynamic selection (default: true)
+- `SCAN_INTERVAL_MINUTES`: How often to rescan for new pairs (default: 60 minutes)
+
+#### **Asset Filtering**
+- `EXCLUDED_ASSETS`: Comma-separated list of assets to exclude (e.g., SHIB,DOGE)
+- `INCLUDED_ASSETS`: Comma-separated list of assets to include (optional, if empty all assets are considered)
+
+#### **Example Configurations**
+
+**Conservative (High liquidity only):**
+```bash
+MIN_OPEN_INTEREST=5000000
+MAX_OPEN_INTEREST=50000000
+MAX_PAIRS_TO_TRADE=5
+```
+
+**Aggressive (More opportunities):**
+```bash
+MIN_OPEN_INTEREST=500000
+MAX_OPEN_INTEREST=200000000
+MAX_PAIRS_TO_TRADE=15
+```
+
+**Crypto-only:**
+```bash
+INCLUDED_ASSETS=BTC,ETH,SOL,MATIC,ADA,DOT,LINK,UNI,AAVE,COMP
+EXCLUDED_ASSETS=SPY,QQQ,GLD,SLV
+```
+
 ### Trading Configuration
 
 Edit the following variables in your `.env` file:
 
-- `TRADING_SYMBOLS`: Comma-separated list of trading pairs (e.g., BTC,ETH,SOL)
 - `MAX_POSITION_SIZE`: Maximum position size in USDC
 - `RISK_PERCENTAGE`: Risk per trade as percentage
 - `STOP_LOSS_PERCENTAGE`: Stop loss percentage
@@ -88,6 +126,30 @@ pytest tests/
 black src/
 flake8 src/
 ```
+
+## Dynamic Pair Selection Features
+
+### **Automatic Asset Discovery**
+- Scans all available assets on Hyperliquid
+- Ranks assets by open interest, volume, and price
+- Automatically adapts to new assets added by Hyperliquid
+
+### **Smart Filtering**
+- **Liquidity Filter**: Only trades assets with sufficient open interest
+- **Volume Filter**: Minimum daily volume requirements
+- **Spread Filter**: Avoids assets with excessive bid-ask spreads
+- **Price Filter**: Ensures valid pricing data
+
+### **Performance Tracking**
+- Tracks PnL for each trading pair
+- Uses performance data to optimize future selections
+- Logs detailed selection criteria and rankings
+
+### **Flexible Configuration**
+- Adjustable open interest thresholds
+- Configurable scan intervals
+- Asset inclusion/exclusion lists
+- Maximum pair limits
 
 ## Hyperliquid Features
 
@@ -137,6 +199,7 @@ The bot includes several risk management features:
 - **Take Profit**: Automatic take profit orders
 - **Maximum Position Size**: Limits total position exposure
 - **Leverage Management**: Configurable leverage limits
+- **Dynamic Pair Selection**: Focuses on liquid assets only
 
 ## Monitoring
 
@@ -150,6 +213,8 @@ Key metrics tracked:
 - Strategy performance
 - Error handling
 - WebSocket connection status
+- **Pair selection criteria and rankings**
+- **Performance by trading pair**
 
 ## Safety Notes
 
@@ -158,6 +223,7 @@ Key metrics tracked:
 - **Leverage Risk**: Leverage can amplify both gains and losses
 - **Liquidation Risk**: Positions can be liquidated if margin requirements aren't met
 - **Funding Rate Risk**: Perpetual futures have funding rates that affect PnL
+- **Dynamic Selection Risk**: New pairs may have different risk profiles
 - **Never invest more than you can afford to lose**
 - **Test thoroughly with small amounts first**
 - **Monitor the bot regularly**
@@ -178,9 +244,10 @@ Key metrics tracked:
    - Check firewall settings
    - Monitor connection logs
 
-3. **Insufficient Data**
-   - Ensure you have enough historical data
-   - Check symbol availability on Hyperliquid
+3. **No Trading Pairs Selected**
+   - Check open interest thresholds
+   - Verify asset inclusion/exclusion lists
+   - Check minimum volume requirements
 
 4. **Strategy Errors**
    - Verify strategy parameters
