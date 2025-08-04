@@ -329,4 +329,149 @@ class HyperliquidWebSocketAPI:
     
     def test_connection(self) -> bool:
         """Test WebSocket connection."""
-        return self.is_connected 
+        # Wait for connection to be established (max 10 seconds)
+        timeout = 10
+        start_time = time.time()
+        
+        while not self.is_connected and (time.time() - start_time) < timeout:
+            time.sleep(0.1)
+        
+        if self.is_connected:
+            self.logger.info("WebSocket connection test successful")
+            return True
+        else:
+            self.logger.error("WebSocket connection test failed - connection not established within timeout")
+            return False
+    
+    def start_data_collection(self):
+        """Start data collection (placeholder for compatibility)."""
+        self.logger.info("Data collection started (WebSocket handles this automatically)")
+    
+    def stop_data_collection(self):
+        """Stop data collection (placeholder for compatibility)."""
+        self.logger.info("Data collection stopped")
+    
+    def get_account_balance(self) -> Optional[Dict[str, Any]]:
+        """Get account balance from Hyperliquid using REST API."""
+        if not self.wallet_address:
+            self.logger.warning("No wallet address configured - cannot fetch real balance")
+            return None
+        
+        try:
+            import requests
+            
+            # Get user state from Hyperliquid API
+            # Try different API formats
+            api_payloads = [
+                {"type": "userState", "user": self.wallet_address},
+                {"type": "userState", "user": self.wallet_address, "chainId": 42161},
+                {"type": "userState", "user": self.wallet_address, "chainId": "42161"},
+            ]
+            
+            response = None
+            for payload in api_payloads:
+                try:
+                    response = requests.post(
+                        f"{self.base_url}/info",
+                        json=payload,
+                        timeout=10
+                    )
+                    if response.status_code == 200:
+                        break
+                except Exception:
+                    continue
+            
+            if response and response.status_code == 200:
+                data = response.json()
+                self.logger.debug(f"User state response: {data}")
+                
+                # Extract balance information from user state
+                margin_summary = data.get('marginSummary', {})
+                
+                balance_info = {
+                    'wallet_address': self.wallet_address,
+                    'total_equity': float(margin_summary.get('accountValue', 0)),
+                    'free_margin': float(margin_summary.get('freeCollateral', 0)),
+                    'used_margin': float(margin_summary.get('totalNtlPos', 0)),
+                    'unrealized_pnl': float(margin_summary.get('unrealizedPnl', 0)),
+                    'realized_pnl': float(margin_summary.get('realizedPnl', 0)),
+                }
+                
+                self.logger.info(f"Account balance retrieved: ${balance_info['total_equity']:.2f} total equity")
+                return balance_info
+            else:
+                self.logger.error(f"Failed to get account balance: HTTP {response.status_code if response else 'No response'}")
+                return None
+                
+        except Exception as e:
+            self.logger.error(f"Error getting account balance: {e}")
+            return None
+    
+    def get_asset_info(self) -> Optional[Dict[str, Any]]:
+        """Get asset information from Hyperliquid using REST API."""
+        try:
+            import requests
+            
+            # Use REST API to get both meta and asset context data
+            response = requests.post(
+                f"{self.base_url}/info",
+                json={"type": "metaAndAssetCtxs"},
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                if len(data) >= 2:
+                    meta = data[0]  # Asset metadata
+                    asset_contexts = data[1]  # Market context data
+                    
+                    # Convert to the expected format
+                    universe = []
+                    for i, asset in enumerate(meta.get('universe', [])):
+                        # Skip delisted assets
+                        if asset.get('isDelisted', False):
+                            continue
+                        
+                        # Get corresponding market context data
+                        asset_context = asset_contexts[i] if i < len(asset_contexts) else {}
+                        
+                        # Calculate open interest in dollars (tokens * price)
+                        open_interest_tokens = float(asset_context.get('openInterest', 0))
+                        mark_price = float(asset_context.get('markPx', 0))
+                        open_interest_dollars = open_interest_tokens * mark_price
+                        
+                        # Calculate 24h volume in dollars
+                        day_base_volume = float(asset_context.get('dayBaseVlm', 0))
+                        volume_24h_dollars = day_base_volume * mark_price
+                        
+                        universe.append({
+                            'name': asset['name'],
+                            'maxLeverage': asset.get('maxLeverage', 10),
+                            'szDecimals': asset.get('szDecimals', 0),
+                            'marginTableId': asset.get('marginTableId', 0),
+                            'openInterest': open_interest_dollars,
+                            'markPx': mark_price,
+                            'volume24h': volume_24h_dollars,
+                            'bid': float(asset_context.get('impactPxs', [0, 0])[0]),
+                            'ask': float(asset_context.get('impactPxs', [0, 0])[1]),
+                            'funding': float(asset_context.get('funding', 0)),
+                            'oraclePx': float(asset_context.get('oraclePx', 0)),
+                        })
+                    
+                    self.logger.info(f"Retrieved {len(universe)} trading assets with market data")
+                    return {'universe': universe}
+                else:
+                    self.logger.error("Invalid response format from Hyperliquid API")
+                    return None
+            else:
+                self.logger.error(f"Failed to get asset info: HTTP {response.status_code}")
+                return None
+                
+        except Exception as e:
+            self.logger.error(f"Error getting asset info: {e}")
+            return None
+    
+    def is_data_available(self, symbol: str) -> bool:
+        """Check if sufficient data is available for a symbol."""
+        # For WebSocket API, consider data available if we can get current price
+        return self.get_current_price(symbol) is not None 

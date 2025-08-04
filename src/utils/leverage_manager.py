@@ -1,46 +1,57 @@
 """
-Simplified leverage management for trading strategies.
+Leverage manager for dynamic leverage calculation and position sizing.
 """
 
 import logging
-from typing import Dict, Any, Optional, Tuple
-from datetime import datetime
 import math
+from typing import Dict, Any, Optional, Tuple
+from .portfolio_manager import PortfolioManager
 
 
 class LeverageManager:
-    """Manages dynamic leverage based on strategy and trade conditions."""
+    """
+    Manages dynamic leverage calculation and position sizing based on market conditions and portfolio.
+    """
     
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], portfolio_manager: PortfolioManager = None):
         """
         Initialize the leverage manager.
         
         Args:
             config: Configuration dictionary
+            portfolio_manager: Portfolio manager instance for position sizing
         """
         self.config = config
         self.logger = logging.getLogger(__name__)
+        self.portfolio_manager = portfolio_manager
         
         # Risk management configuration
-        self.margin_buffer = config['risk_management']['margin_buffer_percentage'] / 100
-        self.liquidation_threshold = config['risk_management']['liquidation_risk_threshold'] / 100
-        
-        # Trading configuration
-        self.max_position_size = config['trading']['max_position_size']
-        self.risk_percentage = config['trading']['risk_percentage'] / 100
-        self.stop_loss_percentage = config['trading']['stop_loss_percentage'] / 100
+        self.risk_percentage = config['trading']['risk_percentage']
+        self.stop_loss_percentage = config['trading']['stop_loss_percentage']
+        self.margin_buffer_percentage = config['risk_management']['margin_buffer_percentage']
+        self.liquidation_risk_threshold = config['risk_management']['liquidation_risk_threshold']
         
         # Position tracking
-        self.open_positions = {}  # symbol -> position info
+        self.positions = {}
         self.total_margin_used = 0.0
         self.available_margin = 0.0
         
-        self.logger.info("Initialized simplified leverage manager")
+        self.logger.info("Leverage manager initialized")
+    
+    def set_portfolio_manager(self, portfolio_manager: PortfolioManager):
+        """
+        Set the portfolio manager for position sizing calculations.
+        
+        Args:
+            portfolio_manager: Portfolio manager instance
+        """
+        self.portfolio_manager = portfolio_manager
+        self.logger.info("Portfolio manager set for leverage manager")
     
     def calculate_dynamic_leverage(self, symbol: str, strategy_name: str, signal_strength: float, 
                                  market_volatility: float, current_price: float) -> float:
         """
-        Calculate dynamic leverage based on strategy and market conditions.
+        Calculate dynamic leverage based on market conditions and signal strength.
         
         Args:
             symbol: Trading symbol
@@ -52,40 +63,43 @@ class LeverageManager:
         Returns:
             Dynamic leverage value
         """
-        # Base leverage ranges for different strategies
-        strategy_leverage_ranges = {
-            'moving_average': (8, 15),  # Conservative for trend following
-            'rsi': (12, 20),            # Aggressive for mean reversion
-            'scalping': (15, 25),       # Very aggressive for scalping
-            'default': (10, 18),        # Default range
-        }
-        
-        # Get leverage range for strategy
-        min_leverage, max_leverage = strategy_leverage_ranges.get(strategy_name, strategy_leverage_ranges['default'])
+        # Base leverage calculation
+        base_leverage = 2.0  # Conservative base leverage
         
         # Adjust leverage based on signal strength
-        signal_multiplier = 0.5 + (signal_strength * 0.5)  # 0.5 to 1.0
+        signal_adjustment = 1.0 + (signal_strength * 0.5)  # Up to 50% increase for strong signals
         
-        # Adjust leverage based on volatility
-        volatility_multiplier = max(0.3, 1.0 - market_volatility)  # 0.3 to 1.0
+        # Adjust leverage based on market volatility (inverse relationship)
+        # Handle edge case where market_volatility is -1.0 (which would cause division by zero)
+        if market_volatility <= -1.0:
+            volatility_adjustment = 0.1  # Very low leverage for extreme volatility
+        else:
+            volatility_adjustment = 1.0 / (1.0 + market_volatility)  # Lower leverage for high volatility
         
-        # Calculate base leverage
-        base_leverage = min_leverage + (max_leverage - min_leverage) * signal_multiplier
+        # Strategy-specific adjustments
+        strategy_adjustment = 1.0
+        if strategy_name == 'moving_average':
+            strategy_adjustment = 1.1  # Slightly higher leverage for trend-following
+        elif strategy_name == 'rsi':
+            strategy_adjustment = 0.9  # Lower leverage for mean-reversion
         
-        # Apply volatility adjustment
-        dynamic_leverage = base_leverage * volatility_multiplier
+        # Calculate final leverage
+        dynamic_leverage = base_leverage * signal_adjustment * volatility_adjustment * strategy_adjustment
         
-        # Ensure leverage is within reasonable bounds
-        dynamic_leverage = max(5, min(25, dynamic_leverage))
+        # Apply limits
+        min_leverage = 1.0
+        max_leverage = 10.0  # Conservative maximum leverage
         
-        self.logger.info(f"Dynamic leverage for {symbol} ({strategy_name}): {dynamic_leverage:.1f}x")
+        dynamic_leverage = max(min_leverage, min(max_leverage, dynamic_leverage))
+        
+        self.logger.debug(f"Dynamic leverage for {symbol} ({strategy_name}): {dynamic_leverage:.1f}x")
         
         return dynamic_leverage
     
     def calculate_leveraged_position_size(self, symbol: str, current_price: float, available_capital: float,
                                         strategy_name: str, signal_strength: float, market_volatility: float) -> Tuple[float, float, float]:
         """
-        Calculate leveraged position size with dynamic leverage.
+        Calculate leveraged position size with dynamic leverage and portfolio-based sizing.
         
         Args:
             symbol: Trading symbol
@@ -101,34 +115,47 @@ class LeverageManager:
         # Calculate dynamic leverage
         leverage = self.calculate_dynamic_leverage(symbol, strategy_name, signal_strength, market_volatility, current_price)
         
+        # Get maximum position size from portfolio manager if available
+        if self.portfolio_manager:
+            max_position_size = self.portfolio_manager.calculate_max_position_size(symbol)
+        else:
+            # Fallback to fixed amount from config
+            max_position_size = self.config['trading']['max_position_size_usd']
+        
         # Calculate maximum capital at risk per trade
-        # Use $50 as the maximum risk per trade (not percentage-based)
-        max_risk_per_trade = self.max_position_size  # $50 max risk per trade
+        max_risk_per_trade = max_position_size
         
         # Calculate position value based on maximum risk
         # With leverage, the position value = risk_amount * leverage
         position_value = max_risk_per_trade * leverage
         
         # Calculate position size in units
+        if current_price <= 0:
+            self.logger.warning(f"Invalid current price for {symbol}: {current_price}")
+            return 0.0, 0.0, leverage
+        
         position_size = position_value / current_price
         
         # Calculate margin required (this is the actual capital at risk)
         margin_required = max_risk_per_trade
         
-        # Ensure we don't exceed the $50 max risk per trade
-        if margin_required > self.max_position_size:
-            margin_required = self.max_position_size
+        # Ensure we don't exceed the maximum risk per trade
+        if margin_required > max_position_size:
+            margin_required = max_position_size
             position_value = margin_required * leverage
             position_size = position_value / current_price
         
         # Ensure we don't exceed maximum position size
-        max_position_value = self.max_position_size * leverage
-        max_position_size = max_position_value / current_price
+        max_position_value = max_position_size * leverage
+        max_position_size_units = max_position_value / current_price if current_price > 0 else 0.0
         
-        if position_size > max_position_size:
-            position_size = max_position_size
+        if position_size > max_position_size_units:
+            position_size = max_position_size_units
             position_value = position_size * current_price
             margin_required = position_value / leverage
+        
+        self.logger.debug(f"Position size calculation for {symbol}: {position_size:.4f} units, "
+                         f"${margin_required:.2f} margin, {leverage:.1f}x leverage")
         
         return position_size, margin_required, leverage
     
@@ -147,7 +174,13 @@ class LeverageManager:
         # Calculate stop loss percentage based on leverage
         # Higher leverage = tighter stop loss
         base_stop_loss_pct = self.stop_loss_percentage / 100
-        leverage_adjusted_pct = base_stop_loss_pct / leverage
+        
+        # Handle division by zero
+        if leverage <= 0:
+            self.logger.warning(f"Invalid leverage value: {leverage}, using default stop loss")
+            leverage_adjusted_pct = base_stop_loss_pct
+        else:
+            leverage_adjusted_pct = base_stop_loss_pct / leverage
         
         if side == 'long':
             stop_loss = entry_price * (1 - leverage_adjusted_pct)
@@ -175,7 +208,13 @@ class LeverageManager:
         
         # Default take profit based on leverage
         base_take_profit_pct = (self.stop_loss_percentage * 2) / 100  # 2x the stop loss
-        leverage_adjusted_pct = base_take_profit_pct / leverage
+        
+        # Handle division by zero
+        if leverage <= 0:
+            self.logger.warning(f"Invalid leverage value: {leverage}, using default take profit")
+            leverage_adjusted_pct = base_take_profit_pct
+        else:
+            leverage_adjusted_pct = base_take_profit_pct / leverage
         
         if side == 'long':
             take_profit = entry_price * (1 + leverage_adjusted_pct)
@@ -198,7 +237,11 @@ class LeverageManager:
             Stop loss price
         """
         # Calculate price change needed to achieve max loss
-        price_change_pct = max_loss_amount / capital_at_risk
+        if capital_at_risk <= 0:
+            self.logger.warning(f"Invalid capital at risk: {capital_at_risk}, using default stop loss")
+            price_change_pct = 0.02  # Default 2% stop loss
+        else:
+            price_change_pct = max_loss_amount / capital_at_risk
         
         if side == 'long':
             stop_loss = entry_price * (1 - price_change_pct)
@@ -221,7 +264,11 @@ class LeverageManager:
             Take profit price
         """
         # Calculate price change needed to achieve target profit
-        price_change_pct = target_profit_amount / capital_at_risk
+        if capital_at_risk <= 0:
+            self.logger.warning(f"Invalid capital at risk: {capital_at_risk}, using default take profit")
+            price_change_pct = 0.06  # Default 6% take profit
+        else:
+            price_change_pct = target_profit_amount / capital_at_risk
         
         if side == 'long':
             take_profit = entry_price * (1 + price_change_pct)
@@ -243,12 +290,12 @@ class LeverageManager:
             True if position can be opened
         """
         # Check if we have enough capital
-        if margin_required > available_capital * (1 - self.margin_buffer):
+        if margin_required > available_capital * (1 - self.margin_buffer_percentage / 100):
             return False
         
         # Check if we're not over-leveraged
         total_margin_after = self.total_margin_used + margin_required
-        if total_margin_after > available_capital * self.liquidation_threshold:
+        if total_margin_after > available_capital * self.liquidation_risk_threshold:
             return False
         
         return True
@@ -265,7 +312,7 @@ class LeverageManager:
             leverage: Leverage used
             margin_used: Margin used
         """
-        self.open_positions[symbol] = {
+        self.positions[symbol] = {
             'side': side,
             'size': size,
             'entry_price': entry_price,
@@ -287,10 +334,10 @@ class LeverageManager:
         Returns:
             Position result dictionary or None
         """
-        if symbol not in self.open_positions:
+        if symbol not in self.positions:
             return None
         
-        position = self.open_positions[symbol]
+        position = self.positions[symbol]
         entry_price = position['entry_price']
         size = position['size']
         side = position['side']
@@ -309,7 +356,7 @@ class LeverageManager:
         self.total_margin_used -= margin_used
         
         # Remove position
-        del self.open_positions[symbol]
+        del self.positions[symbol]
         
         return {
             'symbol': symbol,
@@ -342,7 +389,7 @@ class LeverageManager:
             'total_margin_used': self.total_margin_used,
             'available_margin': self.available_margin,
             'margin_utilization': (self.total_margin_used / self.available_margin * 100) if self.available_margin > 0 else 0,
-            'open_positions': len(self.open_positions)
+            'open_positions': len(self.positions)
         }
     
     def get_risk_summary(self) -> Dict[str, Any]:
@@ -353,8 +400,8 @@ class LeverageManager:
             Risk summary dictionary
         """
         return {
-            'margin_buffer': self.margin_buffer * 100,
-            'liquidation_threshold': self.liquidation_threshold * 100,
+            'margin_buffer': self.margin_buffer_percentage,
+            'liquidation_threshold': self.liquidation_risk_threshold * 100,
             'risk_percentage': self.risk_percentage * 100,
             'stop_loss_percentage': self.stop_loss_percentage * 100
         } 

@@ -39,52 +39,59 @@ This trading bot is designed for Hyperliquid perpetual futures trading with **ag
    cp env.example .env
    ```
 
-4. **Configure your `.env` file**:
-   ```bash
-   # Hyperliquid API Configuration
-   HYPERLIQUID_API_URL=https://api.hyperliquid.xyz
-   HYPERLIQUID_WS_URL=wss://api.hyperliquid.xyz/ws
-   HYPERLIQUID_PRIVATE_KEY=your_private_key_here
-   HYPERLIQUID_WALLET_ADDRESS=your_wallet_address_here
-   
-   # Trading Configuration
-   BASE_CURRENCY=USDC
-   MAX_POSITION_SIZE=50
-   
-   # Strategy Configuration
-   STRATEGY_TIMEFRAME=1m
-   MA_SHORT_PERIOD=5
-   MA_LONG_PERIOD=10
-   RSI_PERIOD=14
-   RSI_OVERBOUGHT=70
-   RSI_OVERSOLD=30
-   
-   # Dynamic Pair Selection
-   DYNAMIC_PAIR_SELECTION=true
-   MIN_OPEN_INTEREST=1000000
-   MAX_OPEN_INTEREST=100000000
-   MAX_PAIRS_TO_TRADE=5
-   SCAN_INTERVAL_MINUTES=5
-   
-   # Asset Filtering (leave empty for no restrictions)
-   EXCLUDED_ASSETS=
-   INCLUDED_ASSETS=
-   
-   # Risk Management (Aggressive)
-   RISK_PERCENTAGE=2.0
-   STOP_LOSS_PERCENTAGE=2.0
-   
-   # Leverage Configuration (AGGRESSIVE)
-   MAX_LEVERAGE=20
-   DEFAULT_LEVERAGE=15
-   MIN_LEVERAGE=10
-   LEVERAGE_PER_SYMBOL=BTC:20,ETH:18,SOL:15,MATIC:12,ADA:10
-   MARGIN_BUFFER_PERCENTAGE=20
-   LIQUIDATION_RISK_THRESHOLD=80
-   
-   # Logging
-   LOG_LEVEL=INFO
-   ```
+## Configuration
+
+### Environment Variables
+
+Copy the `env.example` file to `.env` and configure the following variables:
+
+#### API Configuration
+- `HYPERLIQUID_PRIVATE_KEY`: Your private key for trading
+- `HYPERLIQUID_WALLET_ADDRESS`: Your wallet address
+- `HYPERLIQUID_API_URL`: Hyperliquid API URL (default: https://api.hyperliquid.xyz)
+
+#### Portfolio-based Position Sizing
+- `USE_PORTFOLIO_BASED_SIZING`: Enable portfolio-based position sizing (default: true)
+- `MAX_POSITION_SIZE_USD`: Maximum USD per position (fallback, default: 50)
+- `MAX_POSITION_SIZE_PERCENTAGE`: Maximum percentage of portfolio per position (default: 2.0%)
+- `MAX_POSITIONS_PERCENTAGE`: Maximum percentage of portfolio in all positions (default: 33.33%)
+- `RISK_PERCENTAGE`: Risk percentage per trade (default: 2.0%)
+- `STOP_LOSS_PERCENTAGE`: Stop loss percentage (default: 2.0%)
+
+#### Trading Configuration
+- `DYNAMIC_PAIR_SELECTION`: Enable dynamic pair selection (default: true)
+- `MIN_OPEN_INTEREST`: Minimum open interest for pair selection (default: 1,000,000)
+- `MAX_OPEN_INTEREST`: Maximum open interest for pair selection (optional)
+- `SCAN_INTERVAL_MINUTES`: Interval for scanning new pairs (default: 60)
+
+#### Strategy Configuration
+- `ENABLED_STRATEGIES`: Comma-separated list of enabled strategies (default: moving_average,rsi)
+- `STRATEGY_TIMEFRAME`: Timeframe for strategy analysis (default: 1m)
+- `OHLCV_LIMIT`: Number of OHLCV candles to analyze (default: 100)
+
+### Position Sizing
+
+The bot now uses **portfolio-based position sizing** instead of hardcoded values:
+
+1. **Dynamic Portfolio Fetching**: The bot fetches your real portfolio balance from Hyperliquid
+2. **Percentage-based Sizing**: Position sizes are calculated as a percentage of your total portfolio
+3. **Risk Management**: Maximum 2% of portfolio per position (configurable)
+4. **Portfolio Limits**: Maximum 33.33% of portfolio in all positions combined
+
+**Example**: If your portfolio is $10,000:
+- Maximum position size: $200 (2% of $10,000)
+- Maximum total positions: $3,333 (33.33% of $10,000)
+- The bot will automatically adjust position sizes as your portfolio grows or shrinks
+
+### Risk Management
+
+The bot implements comprehensive risk management:
+
+1. **Position Limits**: Maximum 2% of portfolio per position
+2. **Portfolio Limits**: Maximum 33.33% of portfolio in all positions
+3. **Dynamic Leverage**: Leverage adjusts based on signal strength and market volatility
+4. **Stop Losses**: Automatic stop losses at 2% (configurable)
+5. **Margin Buffer**: 20% margin buffer to prevent liquidation
 
 ## Hyperliquid Integration
 

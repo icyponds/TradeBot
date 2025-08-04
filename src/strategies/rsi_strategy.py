@@ -175,8 +175,15 @@ class RSIStrategy(BaseStrategy):
         avg_losses = losses.rolling(window=period).mean()
         
         # Calculate RS and RSI
-        rs = avg_gains / avg_losses
-        rsi = 100 - (100 / (1 + rs))
+        # Handle division by zero
+        if avg_losses.iloc[-1] == 0:
+            if avg_gains.iloc[-1] > 0:
+                rsi = 100.0  # All gains, no losses
+            else:
+                rsi = 50.0   # No gains, no losses (neutral)
+        else:
+            rs = avg_gains / avg_losses
+            rsi = 100 - (100 / (1 + rs))
         
         return rsi.iloc[-1]
     

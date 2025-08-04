@@ -28,7 +28,6 @@ class DynamicPairSelector:
         # Trading configuration
         self.dynamic_selection = config['trading']['dynamic_pair_selection']
         self.min_open_interest = config['trading']['min_open_interest']
-        self.max_open_interest = config['trading']['max_open_interest']
         self.scan_interval_minutes = config['trading']['scan_interval_minutes']
         self.excluded_assets = config['trading']['excluded_assets']
         self.included_assets = config['trading']['included_assets']
@@ -38,7 +37,7 @@ class DynamicPairSelector:
         self.last_scan_time = None
         self.pair_history = {}  # Track pair performance
         
-        self.logger.info(f"Initialized DynamicPairSelector with OI range: ${self.min_open_interest:,} - ${self.max_open_interest:,}")
+        self.logger.info(f"Initialized DynamicPairSelector with min OI: ${self.min_open_interest:,}")
     
     def _get_max_pairs_to_trade(self) -> int:
         """
@@ -108,6 +107,11 @@ class DynamicPairSelector:
         eligible_assets = []
         
         try:
+            # Debug: Show first few assets
+            self.logger.debug(f"Processing {len(universe)} assets")
+            for i, asset in enumerate(universe[:5]):
+                self.logger.debug(f"Sample asset {i}: {asset}")
+            
             for asset in universe:
                 asset_name = asset.get('name', '')
                 
@@ -120,29 +124,39 @@ class DynamicPairSelector:
                     continue
                 
                 # Extract market data from asset
-                open_interest = float(asset.get('openInterest', 0))
+                open_interest_dollars = float(asset.get('openInterest', 0))
                 volume_24h = float(asset.get('volume24h', 0))
-                mark_price = float(asset.get('markPrice', 0))
+                mark_price = float(asset.get('markPrice', 0))  # Fixed field name
                 
-                # Check open interest thresholds
-                if open_interest < self.min_open_interest:
-                    continue
-                # Only check max open interest if it's set (greater than 0)
-                if self.max_open_interest > 0 and open_interest > self.max_open_interest:
+                # Debug logging for first few assets
+                if len(eligible_assets) < 3:
+                    self.logger.debug(f"Asset {asset_name}: OI=${open_interest_dollars:,.0f}, Vol=${volume_24h:,.0f}, Price=${mark_price:.2f}")
+                
+                # Check open interest criteria (already in dollars)
+                if open_interest_dollars < self.min_open_interest:
+                    if len(eligible_assets) < 3:
+                        self.logger.debug(f"  Skipped {asset_name}: OI ${open_interest_dollars:,.0f} < min ${self.min_open_interest:,.0f}")
                     continue
                 
-                # Check minimum volume
-                if volume_24h < 100000:  # $100k minimum daily volume
+                # Check for minimum volume
+                if volume_24h < 10000:  # $10k minimum daily volume
+                    if len(eligible_assets) < 3:
+                        self.logger.debug(f"  Skipped {asset_name}: Vol ${volume_24h:,.0f} < min $10,000")
                     continue
                 
                 # Check for valid price
                 if mark_price <= 0:
+                    if len(eligible_assets) < 3:
+                        self.logger.debug(f"  Skipped {asset_name}: Price ${mark_price:.2f} <= 0")
                     continue
                 
                 # Check additional eligibility criteria
                 if not self._is_asset_eligible(asset):
+                    if len(eligible_assets) < 3:
+                        self.logger.debug(f"  Skipped {asset_name}: Failed additional eligibility checks")
                     continue
                 
+                self.logger.info(f"Adding {asset_name} to eligible assets")
                 eligible_assets.append(asset)
         
         except Exception as e:

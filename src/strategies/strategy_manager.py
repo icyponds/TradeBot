@@ -8,16 +8,17 @@ import signal
 import sys
 import json
 from typing import Dict, List, Any, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 import pandas as pd
 import math
 
-from ..api.hyperliquid_websocket_api import HyperliquidWebSocketAPI as HyperliquidAPI
-from ..utils.pair_selector import DynamicPairSelector
-from ..utils.leverage_manager import LeverageManager
+from src.api.hyperliquid_websocket_api import HyperliquidWebSocketAPI as HyperliquidAPI
+from src.utils.pair_selector import DynamicPairSelector
+from src.utils.leverage_manager import LeverageManager
+from src.utils.portfolio_manager import PortfolioManager
 from .moving_average_strategy import MovingAverageStrategy
 from .rsi_strategy import RSIStrategy
-from ..models.trade import Trade, Position
+from src.models.trade import Trade, Position
 
 
 class StrategyManager:
@@ -33,39 +34,24 @@ class StrategyManager:
         self.config = config
         self.logger = logging.getLogger(__name__)
         
-        # Initialize API client
-        self.market_api = HyperliquidAPI(config)
+        # Initialize portfolio manager
+        self.portfolio_manager = PortfolioManager(config)
         
-        # Start WebSocket connection
-        self.market_api.start()
+        # Initialize leverage manager with portfolio manager
+        self.leverage_manager = LeverageManager(config, self.portfolio_manager)
         
-        # Initialize pair selector
-        self.pair_selector = DynamicPairSelector(config, self.market_api)
-        
-        # Initialize leverage manager
-        self.leverage_manager = LeverageManager(config)
+        # Initialize market API
+        self.market_api = self._initialize_market_api()
         
         # Initialize strategies
-        self.strategies = {
-            'moving_average': MovingAverageStrategy(config),
-            'rsi': RSIStrategy(config),
-        }
+        self.strategies = self._initialize_strategies()
         
-        # Trading state
-        self.positions = {}  # symbol -> Position
-        self.trades = []  # List of completed trades
-        self.is_running = False
+        # Initialize pair selector
+        self.pair_selector = self._initialize_pair_selector()
         
-        # Performance tracking
-        self.total_pnl = 0.0
-        self.winning_trades = 0
-        self.total_trades = 0
-        self.available_capital = 0.0  # Will be fetched from API
-        
-        # Configuration
+        # Trading configuration
         self.timeframe = config['strategies']['timeframe']
         self.ohlcv_limit = config['strategies']['ohlcv_limit']
-        self.max_position_size = config['trading']['max_position_size']
         self.max_positions_percentage = config['trading']['max_positions_percentage']
         self.base_currency = config['trading']['base_currency']
         
@@ -81,6 +67,12 @@ class StrategyManager:
         # Calculate execution interval based on timeframe
         self.execution_interval = self._get_execution_interval()
         
+        # Trading state
+        self.positions = {}
+        self.trades = []
+        self.total_trades = 0
+        self.is_running = False
+        
         self.logger.info(f"Initialized strategy manager with {len(self.strategies)} strategies")
         self.logger.info(f"Timeframe: {self.timeframe}, Execution interval: {self.execution_interval}s")
         self.logger.info(f"Position limit: {self.max_positions_percentage}% of portfolio")
@@ -95,55 +87,49 @@ class StrategyManager:
     def _setup_signal_handlers(self):
         """Setup signal handlers for kill switch functionality."""
         def signal_handler(signum, frame):
-            self.logger.warning(f"Received signal {signum}, activating kill switch...")
-            try:
-                # Give more time for position closing during shutdown
-                self.close_all_positions("kill_switch")
-                self.stop()
-            except Exception as e:
-                self.logger.error(f"Error during shutdown: {e}")
-            finally:
-                self.logger.info("Shutdown complete")
-                sys.exit(0)
+            self.logger.warning(f"Received signal {signum}, initiating emergency stop...")
+            self.emergency_stop()
+            sys.exit(0)
         
-        # Register signal handlers
-        signal.signal(signal.SIGINT, signal_handler)   # Ctrl+C
-        signal.signal(signal.SIGTERM, signal_handler)  # Termination signal
-        
-        self.logger.info("Kill switch enabled: Press Ctrl+C to close all positions and exit")
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
     
     def _update_account_balance(self):
-        """Fetch and update the account balance from the exchange."""
+        """Update account balance and portfolio information."""
         try:
-            balance_info = self.market_api.get_account_balance()
-            if balance_info:
-                # Use total equity as available capital
-                self.available_capital = balance_info['total_equity']
-                self.logger.info(f"Updated available capital: ${self.available_capital:.2f}")
-                
-                # Log additional balance information
-                self.logger.info(f"Free margin: ${balance_info['free_margin']:.2f}")
-                self.logger.info(f"Used margin: ${balance_info['used_margin']:.2f}")
-                self.logger.info(f"Unrealized PnL: ${balance_info['unrealized_pnl']:.2f}")
-            else:
-                self.logger.warning("Failed to fetch account balance, using default $1000")
-                self.available_capital = 1000.0
+            # Update portfolio information
+            if self.portfolio_manager.should_update_portfolio():
+                success = self.portfolio_manager.update_portfolio_info(self.market_api)
+                if success:
+                    # Update leverage manager with new portfolio info
+                    self.leverage_manager.update_available_margin(
+                        self.portfolio_manager.calculate_available_capital_for_trading()
+                    )
+                    
+                    # Log portfolio summary
+                    portfolio_summary = self.portfolio_manager.get_portfolio_summary()
+                    self.logger.info(f"Portfolio updated: ${portfolio_summary['total_equity']:.2f} total equity, "
+                                   f"${portfolio_summary['available_capital']:.2f} available for trading")
+                else:
+                    self.logger.warning("Failed to update portfolio information")
+                    
         except Exception as e:
             self.logger.error(f"Error updating account balance: {e}")
-            self.available_capital = 1000.0
     
     def _get_execution_interval(self) -> int:
-        """Calculate execution interval based on timeframe."""
-        timeframe_intervals = {
-            '1m': 30,    # Execute every 30 seconds for 1m timeframe
-            '5m': 60,    # Execute every 1 minute for 5m timeframe
-            '15m': 300,  # Execute every 5 minutes for 15m timeframe
-            '30m': 600,  # Execute every 10 minutes for 30m timeframe
-            '1h': 1800,  # Execute every 30 minutes for 1h timeframe
-            '4h': 3600,  # Execute every hour for 4h timeframe
-            '1d': 14400, # Execute every 4 hours for 1d timeframe
+        """
+        Calculate execution interval based on timeframe.
+        
+        Returns:
+            Execution interval in seconds
+        """
+        timeframe_minutes = {
+            '1m': 1, '5m': 5, '15m': 15, '30m': 30,
+            '1h': 60, '4h': 240, '1d': 1440
         }
-        return timeframe_intervals.get(self.timeframe, 60)
+        
+        minutes = timeframe_minutes.get(self.timeframe, 60)
+        return minutes * 60  # Convert to seconds
     
     def _calculate_signal_strength(self, ohlcv: pd.DataFrame, strategy_name: str) -> float:
         """
@@ -169,6 +155,8 @@ class StrategyManager:
                     return 0.5
                 
                 # Calculate crossover strength
+                if long_ma.iloc[-1] <= 0:
+                    return 0.5  # Fallback if long MA is invalid
                 ma_diff = abs(short_ma.iloc[-1] - long_ma.iloc[-1]) / long_ma.iloc[-1]
                 signal_strength = min(1.0, ma_diff * 10)  # Scale to 0-1
                 
@@ -183,13 +171,19 @@ class StrategyManager:
                 delta = ohlcv['close'].diff()
                 gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
                 loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-                rs = gain / loss
-                rsi = 100 - (100 / (1 + rs))
                 
-                if len(rsi) < 1:
-                    return 0.5
+                # Handle division by zero in RSI calculation
+                if loss.iloc[-1] == 0:
+                    if gain.iloc[-1] > 0:
+                        current_rsi = 100.0  # All gains, no losses
+                    else:
+                        current_rsi = 50.0   # No gains, no losses (neutral)
+                else:
+                    rs = gain / loss
+                    rsi = 100 - (100 / (1 + rs))
+                    current_rsi = rsi.iloc[-1]
                 
-                current_rsi = rsi.iloc[-1]
+                # current_rsi is already calculated above
                 
                 # Calculate distance from neutral (50)
                 rsi_distance = abs(current_rsi - 50) / 50
@@ -231,63 +225,92 @@ class StrategyManager:
             self.logger.error(f"Error calculating volatility: {e}")
             return 0.5
     
+    def _initialize_market_api(self):
+        """Initialize the market API client."""
+        # Try SDK API first, fallback to WebSocket API
+        try:
+            from src.api.hyperliquid_sdk_api import HyperliquidSDKAPI
+            return HyperliquidSDKAPI(self.config)
+        except ImportError:
+            from src.api.hyperliquid_websocket_api import HyperliquidWebSocketAPI as HyperliquidAPI
+            return HyperliquidAPI(self.config)
+    
+    def _initialize_strategies(self):
+        """Initialize trading strategies."""
+        return {
+            'moving_average': MovingAverageStrategy(self.config),
+            'rsi': RSIStrategy(self.config),
+        }
+    
+    def _initialize_pair_selector(self):
+        """Initialize the pair selector."""
+        return DynamicPairSelector(self.config, self.market_api, self)
+    
     def start(self):
         """Start the strategy manager."""
         if self.is_running:
             self.logger.warning("Strategy manager is already running")
             return
         
-        self.is_running = True
         self.logger.info("Starting strategy manager...")
         
-        # Clean up any existing open orders
-        self._cleanup_open_orders()
+        # Start market API (only if it has a start method)
+        if hasattr(self.market_api, 'start'):
+            self.market_api.start()
         
-        # Load existing positions from file
-        self.load_positions_from_file()
-        
-        # Fetch account balance and update available capital
+        # Initial portfolio update
         self._update_account_balance()
         
-        # Start data collection
-        self.market_api.start_data_collection()
-        
-        # Wait for initial data collection
-        self.logger.info("Waiting for initial data collection...")
-        time.sleep(10)  # Give time for data to be collected
-        
         # Update available margin
-        self.leverage_manager.update_available_margin(self.available_capital)
+        self.leverage_manager.update_available_margin(
+            self.portfolio_manager.calculate_available_capital_for_trading()
+        )
         
         # Start trading loop
+        self.is_running = True
         self._run_trading_loop()
     
     def _update_account_balance_periodic(self):
-        """Periodically update account balance during trading."""
+        """Periodically update account balance."""
         try:
             balance_info = self.market_api.get_account_balance()
             if balance_info:
-                old_capital = self.available_capital
-                self.available_capital = balance_info['total_equity']
+                old_capital = self.portfolio_manager.calculate_available_capital_for_trading()
+                self.portfolio_manager.update_portfolio_info(self.market_api)
                 
                 # Only log if there's a significant change
-                if abs(self.available_capital - old_capital) > 1.0:
-                    self.logger.info(f"Account balance updated: ${self.available_capital:.2f} (change: ${self.available_capital - old_capital:+.2f})")
+                if abs(self.portfolio_manager.calculate_available_capital_for_trading() - old_capital) > 1.0:
+                    self.logger.info(f"Account balance updated: ${self.portfolio_manager.calculate_available_capital_for_trading():.2f} (change: ${self.portfolio_manager.calculate_available_capital_for_trading() - old_capital:+.2f})")
                 
                 # Update leverage manager with new capital
-                self.leverage_manager.update_available_margin(self.available_capital)
+                self.leverage_manager.update_available_margin(self.portfolio_manager.calculate_available_capital_for_trading())
         except Exception as e:
             self.logger.error(f"Error updating account balance: {e}")
     
     def stop(self):
         """Stop the strategy manager."""
+        if not self.is_running:
+            return
+        
+        self.logger.info("Stopping strategy manager...")
         self.is_running = False
         
-        # Stop WebSocket connection
-        if hasattr(self, 'market_api'):
+        # Stop market API (only if it has a stop method)
+        if hasattr(self.market_api, 'stop'):
             self.market_api.stop()
         
         self.logger.info("Strategy manager stopped")
+    
+    def emergency_stop(self):
+        """Emergency stop - close all positions and stop trading."""
+        self.logger.warning("EMERGENCY STOP: Closing all positions...")
+        try:
+            self.close_all_positions("emergency_stop")
+            self.stop()
+        except Exception as e:
+            self.logger.error(f"Error during emergency stop: {e}")
+        finally:
+            self.logger.info("Emergency stop complete")
     
     def sync_positions_with_exchange(self):
         """
@@ -538,11 +561,19 @@ class StrategyManager:
             self.logger.info(f"{strategy_name} signal for {symbol}: {signal['signal']} at {current_price}")
             
             # Check if we should act on the signal
-            if self._should_execute_signal(symbol, signal, current_price, ohlcv, strategy_name):
+            should_execute = self._should_execute_signal(symbol, signal, current_price, ohlcv, strategy_name)
+            self.logger.info(f"Should execute {strategy_name} signal for {symbol}: {should_execute}")
+            
+            if should_execute:
+                self.logger.info(f"Executing {strategy_name} trade for {symbol}")
                 self._execute_trade(symbol, signal, current_price, strategy_name, ohlcv)
+            else:
+                self.logger.info(f"Skipping {strategy_name} signal for {symbol} - conditions not met")
                 
         except Exception as e:
             self.logger.error(f"Error executing {strategy_name} strategy for {symbol}: {e}")
+            import traceback
+            self.logger.error(f"Traceback: {traceback.format_exc()}")
     
     def _should_execute_signal(self, symbol: str, signal: Dict[str, Any], current_price: float, 
                               ohlcv: pd.DataFrame, strategy_name: str) -> bool:
@@ -566,12 +597,20 @@ class StrategyManager:
             return False
         
         # Calculate dynamic leveraged position size
+        available_capital = self.portfolio_manager.calculate_available_capital_for_trading()
+        self.logger.info(f"Calculating position size for {symbol}: available capital=${available_capital:.2f}, signal_strength={signal_strength:.2f}, volatility={market_volatility:.2f}")
+        
         position_size, margin_required, leverage = self.leverage_manager.calculate_leveraged_position_size(
-            symbol, current_price, self.available_capital, strategy_name, signal_strength, market_volatility
+            symbol, current_price, available_capital, strategy_name, signal_strength, market_volatility
         )
         
+        self.logger.info(f"Position calculation for {symbol}: size={position_size:.4f}, margin=${margin_required:.2f}, leverage={leverage:.1f}x")
+        
         # Check if we can open the position
-        if not self.leverage_manager.can_open_position(symbol, margin_required, self.available_capital):
+        can_open = self.leverage_manager.can_open_position(symbol, margin_required, available_capital)
+        self.logger.info(f"Can open position for {symbol}: {can_open}")
+        
+        if not can_open:
             return False
         
         # Update signal with calculated size and leverage info
@@ -954,17 +993,31 @@ class StrategyManager:
                 capital_at_risk = position_value
             
             total_capital_at_risk += capital_at_risk
+            available_capital = self.portfolio_manager.calculate_available_capital_for_trading()
+            
+            # Handle division by zero
+            if available_capital <= 0:
+                percentage = 0.0
+            else:
+                percentage = (capital_at_risk / available_capital) * 100
+            
             position_details[symbol] = {
                 'value': capital_at_risk,
-                'percentage': (capital_at_risk / self.available_capital) * 100,
+                'percentage': percentage,
                 'notional_value': position.size * position.entry_price
             }
         
-        allocation_percentage = (total_capital_at_risk / self.available_capital) * 100
+        available_capital = self.portfolio_manager.calculate_available_capital_for_trading()
+        
+        # Handle division by zero
+        if available_capital <= 0:
+            allocation_percentage = 0.0
+        else:
+            allocation_percentage = (total_capital_at_risk / available_capital) * 100
         
         return {
             'total_capital_at_risk': total_capital_at_risk,
-            'available_capital': self.available_capital,
+            'available_capital': self.portfolio_manager.calculate_available_capital_for_trading(),
             'allocation_percentage': allocation_percentage,
             'position_details': position_details,
             'max_allocation': self.max_positions_percentage
@@ -984,6 +1037,8 @@ class StrategyManager:
         """
         # Check portfolio allocation first
         allocation = self._check_portfolio_allocation()
+        self.logger.info(f"Portfolio allocation for {symbol}: {allocation['allocation_percentage']:.1f}% (max: {self.max_positions_percentage}%)")
+        
         if allocation['allocation_percentage'] >= self.max_positions_percentage:
             self.logger.warning(f"Portfolio allocation limit reached: {allocation['allocation_percentage']:.1f}% >= {self.max_positions_percentage}%")
             # Try to close least profitable position to make room
@@ -993,7 +1048,11 @@ class StrategyManager:
             return False
         
         # If we haven't reached the position count limit, allow the trade
-        if not self._check_position_limit():
+        position_limit_reached = self._check_position_limit()
+        self.logger.info(f"Position limit check for {symbol}: {len(self.positions)} positions, limit reached: {position_limit_reached}")
+        
+        if not position_limit_reached:
+            self.logger.info(f"Position limit not reached for {symbol}, allowing trade")
             return True
         
         # If we have reached the position count limit, try to close a less profitable position
@@ -1006,11 +1065,15 @@ class StrategyManager:
         return False 
 
     def emergency_stop(self):
-        """Emergency stop - close all positions and stop the bot."""
-        self.logger.warning("EMERGENCY STOP ACTIVATED - Closing all positions!")
-        self.close_all_positions("emergency_stop")
-        self.stop()
-        self.logger.info("Emergency stop completed")
+        """Emergency stop - close all positions and stop trading."""
+        self.logger.warning("EMERGENCY STOP: Closing all positions...")
+        try:
+            self.close_all_positions("emergency_stop")
+            self.stop()
+        except Exception as e:
+            self.logger.error(f"Error during emergency stop: {e}")
+        finally:
+            self.logger.info("Emergency stop complete")
     
     def save_positions_to_file(self):
         """Save current positions to a JSON file."""

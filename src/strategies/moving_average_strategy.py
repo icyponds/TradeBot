@@ -52,6 +52,10 @@ class MovingAverageStrategy(BaseStrategy):
         long_ma_current = long_ma.iloc[-1]
         
         # Calculate trend strength
+        if current_price <= 0:
+            self.logger.warning(f"Invalid current price in moving average strategy: {current_price}")
+            return super().calculate_take_profit(entry_price, side, ohlcv, signal_strength, market_volatility)
+        
         ma_spread = abs(short_ma_current - long_ma_current) / current_price
         trend_strength = min(ma_spread * 10, 1.0)  # Normalize to 0-1
         

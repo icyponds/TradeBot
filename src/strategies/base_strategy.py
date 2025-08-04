@@ -53,11 +53,12 @@ class BaseStrategy(ABC):
         Returns:
             Position size in base currency
         """
-        max_position = self.config['trading']['max_position_size']
-        risk_percentage = self.config['trading']['risk_percentage'] / 100
+        # Get maximum position size from config
+        max_position_size_usd = self.config['trading']['max_position_size_usd']
+        max_position_size_percentage = self.config['trading']['max_position_size_percentage']
         
         # Calculate position size based on risk
-        position_size = min(risk_amount / risk_percentage, max_position)
+        position_size = min(risk_amount / (self.config['trading']['risk_percentage'] / 100), max_position_size_usd)
         
         return position_size
     

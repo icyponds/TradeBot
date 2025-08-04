@@ -24,6 +24,7 @@ def load_config() -> Dict[str, Any]:
             "ws_url": os.getenv("HYPERLIQUID_WS_URL", "wss://api.hyperliquid.xyz/ws"),
             "private_key": os.getenv("HYPERLIQUID_PRIVATE_KEY", ""),
             "wallet_address": os.getenv("HYPERLIQUID_WALLET_ADDRESS", ""),
+            "public_account_address": os.getenv("HYPERLIQUID_PUBLIC_ACCOUNT_ADDRESS", ""),
             "timeout": int(os.getenv("API_TIMEOUT", "30")),
         },
         
@@ -32,14 +33,16 @@ def load_config() -> Dict[str, Any]:
             "symbols": [],  # Empty list for dynamic pair selection
             "dynamic_pair_selection": os.getenv("DYNAMIC_PAIR_SELECTION", "true").lower() == "true",
             "min_open_interest": float(os.getenv("MIN_OPEN_INTEREST", "1000000")),
-            "max_open_interest": float(os.getenv("MAX_OPEN_INTEREST", "0")) if os.getenv("MAX_OPEN_INTEREST") else 0,
-
             "scan_interval_minutes": int(os.getenv("SCAN_INTERVAL_MINUTES", "60")),
             "excluded_assets": [asset.strip() for asset in os.getenv("EXCLUDED_ASSETS", "").split(",") if asset.strip()],
             "included_assets": [asset.strip() for asset in os.getenv("INCLUDED_ASSETS", "").split(",") if asset.strip()],
             "base_currency": os.getenv("BASE_CURRENCY", "USDC"),
-            "max_position_size": float(os.getenv("MAX_POSITION_SIZE", "50")),
-            "max_positions_percentage": float(os.getenv("MAX_POSITIONS_PERCENTAGE", "33.33")),  # 1/3 of portfolio
+            
+            # Portfolio-based position sizing
+            "use_portfolio_based_sizing": os.getenv("USE_PORTFOLIO_BASED_SIZING", "true").lower() == "true",
+            "max_position_size_usd": float(os.getenv("MAX_POSITION_SIZE_USD", "50")),  # Fallback max USD per position
+            "max_position_size_percentage": float(os.getenv("MAX_POSITION_SIZE_PERCENTAGE", "2.0")),  # Max % of portfolio per position
+            "max_positions_percentage": float(os.getenv("MAX_POSITIONS_PERCENTAGE", "33.33")),  # Max % of portfolio in all positions
             "risk_percentage": float(os.getenv("RISK_PERCENTAGE", "2.0")),
             "stop_loss_percentage": float(os.getenv("STOP_LOSS_PERCENTAGE", "2.0")),
             
@@ -111,8 +114,12 @@ def validate_config(config: Dict[str, Any]) -> bool:
             return False
         
         # Validate trading configuration
-        if config['trading']['max_position_size'] <= 0:
-            print("ERROR: Max position size must be positive")
+        if config['trading']['max_position_size_usd'] <= 0:
+            print("ERROR: Max position size USD must be positive")
+            return False
+        
+        if config['trading']['max_position_size_percentage'] <= 0 or config['trading']['max_position_size_percentage'] > 100:
+            print("ERROR: Max position size percentage must be between 0 and 100")
             return False
         
         if config['trading']['risk_percentage'] <= 0 or config['trading']['risk_percentage'] > 100:

@@ -29,6 +29,7 @@ class HyperliquidSDKAPI:
         self.base_url = config['api']['base_url']
         self.private_key = config['api']['private_key']
         self.wallet_address = config['api']['wallet_address']
+        self.public_account_address = config['api'].get('public_account_address', config['api']['wallet_address'])
         
         # Trading configuration
         self.symbols = config['trading']['symbols']
@@ -683,24 +684,52 @@ class HyperliquidSDKAPI:
             return None
         
         try:
-            # Use the Info client to get user state
-            if hasattr(self.info_client, 'user_state'):
-                user_state = self.info_client.user_state(self.wallet_address)
-            else:
-                self.logger.warning("Info client does not support balance retrieval")
-                return None
+            # Use the info client to get user state with public account address
+            user_state = self.info_client.user_state(self.public_account_address)
+            self.logger.info(f"Raw user state response: {user_state}")
+            self.logger.info(f"User state type: {type(user_state)}")
+            if isinstance(user_state, dict):
+                self.logger.info(f"User state keys: {list(user_state.keys())}")
+                if 'marginSummary' in user_state:
+                    self.logger.info(f"Margin summary: {user_state['marginSummary']}")
             
             # Extract balance information from user state
-            balance_info = {
-                'wallet_address': self.wallet_address,
-                'total_equity': float(user_state.get('marginSummary', {}).get('accountValue', 0)),
-                'free_margin': float(user_state.get('marginSummary', {}).get('freeCollateral', 0)),
-                'used_margin': float(user_state.get('marginSummary', {}).get('totalNtlPos', 0)),
-                'unrealized_pnl': float(user_state.get('marginSummary', {}).get('unrealizedPnl', 0)),
-                'realized_pnl': float(user_state.get('marginSummary', {}).get('realizedPnl', 0)),
-            }
+            # The user_state should contain marginSummary with account details
+            if isinstance(user_state, dict):
+                margin_summary = user_state.get('marginSummary', {})
+                if not margin_summary:
+                    margin_summary = user_state  # Try using the whole response as margin summary
+                
+                # Calculate available margin: accountValue - totalMarginUsed
+                account_value = float(margin_summary.get('accountValue', margin_summary.get('totalEquity', 0)))
+                total_margin_used = float(margin_summary.get('totalMarginUsed', margin_summary.get('usedMargin', 0)))
+                available_margin = account_value - total_margin_used
+                
+                balance_info = {
+                    'wallet_address': self.public_account_address,
+                    'total_equity': account_value,
+                    'free_margin': available_margin,
+                    'used_margin': total_margin_used,
+                    'unrealized_pnl': float(margin_summary.get('unrealizedPnl', 0)),
+                    'realized_pnl': float(margin_summary.get('realizedPnl', 0)),
+                }
+            else:
+                # If user_state is not a dict, try to extract values differently
+                account_value = float(getattr(user_state, 'accountValue', getattr(user_state, 'totalEquity', 0)))
+                total_margin_used = float(getattr(user_state, 'totalMarginUsed', getattr(user_state, 'usedMargin', 0)))
+                available_margin = account_value - total_margin_used
+                
+                balance_info = {
+                    'wallet_address': self.public_account_address,
+                    'total_equity': account_value,
+                    'free_margin': available_margin,
+                    'used_margin': total_margin_used,
+                    'unrealized_pnl': float(getattr(user_state, 'unrealizedPnl', 0)),
+                    'realized_pnl': float(getattr(user_state, 'realizedPnl', 0)),
+                }
             
             self.logger.info(f"Account balance retrieved: ${balance_info['total_equity']:.2f} total equity")
+            self.logger.debug(f"Full balance info: {balance_info}")
             return balance_info
             
         except Exception as e:
