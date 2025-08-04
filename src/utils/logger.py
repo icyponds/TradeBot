@@ -9,7 +9,7 @@ import glob
 from datetime import datetime
 
 
-def purge_old_logs(log_dir: str = "logs", max_log_files: int = 10, max_log_age_days: int = 7):
+def purge_old_logs(log_dir: str = "logs", max_log_files: int = 10, max_log_age_days: int = 7, max_file_size_mb: int = 50):
     """
     Purge old log files to prevent disk space issues.
     
@@ -17,6 +17,7 @@ def purge_old_logs(log_dir: str = "logs", max_log_files: int = 10, max_log_age_d
         log_dir: Directory containing log files
         max_log_files: Maximum number of log files to keep
         max_log_age_days: Maximum age of log files in days
+        max_file_size_mb: Maximum file size in MB before truncation
     """
     try:
         if not os.path.exists(log_dir):
@@ -45,6 +46,28 @@ def purge_old_logs(log_dir: str = "logs", max_log_files: int = 10, max_log_age_d
                 except Exception as e:
                     print(f"Failed to remove old log file {log_file}: {e}")
         
+        # Check file sizes and truncate if necessary
+        max_file_size_bytes = max_file_size_mb * 1024 * 1024
+        for log_file in log_files:
+            if os.path.exists(log_file):
+                file_size = os.path.getsize(log_file)
+                if file_size > max_file_size_bytes:
+                    try:
+                        # Keep only the last 1000 lines of the file
+                        with open(log_file, 'r') as f:
+                            lines = f.readlines()
+                        
+                        # Keep only the last 1000 lines
+                        if len(lines) > 1000:
+                            lines = lines[-1000:]
+                        
+                        with open(log_file, 'w') as f:
+                            f.writelines(lines)
+                        
+                        print(f"Truncated large log file: {log_file} (kept last 1000 lines)")
+                    except Exception as e:
+                        print(f"Failed to truncate log file {log_file}: {e}")
+        
         # Keep only the most recent max_log_files
         remaining_files = glob.glob(log_pattern)
         if len(remaining_files) > max_log_files:
@@ -65,7 +88,8 @@ def purge_old_logs(log_dir: str = "logs", max_log_files: int = 10, max_log_age_d
 
 
 def setup_logging(log_level: str = "INFO", log_file: str = "trading_bot.log", 
-                 purge_logs: bool = True, max_log_files: int = 10, max_log_age_days: int = 7):
+                 purge_logs: bool = True, max_log_files: int = 10, max_log_age_days: int = 7,
+                 clear_current_log: bool = True, max_file_size_mb: int = 50):
     """
     Setup logging configuration for the trading bot.
     
@@ -75,6 +99,8 @@ def setup_logging(log_level: str = "INFO", log_file: str = "trading_bot.log",
         purge_logs: Whether to purge old logs on startup
         max_log_files: Maximum number of log files to keep
         max_log_age_days: Maximum age of log files in days
+        clear_current_log: Whether to clear the current log file on startup
+        max_file_size_mb: Maximum file size in MB before truncation
     """
     # Create logs directory if it doesn't exist
     log_dir = "logs"
@@ -83,10 +109,20 @@ def setup_logging(log_level: str = "INFO", log_file: str = "trading_bot.log",
     
     # Purge old logs if requested
     if purge_logs:
-        purge_old_logs(log_dir, max_log_files, max_log_age_days)
+        purge_old_logs(log_dir, max_log_files, max_log_age_days, max_file_size_mb)
     
     # Full path for log file
     log_path = os.path.join(log_dir, log_file)
+    
+    # Clear current log file if requested
+    if clear_current_log and os.path.exists(log_path):
+        try:
+            # Truncate the file instead of deleting it to preserve file permissions
+            with open(log_path, 'w') as f:
+                f.write('')
+            print(f"Cleared current log file: {log_path}")
+        except Exception as e:
+            print(f"Failed to clear current log file {log_path}: {e}")
     
     # Configure logging
     logging.basicConfig(

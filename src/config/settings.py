@@ -114,8 +114,10 @@ def load_config() -> Dict[str, Any]:
             "level": os.getenv("LOG_LEVEL", "INFO"),
             "file": os.getenv("LOG_FILE", "trading_bot.log"),
             "purge_logs": os.getenv("PURGE_LOGS_ON_STARTUP", "true").lower() == "true",
+            "clear_current_log": os.getenv("CLEAR_CURRENT_LOG_ON_STARTUP", "true").lower() == "true",
             "max_log_files": int(os.getenv("MAX_LOG_FILES", "10")),
             "max_log_age_days": int(os.getenv("MAX_LOG_AGE_DAYS", "7")),
+            "max_file_size_mb": int(os.getenv("MAX_LOG_FILE_SIZE_MB", "50")),
         },
         
         # Backtesting Configuration

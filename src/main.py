@@ -31,7 +31,9 @@ def main():
             log_file=config.get('logging', {}).get('file', 'trading_bot.log'),
             purge_logs=config.get('logging', {}).get('purge_logs', True),
             max_log_files=config.get('logging', {}).get('max_log_files', 10),
-            max_log_age_days=config.get('logging', {}).get('max_log_age_days', 7)
+            max_log_age_days=config.get('logging', {}).get('max_log_age_days', 7),
+            clear_current_log=config.get('logging', {}).get('clear_current_log', True),
+            max_file_size_mb=config.get('logging', {}).get('max_file_size_mb', 50)
         )
         logger = logging.getLogger(__name__)
         
