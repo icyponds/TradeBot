@@ -247,8 +247,308 @@ def display_validation_report(validation_results: Dict[str, Any], order_results:
     print("=" * 80)
 
 
+def run_continuous_monitoring(api: HyperliquidSDKAPI, config: Dict[str, Any], args):
+    """Run continuous position monitoring."""
+    import time
+    import signal
+    
+    # Setup signal handlers for graceful shutdown
+    def signal_handler(signum, frame):
+        print(f"\n🛑 Received signal {signum}, shutting down gracefully...")
+        sys.exit(0)
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    # Statistics
+    total_positions_closed = 0
+    emergency_stops_triggered = 0
+    last_emergency_check = 0
+    
+    print("🔄 Starting continuous monitoring loop...")
+    print("Press Ctrl+C to stop")
+    print()
+    
+    while True:
+        try:
+            current_time = time.time()
+            
+            # Load current positions
+            positions_data = load_positions_from_file()
+            
+            # Validate position accuracy
+            validation_results = validate_position_accuracy(api, positions_data)
+            
+            # Check open orders
+            order_results = check_open_orders(api)
+            
+            # Check for positions that need to be closed
+            if args.auto_close:
+                positions_to_close = check_positions_for_closure(api, positions_data, args)
+                for symbol, reason in positions_to_close:
+                    if close_position(api, symbol, reason):
+                        total_positions_closed += 1
+            
+            # Emergency stop check
+            if args.emergency_stop:
+                if current_time - last_emergency_check >= 30:  # Check every 30 seconds
+                    if check_emergency_stop(api, positions_data, args.emergency_threshold):
+                        emergency_stops_triggered += 1
+                        print("🚨 EMERGENCY STOP TRIGGERED - Closing all positions!")
+                        close_all_positions(api, positions_data, "emergency_stop")
+                        break
+                    last_emergency_check = current_time
+            
+            # Display status
+            display_continuous_status(positions_data, validation_results, order_results, 
+                                   total_positions_closed, emergency_stops_triggered)
+            
+            # Wait for next monitoring cycle
+            time.sleep(args.interval)
+            
+        except KeyboardInterrupt:
+            print("\n🛑 Stopping continuous monitoring...")
+            break
+        except Exception as e:
+            print(f"❌ Error in monitoring loop: {e}")
+            time.sleep(args.interval)
+    
+    print("✅ Continuous monitoring stopped")
+
+
+def check_positions_for_closure(api: HyperliquidSDKAPI, positions_data: Dict[str, Any], args) -> List[tuple]:
+    """Check positions and return list of (symbol, reason) for positions that should be closed."""
+    positions_to_close = []
+    
+    for symbol, position_data in positions_data.items():
+        current_price = api.get_current_price(symbol)
+        if not current_price:
+            continue
+        
+        # Calculate PnL
+        entry_price = position_data['entry_price']
+        size = position_data['size']
+        side = position_data['side']
+        
+        if side == 'long':
+            pnl = (current_price - entry_price) * size
+        else:
+            pnl = (entry_price - current_price) * size
+        
+        pnl_percentage = (pnl / (entry_price * size)) * 100
+        
+        # Check closure criteria
+        close_reason = None
+        
+        # Check stop loss
+        if position_data.get('stop_loss'):
+            stop_loss = position_data['stop_loss']
+            if side == 'long' and current_price <= stop_loss:
+                close_reason = "stop_loss"
+            elif side == 'short' and current_price >= stop_loss:
+                close_reason = "stop_loss"
+        
+        # Check take profit
+        if position_data.get('take_profit'):
+            take_profit = position_data['take_profit']
+            if side == 'long' and current_price >= take_profit:
+                close_reason = "take_profit"
+            elif side == 'short' and current_price <= take_profit:
+                close_reason = "take_profit"
+        
+        # Check position timeout
+        entry_time = datetime.fromisoformat(position_data['entry_time'])
+        time_open = (datetime.now() - entry_time).total_seconds() / 3600  # hours
+        if time_open > args.timeout:
+            close_reason = "timeout"
+        
+        # Check loss percentage
+        if pnl_percentage < -args.max_loss:
+            close_reason = "max_loss"
+        
+        # Check profit percentage
+        if pnl_percentage > args.max_profit:
+            close_reason = "max_profit"
+        
+        if close_reason:
+            positions_to_close.append((symbol, close_reason))
+    
+    return positions_to_close
+
+
+def close_position(api: HyperliquidSDKAPI, symbol: str, reason: str) -> bool:
+    """Close a position and return True if successful."""
+    try:
+        # Get position data
+        positions_data = load_positions_from_file()
+        if symbol not in positions_data:
+            print(f"⚠️  No position to close for {symbol}")
+            return False
+        
+        position_data = positions_data[symbol]
+        current_price = api.get_current_price(symbol)
+        
+        if not current_price:
+            print(f"❌ Could not get current price for {symbol}")
+            return False
+        
+        # Determine close side
+        close_side = 'sell' if position_data['side'] == 'long' else 'buy'
+        
+        # Place close order
+        order_result = api.place_order(symbol, close_side, position_data['size'], current_price)
+        
+        if order_result and order_result.get('status') in ['success', 'pending']:
+            print(f"✅ Closed position {symbol} due to {reason}: {close_side} {position_data['size']} @ {current_price}")
+            return True
+        else:
+            print(f"❌ Failed to close position for {symbol}")
+            return False
+            
+    except Exception as e:
+        print(f"❌ Error closing position for {symbol}: {e}")
+        return False
+
+
+def close_all_positions(api: HyperliquidSDKAPI, positions_data: Dict[str, Any], reason: str):
+    """Close all positions."""
+    print(f"🔄 Closing all positions due to {reason}...")
+    
+    symbols_to_close = list(positions_data.keys())
+    closed_count = 0
+    
+    for symbol in symbols_to_close:
+        if close_position(api, symbol, reason):
+            closed_count += 1
+            time.sleep(0.5)  # Small delay between orders
+    
+    print(f"✅ Emergency stop complete: closed {closed_count}/{len(symbols_to_close)} positions")
+
+
+def check_emergency_stop(api: HyperliquidSDKAPI, positions_data: Dict[str, Any], threshold: float) -> bool:
+    """Check if emergency stop should be triggered."""
+    try:
+        total_loss = 0.0
+        total_capital_at_risk = 0.0
+        
+        for symbol, position_data in positions_data.items():
+            current_price = api.get_current_price(symbol)
+            if not current_price:
+                continue
+            
+            entry_price = position_data['entry_price']
+            size = position_data['size']
+            side = position_data['side']
+            
+            # Calculate PnL
+            if side == 'long':
+                pnl = (current_price - entry_price) * size
+            else:
+                pnl = (entry_price - current_price) * size
+            
+            # Calculate capital at risk
+            capital_at_risk = entry_price * size
+            
+            total_loss += pnl
+            total_capital_at_risk += capital_at_risk
+        
+        if total_capital_at_risk > 0:
+            portfolio_loss_percentage = (total_loss / total_capital_at_risk) * 100
+            
+            if portfolio_loss_percentage < -threshold:
+                print(f"🚨 EMERGENCY STOP: Portfolio loss {portfolio_loss_percentage:.2f}% exceeds threshold {threshold}%")
+                return True
+        
+        return False
+        
+    except Exception as e:
+        print(f"❌ Error checking emergency stop: {e}")
+        return False
+
+
+def display_continuous_status(positions_data: Dict[str, Any], validation_results: Dict[str, Any], 
+                           order_results: Dict[str, Any], total_closed: int, emergency_stops: int):
+    """Display current monitoring status."""
+    print("=" * 80)
+    print("📊 CONTINUOUS POSITION MONITOR STATUS")
+    print("=" * 80)
+    print(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Active Positions: {len(positions_data)}")
+    print(f"Positions Closed: {total_closed}")
+    print(f"Emergency Stops: {emergency_stops}")
+    print()
+    
+    if positions_data:
+        total_unrealized_pnl = 0.0
+        total_capital_at_risk = 0.0
+        
+        for symbol, position_data in positions_data.items():
+            current_price = api.get_current_price(symbol)
+            if not current_price:
+                continue
+            
+            entry_price = position_data['entry_price']
+            size = position_data['size']
+            side = position_data['side']
+            
+            # Calculate PnL
+            if side == 'long':
+                pnl = (current_price - entry_price) * size
+            else:
+                pnl = (entry_price - current_price) * size
+            
+            pnl_percentage = (pnl / (entry_price * size)) * 100
+            capital_at_risk = entry_price * size
+            
+            total_unrealized_pnl += pnl
+            total_capital_at_risk += capital_at_risk
+            
+            # Calculate time open
+            entry_time = datetime.fromisoformat(position_data['entry_time'])
+            time_open = (datetime.now() - entry_time).total_seconds() / 3600  # hours
+            
+            # Determine status
+            if pnl > 0:
+                status = "🟢 PROFIT"
+            elif pnl < 0:
+                status = "🔴 LOSS"
+            else:
+                status = "⚪ BREAKEVEN"
+            
+            print(f"{symbol:<12} {side:<5} {size:>8.3f} @ ${entry_price:<8.4f} → ${current_price:<8.4f} | PnL: ${pnl:>8.2f} ({pnl_percentage:>6.2f}%) | Time: {time_open:>4.1f}h | {status}")
+        
+        if total_capital_at_risk > 0:
+            portfolio_pnl_percentage = (total_unrealized_pnl / total_capital_at_risk) * 100
+            print("-" * 80)
+            print(f"TOTAL: {len(positions_data)} positions | PnL: ${total_unrealized_pnl:>8.2f} ({portfolio_pnl_percentage:>6.2f}%) | Capital at Risk: ${total_capital_at_risk:>8.2f}")
+    
+    print("=" * 80)
+
+
 def main():
     """Main function for position monitoring."""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Position Monitor')
+    parser.add_argument('--continuous', '-c', action='store_true', 
+                       help='Run in continuous monitoring mode')
+    parser.add_argument('--interval', '-i', type=int, default=10,
+                       help='Monitoring interval in seconds (default: 10)')
+    parser.add_argument('--timeout', '-t', type=float, default=24.0,
+                       help='Position timeout in hours (default: 24)')
+    parser.add_argument('--max-loss', type=float, default=5.0,
+                       help='Max loss percentage before auto-close (default: 5.0)')
+    parser.add_argument('--max-profit', type=float, default=20.0,
+                       help='Max profit percentage before auto-close (default: 20.0)')
+    parser.add_argument('--emergency-threshold', type=float, default=10.0,
+                       help='Emergency stop threshold percentage (default: 10.0)')
+    parser.add_argument('--auto-close', action='store_true', default=True,
+                       help='Enable automatic position closure (default: True)')
+    parser.add_argument('--emergency-stop', action='store_true', default=True,
+                       help='Enable emergency stop (default: True)')
+    
+    args = parser.parse_args()
+    
     print("🔍 POSITION & ORDER MONITOR")
     print("=" * 50)
     
@@ -268,28 +568,41 @@ def main():
     
     print("✅ API connection successful")
     
-    # Load local positions
-    positions_data = load_positions_from_file()
-    print(f"📁 Loaded {len(positions_data)} local positions")
-    
-    # Validate position accuracy
-    print("🔍 Validating position accuracy...")
-    validation_results = validate_position_accuracy(api, positions_data)
-    
-    # Check open orders
-    print("📋 Checking open orders...")
-    order_results = check_open_orders(api)
-    
-    # Display comprehensive report
-    display_validation_report(validation_results, order_results)
-    
-    # Return appropriate exit code
-    if validation_results['missing_on_exchange'] > 0 or order_results['issues']:
-        sys.exit(1)  # Critical issues
-    elif validation_results['warnings'] or validation_results['size_discrepancies'] > 0:
-        sys.exit(2)  # Warnings
+    if args.continuous:
+        print(f"🔄 Starting continuous monitoring mode")
+        print(f"   Interval: {args.interval} seconds")
+        print(f"   Timeout: {args.timeout} hours")
+        print(f"   Max Loss: {args.max_loss}%")
+        print(f"   Max Profit: {args.max_profit}%")
+        print(f"   Emergency Threshold: {args.emergency_threshold}%")
+        print(f"   Auto Close: {args.auto_close}")
+        print(f"   Emergency Stop: {args.emergency_stop}")
+        print()
+        
+        run_continuous_monitoring(api, config, args)
     else:
-        sys.exit(0)  # All good
+        # Run single validation check
+        positions_data = load_positions_from_file()
+        print(f"📁 Loaded {len(positions_data)} local positions")
+        
+        # Validate position accuracy
+        print("🔍 Validating position accuracy...")
+        validation_results = validate_position_accuracy(api, positions_data)
+        
+        # Check open orders
+        print("📋 Checking open orders...")
+        order_results = check_open_orders(api)
+        
+        # Display comprehensive report
+        display_validation_report(validation_results, order_results)
+        
+        # Return appropriate exit code
+        if validation_results['missing_on_exchange'] > 0 or order_results['issues']:
+            sys.exit(1)  # Critical issues
+        elif validation_results['warnings'] or validation_results['size_discrepancies'] > 0:
+            sys.exit(2)  # Warnings
+        else:
+            sys.exit(0)  # All good
 
 
 if __name__ == "__main__":

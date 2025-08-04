@@ -455,6 +455,19 @@ class StrategyManager:
         
         # Track last position sync time
         last_position_sync = 0
+        last_position_monitoring = 0
+        
+        # Position monitoring configuration
+        position_monitoring_interval = config['trading']['position_monitoring_interval']
+        position_timeout_hours = config['trading']['position_timeout_hours']
+        max_loss_percentage = config['trading']['max_loss_percentage']
+        max_profit_percentage = config['trading']['max_profit_percentage']
+        emergency_loss_threshold = config['trading']['emergency_loss_threshold']
+        
+        # Statistics
+        total_positions_closed = 0
+        emergency_stops_triggered = 0
+        last_emergency_check = 0
         
         while self.is_running:
             try:
@@ -465,6 +478,15 @@ class StrategyManager:
                 if current_time - last_position_sync >= self.position_sync_interval:
                     self.sync_positions_with_exchange()
                     last_position_sync = current_time
+                
+                # Continuous position monitoring and auto-closure
+                if current_time - last_position_monitoring >= position_monitoring_interval:
+                    self._monitor_and_close_positions(
+                        position_timeout_hours, max_loss_percentage, max_profit_percentage,
+                        emergency_loss_threshold, total_positions_closed, emergency_stops_triggered,
+                        last_emergency_check
+                    )
+                    last_position_monitoring = current_time
                 
                 # Validate position integrity (if enabled)
                 if self.enable_position_validation:
@@ -1259,6 +1281,119 @@ class StrategyManager:
                 
         except Exception as e:
             self.logger.error(f"Error cleaning up open orders: {e}") 
+
+    def _monitor_and_close_positions(self, timeout_hours: float, max_loss_percentage: float, 
+                                   max_profit_percentage: float, emergency_threshold: float,
+                                   total_closed: int, emergency_stops: int, last_emergency_check: int):
+        """Monitor positions and close them if they meet closure criteria."""
+        try:
+            current_time = time.time()
+            
+            # Check for positions that need to be closed
+            positions_to_close = []
+            
+            for symbol, position in self.positions.items():
+                if not position.current_price:
+                    continue
+                
+                close_reason = self._should_close_position(position, timeout_hours, max_loss_percentage, max_profit_percentage)
+                if close_reason:
+                    positions_to_close.append((symbol, close_reason))
+            
+            # Close positions
+            for symbol, reason in positions_to_close:
+                if self.close_position(symbol, reason):
+                    total_closed += 1
+            
+            # Emergency stop check (every 30 seconds)
+            if current_time - last_emergency_check >= 30:
+                if self._check_emergency_stop(emergency_threshold):
+                    emergency_stops += 1
+                    self.logger.error("🚨 EMERGENCY STOP TRIGGERED - Closing all positions!")
+                    self.close_all_positions("emergency_stop")
+                    return
+                last_emergency_check = current_time
+            
+            # Log monitoring summary if positions were closed
+            if positions_to_close:
+                self.logger.info(f"Position monitoring: closed {len(positions_to_close)} positions")
+                for symbol, reason in positions_to_close:
+                    self.logger.info(f"  - {symbol}: {reason}")
+                    
+        except Exception as e:
+            self.logger.error(f"Error in position monitoring: {e}")
+    
+    def _should_close_position(self, position: Position, timeout_hours: float, 
+                             max_loss_percentage: float, max_profit_percentage: float) -> Optional[str]:
+        """
+        Determine if a position should be closed.
+        
+        Args:
+            position: Position to check
+            timeout_hours: Hours before position timeout
+            max_loss_percentage: Maximum loss percentage
+            max_profit_percentage: Maximum profit percentage
+            
+        Returns:
+            Reason for closure if should close, None otherwise
+        """
+        if not position.current_price:
+            return None
+        
+        # Check stop loss
+        if position.stop_loss:
+            if position.side == 'long' and position.current_price <= position.stop_loss:
+                return "stop_loss"
+            elif position.side == 'short' and position.current_price >= position.stop_loss:
+                return "stop_loss"
+        
+        # Check take profit
+        if position.take_profit:
+            if position.side == 'long' and position.current_price >= position.take_profit:
+                return "take_profit"
+            elif position.side == 'short' and position.current_price <= position.take_profit:
+                return "take_profit"
+        
+        # Check position timeout
+        time_open = datetime.now() - position.entry_time
+        if time_open.total_seconds() > (timeout_hours * 3600):
+            return "timeout"
+        
+        # Check loss percentage
+        if position.unrealized_pnl_percentage:
+            if position.unrealized_pnl_percentage < -max_loss_percentage:
+                return "max_loss"
+        
+        # Check profit percentage
+        if position.unrealized_pnl_percentage:
+            if position.unrealized_pnl_percentage > max_profit_percentage:
+                return "max_profit"
+        
+        return None
+    
+    def _check_emergency_stop(self, threshold: float) -> bool:
+        """Check if emergency stop should be triggered."""
+        try:
+            total_loss = 0.0
+            total_capital_at_risk = 0.0
+            
+            for position in self.positions.values():
+                if position.unrealized_pnl is not None and position.capital_at_risk is not None:
+                    total_loss += position.unrealized_pnl
+                    total_capital_at_risk += position.capital_at_risk
+            
+            if total_capital_at_risk > 0:
+                portfolio_loss_percentage = (total_loss / total_capital_at_risk) * 100
+                
+                if portfolio_loss_percentage < -threshold:
+                    self.logger.error(f"🚨 EMERGENCY STOP: Portfolio loss {portfolio_loss_percentage:.2f}% exceeds threshold {threshold}%")
+                    return True
+            
+            return False
+            
+        except Exception as e:
+            self.logger.error(f"Error checking emergency stop: {e}")
+            return False
 
     def validate_position_integrity(self) -> Dict[str, Any]:
         """

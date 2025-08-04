@@ -51,6 +51,13 @@ def load_config() -> Dict[str, Any]:
             "enable_stale_order_cleanup": os.getenv("ENABLE_STALE_ORDER_CLEANUP", "true").lower() == "true",
             "position_sync_interval": int(os.getenv("POSITION_SYNC_INTERVAL", "60")),  # seconds
             "enable_position_validation": os.getenv("ENABLE_POSITION_VALIDATION", "true").lower() == "true",
+            
+            # Position monitoring settings
+            "position_monitoring_interval": int(os.getenv("POSITION_MONITORING_INTERVAL", "10")),  # seconds
+            "position_timeout_hours": float(os.getenv("POSITION_TIMEOUT_HOURS", "24")),  # hours
+            "max_loss_percentage": float(os.getenv("MAX_LOSS_PERCENTAGE", "5.0")),  # percentage
+            "max_profit_percentage": float(os.getenv("MAX_PROFIT_PERCENTAGE", "20.0")),  # percentage
+            "emergency_loss_threshold": float(os.getenv("EMERGENCY_LOSS_THRESHOLD", "10.0")),  # percentage
         },
         
         # Risk Management Configuration
