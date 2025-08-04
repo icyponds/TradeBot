@@ -71,27 +71,29 @@ Copy the `env.example` file to `.env` and configure the following variables:
 
 ### Position Sizing
 
-The bot now uses **portfolio-based position sizing** instead of hardcoded values:
+The bot uses **capital at risk-based position sizing** instead of notional position sizing:
 
 1. **Dynamic Portfolio Fetching**: The bot fetches your real portfolio balance from Hyperliquid
-2. **Percentage-based Sizing**: Position sizes are calculated as a percentage of your total portfolio
-3. **Risk Management**: Maximum 2% of portfolio per position (configurable)
-4. **Portfolio Limits**: Maximum 33.33% of portfolio in all positions combined
+2. **Capital at Risk Sizing**: Position sizes are calculated based on the maximum capital at risk, not the total position value
+3. **Risk Management**: Maximum 2% of portfolio capital at risk per position (configurable)
+4. **Portfolio Limits**: Maximum 33.33% of portfolio capital at risk in all positions combined
 
 **Example**: If your portfolio is $10,000:
-- Maximum position size: $200 (2% of $10,000)
-- Maximum total positions: $3,333 (33.33% of $10,000)
+- Maximum capital at risk per position: $200 (2% of $10,000)
+- Maximum total capital at risk: $3,333 (33.33% of $10,000)
+- With 10x leverage, a $200 capital at risk position would have a $2,000 notional value
 - The bot will automatically adjust position sizes as your portfolio grows or shrinks
 
 ### Risk Management
 
-The bot implements comprehensive risk management:
+The bot implements comprehensive risk management based on capital at risk:
 
-1. **Position Limits**: Maximum 2% of portfolio per position
-2. **Portfolio Limits**: Maximum 33.33% of portfolio in all positions
+1. **Position Limits**: Maximum 2% of portfolio capital at risk per position
+2. **Portfolio Limits**: Maximum 33.33% of portfolio capital at risk in all positions
 3. **Dynamic Leverage**: Leverage adjusts based on signal strength and market volatility
-4. **Stop Losses**: Automatic stop losses at 2% (configurable)
+4. **Stop Losses**: Automatic stop losses calculated based on capital at risk (configurable)
 5. **Margin Buffer**: 20% margin buffer to prevent liquidation
+6. **Capital at Risk Tracking**: Real-time monitoring of actual capital exposed to risk
 
 ## Hyperliquid Integration
 

@@ -6,6 +6,7 @@ import logging
 import math
 from typing import Dict, Any, Optional, Tuple
 from .portfolio_manager import PortfolioManager
+from datetime import datetime
 
 
 class LeverageManager:
@@ -99,7 +100,7 @@ class LeverageManager:
     def calculate_leveraged_position_size(self, symbol: str, current_price: float, available_capital: float,
                                         strategy_name: str, signal_strength: float, market_volatility: float) -> Tuple[float, float, float]:
         """
-        Calculate leveraged position size with dynamic leverage and portfolio-based sizing.
+        Calculate leveraged position size based on capital at risk, not notional value.
         
         Args:
             symbol: Trading symbol
@@ -125,18 +126,18 @@ class LeverageManager:
         # Calculate maximum capital at risk per trade
         max_risk_per_trade = max_position_size
         
-        # Calculate position value based on maximum risk
-        # With leverage, the position value = risk_amount * leverage
-        position_value = max_risk_per_trade * leverage
-        
-        # Calculate position size in units
+        # Calculate position size based on capital at risk
+        # With leverage, the position value = capital_at_risk * leverage
+        # Position size in units = (capital_at_risk * leverage) / current_price
         if current_price <= 0:
             self.logger.warning(f"Invalid current price for {symbol}: {current_price}")
             return 0.0, 0.0, leverage
         
+        # Calculate position size based on capital at risk
+        position_value = max_risk_per_trade * leverage
         position_size = position_value / current_price
         
-        # Calculate margin required (this is the actual capital at risk)
+        # The margin required is the actual capital at risk
         margin_required = max_risk_per_trade
         
         # Ensure we don't exceed the maximum risk per trade
@@ -145,7 +146,7 @@ class LeverageManager:
             position_value = margin_required * leverage
             position_size = position_value / current_price
         
-        # Ensure we don't exceed maximum position size
+        # Ensure we don't exceed maximum position size limits
         max_position_value = max_position_size * leverage
         max_position_size_units = max_position_value / current_price if current_price > 0 else 0.0
         
@@ -154,8 +155,16 @@ class LeverageManager:
             position_value = position_size * current_price
             margin_required = position_value / leverage
         
+        # Additional safety check: ensure margin required doesn't exceed available capital
+        if margin_required > available_capital * (1 - self.margin_buffer_percentage / 100):
+            # Reduce position size to fit within available capital
+            max_margin_allowed = available_capital * (1 - self.margin_buffer_percentage / 100)
+            margin_required = max_margin_allowed
+            position_value = margin_required * leverage
+            position_size = position_value / current_price
+        
         self.logger.debug(f"Position size calculation for {symbol}: {position_size:.4f} units, "
-                         f"${margin_required:.2f} margin, {leverage:.1f}x leverage")
+                         f"${margin_required:.2f} capital at risk, {leverage:.1f}x leverage")
         
         return position_size, margin_required, leverage
     
