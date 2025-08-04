@@ -22,6 +22,11 @@ def load_config() -> Dict[str, Any]:
         "api": {
             "base_url": os.getenv("HYPERLIQUID_API_URL", "https://api.hyperliquid.xyz"),
             "ws_url": os.getenv("HYPERLIQUID_WS_URL", "wss://api.hyperliquid.xyz/ws"),
+            "ws_alternative_urls": [
+                url.strip() for url in os.getenv("HYPERLIQUID_WS_ALTERNATIVE_URLS", 
+                "wss://api.hyperliquid.xyz/stream,wss://api.hyperliquid.xyz/v1/ws,wss://api.hyperliquid.xyz/ws/v1").split(",")
+                if url.strip()
+            ],
             "private_key": os.getenv("HYPERLIQUID_PRIVATE_KEY", ""),
             "wallet_address": os.getenv("HYPERLIQUID_WALLET_ADDRESS", ""),
             "public_account_address": os.getenv("HYPERLIQUID_PUBLIC_ACCOUNT_ADDRESS", ""),

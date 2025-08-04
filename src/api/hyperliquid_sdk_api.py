@@ -408,10 +408,8 @@ class HyperliquidSDKAPI:
                     self.logger.error(f"Could not get current price for {symbol}")
                     return None
             
-            # Debug: Log the actual response structure
-            self.logger.info(f"Order response structure: {order_response}")
-            self.logger.info(f"Order response type: {type(order_response)}")
-            self.logger.info(f"Order response keys: {order_response.keys() if hasattr(order_response, 'keys') else 'No keys'}")
+            # Log order response for debugging
+            self.logger.debug(f"Order response: {order_response}")
             
             # Extract order ID from the response structure
             order_id = None

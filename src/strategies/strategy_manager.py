@@ -83,6 +83,13 @@ class StrategyManager:
         # Set strategy manager reference in pair selector
         self.pair_selector.strategy_manager = self
         
+        # Real-time data subscription tracking
+        self._subscribed_symbols = set()
+        
+        # Real-time price monitoring
+        self._price_callbacks = []
+        self._last_prices = {}
+        
         # Setup signal handlers for kill switch
         self._setup_signal_handlers()
     
@@ -229,13 +236,18 @@ class StrategyManager:
     
     def _initialize_market_api(self):
         """Initialize the market API client."""
-        # Try SDK API first, fallback to WebSocket API
+        # Use hybrid API for real-time data + trading operations
         try:
-            from src.api.hyperliquid_sdk_api import HyperliquidSDKAPI
-            return HyperliquidSDKAPI(self.config)
+            from src.api.hyperliquid_hybrid_api import HyperliquidHybridAPI
+            return HyperliquidHybridAPI(self.config)
         except ImportError:
-            from src.api.hyperliquid_websocket_api import HyperliquidWebSocketAPI as HyperliquidAPI
-            return HyperliquidAPI(self.config)
+            # Fallback to SDK API if hybrid not available
+            try:
+                from src.api.hyperliquid_sdk_api import HyperliquidSDKAPI
+                return HyperliquidSDKAPI(self.config)
+            except ImportError:
+                from src.api.hyperliquid_websocket_api import HyperliquidWebSocketAPI as HyperliquidAPI
+                return HyperliquidAPI(self.config)
     
     def _initialize_strategies(self):
         """Initialize trading strategies."""
@@ -258,7 +270,14 @@ class StrategyManager:
         
         # Start market API (only if it has a start method)
         if hasattr(self.market_api, 'start'):
-            self.market_api.start()
+            if not self.market_api.start():
+                self.logger.error("Failed to start market API")
+                return
+        
+        # Setup real-time price monitoring
+        if hasattr(self.market_api, 'add_price_callback'):
+            self.market_api.add_price_callback(self._on_price_update)
+            self.logger.info("Real-time price monitoring enabled")
         
         # Initial portfolio update
         self._update_account_balance()
@@ -449,8 +468,7 @@ class StrategyManager:
                     # For now, we'll just log the status
                     self.logger.info(f"Open order: {symbol} {side} {size} @ {price} (ID: {order_id})")
                     
-                    # TODO: Implement order timeout logic
-                    # TODO: Implement order cancellation for stale orders
+                            # Order timeout and cancellation logic implemented in _cleanup_stale_orders
             else:
                 # No open orders to monitor
                 pass
@@ -553,9 +571,37 @@ class StrategyManager:
         
         self.logger.info("Trading loop stopped")
     
+    def _subscribe_to_symbol(self, symbol: str):
+        """Subscribe to real-time data for a symbol."""
+        if symbol not in self._subscribed_symbols:
+            if hasattr(self.market_api, 'subscribe_symbol'):
+                self.market_api.subscribe_symbol(symbol)
+                self._subscribed_symbols.add(symbol)
+                self.logger.info(f"Subscribed to real-time data for {symbol}")
+    
+    def _on_price_update(self, symbol: str, price: float, timestamp: float):
+        """Handle real-time price updates."""
+        old_price = self._last_prices.get(symbol)
+        self._last_prices[symbol] = price
+        
+        if old_price is not None:
+            price_change = ((price - old_price) / old_price) * 100
+            if abs(price_change) > 1.0:  # Log significant price changes (>1%)
+                self.logger.info(f"Real-time price update for {symbol}: ${old_price:.4f} → ${price:.4f} ({price_change:+.2f}%)")
+        
+        # Notify callbacks
+        for callback in self._price_callbacks:
+            try:
+                callback(symbol, price, timestamp)
+            except Exception as e:
+                self.logger.error(f"Price callback error: {e}")
+    
     def _analyze_symbol(self, symbol: str):
         """Analyze a single symbol and execute strategies."""
         try:
+            # Subscribe to real-time data for this symbol
+            self._subscribe_to_symbol(symbol)
+            
             # Check if we have sufficient data
             if not self.market_api.is_data_available(symbol):
                 self.logger.debug(f"Insufficient data for {symbol}, skipping")

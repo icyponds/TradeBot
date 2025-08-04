@@ -29,7 +29,18 @@ class HyperliquidWebSocketAPI:
         self.logger = logging.getLogger(__name__)
         
         # WebSocket configuration
-        self.ws_url = config['api']['ws_url']
+        self.ws_url = config['api'].get('ws_url', 'wss://api.hyperliquid.xyz/ws')
+        
+        # Get alternative WebSocket URLs from config or use defaults
+        alternative_urls = config['api'].get('ws_alternative_urls', [
+            'wss://api.hyperliquid.xyz/ws',
+            'wss://api.hyperliquid.xyz/stream',
+            'wss://api.hyperliquid.xyz/v1/ws'
+        ])
+        
+        # Create list of URLs to try, starting with the configured URL
+        self.ws_urls = [self.ws_url] + alternative_urls
+        
         self.base_url = config['api']['base_url']
         self.private_key = config['api']['private_key']
         self.wallet_address = config['api']['wallet_address']
@@ -101,6 +112,30 @@ class HyperliquidWebSocketAPI:
     
     def _connect(self):
         """Establish WebSocket connection."""
+        # Try multiple WebSocket URLs
+        for ws_url in self.ws_urls:
+            try:
+                self.logger.info(f"Attempting WebSocket connection to {ws_url}")
+                self.ws = websocket.WebSocketApp(
+                    ws_url,
+                    on_open=self._on_open,
+                    on_message=self._on_message,
+                    on_error=self._on_error,
+                    on_close=self._on_close
+                )
+                self.ws.run_forever()
+                
+                # If we get here, connection was successful
+                self.ws_url = ws_url  # Update the working URL
+                self.logger.info(f"WebSocket connected successfully to {ws_url}")
+                return
+                
+            except Exception as e:
+                self.logger.warning(f"Failed to connect to {ws_url}: {e}")
+                continue
+        
+        # If all URLs fail, try the configured URL as fallback
+        self.logger.warning("All WebSocket URLs failed, trying configured URL")
         self.ws = websocket.WebSocketApp(
             self.ws_url,
             on_open=self._on_open,
@@ -148,48 +183,74 @@ class HyperliquidWebSocketAPI:
     def _process_message(self, data):
         """Process incoming WebSocket message."""
         try:
-            msg_type = data.get('type')
-            
-            if msg_type == 'price':
-                self._handle_price_update(data)
-            elif msg_type == 'ohlcv':
-                self._handle_ohlcv_update(data)
-            elif msg_type == 'position':
-                self._handle_position_update(data)
-            elif msg_type == 'order':
-                self._handle_order_update(data)
+            # Handle Hyperliquid WebSocket message format
+            if 'channel' in data:
+                channel = data['channel']
+                
+                if channel == 'allMids':
+                    self._handle_price_update(data)
+                elif channel == 'candle':
+                    self._handle_ohlcv_update(data)
+                elif channel == 'positions':
+                    self._handle_position_update(data)
+                elif channel == 'orders':
+                    self._handle_order_update(data)
+                else:
+                    self.logger.debug(f"Unknown channel: {channel}")
             else:
-                self.logger.debug(f"Unknown message type: {msg_type}")
+                self.logger.debug(f"Unknown message format: {data}")
                 
         except Exception as e:
             self.logger.error(f"Error processing message: {e}")
     
     def _handle_price_update(self, data):
         """Handle real-time price updates."""
-        symbol = data.get('symbol')
-        price = data.get('price')
-        timestamp = data.get('timestamp', time.time())
-        
-        if symbol and price:
-            self.price_data[symbol].append({
-                'price': float(price),
-                'timestamp': timestamp
-            })
-            
-            # Notify callbacks
-            for callback in self.price_callbacks:
-                try:
-                    callback(symbol, float(price), timestamp)
-                except Exception as e:
-                    self.logger.error(f"Price callback error: {e}")
+        try:
+            # Hyperliquid price update format
+            if 'data' in data:
+                price_data = data['data']
+                if isinstance(price_data, dict):
+                    # Extract symbol and price from Hyperliquid format
+                    symbol = price_data.get('coin')
+                    price = price_data.get('mid')
+                    
+                    if symbol and price:
+                        timestamp = time.time()
+                        self.price_data[symbol].append({
+                            'price': float(price),
+                            'timestamp': timestamp
+                        })
+                        
+                        # Notify callbacks
+                        for callback in self.price_callbacks:
+                            try:
+                                callback(symbol, float(price), timestamp)
+                            except Exception as e:
+                                self.logger.error(f"Price callback error: {e}")
+        except Exception as e:
+            self.logger.error(f"Error handling price update: {e}")
     
     def _handle_ohlcv_update(self, data):
         """Handle real-time OHLCV updates."""
-        symbol = data.get('symbol')
-        ohlcv = data.get('ohlcv')
-        
-        if symbol and ohlcv:
-            self.ohlcv_data[symbol].append(ohlcv)
+        try:
+            # Hyperliquid OHLCV update format
+            if 'data' in data:
+                candle_data = data['data']
+                if isinstance(candle_data, dict):
+                    symbol = candle_data.get('coin')
+                    ohlcv = {
+                        'timestamp': candle_data.get('t', time.time()),
+                        'open': float(candle_data.get('o', 0)),
+                        'high': float(candle_data.get('h', 0)),
+                        'low': float(candle_data.get('l', 0)),
+                        'close': float(candle_data.get('c', 0)),
+                        'volume': float(candle_data.get('v', 0))
+                    }
+                    
+                    if symbol:
+                        self.ohlcv_data[symbol].append(ohlcv)
+        except Exception as e:
+            self.logger.error(f"Error handling OHLCV update: {e}")
     
     def _handle_position_update(self, data):
         """Handle real-time position updates."""
@@ -238,21 +299,27 @@ class HyperliquidWebSocketAPI:
     
     def _subscribe_price_feed(self, symbol: str):
         """Subscribe to real-time price feed for a symbol."""
+        # Hyperliquid WebSocket subscription format
         subscription = {
-            "type": "subscribe",
-            "channel": "price",
-            "symbol": symbol
+            "method": "subscribe",
+            "subscription": {
+                "type": "allMids",
+                "coin": symbol
+            }
         }
         self.ws.send(json.dumps(subscription))
         self.logger.debug(f"Subscribed to price feed for {symbol}")
     
     def _subscribe_ohlcv_feed(self, symbol: str):
         """Subscribe to real-time OHLCV feed for a symbol."""
+        # Hyperliquid WebSocket subscription format for candles
         subscription = {
-            "type": "subscribe",
-            "channel": "ohlcv",
-            "symbol": symbol,
-            "timeframe": "1m"
+            "method": "subscribe",
+            "subscription": {
+                "type": "candle",
+                "coin": symbol,
+                "interval": "1m"
+            }
         }
         self.ws.send(json.dumps(subscription))
         self.logger.debug(f"Subscribed to OHLCV feed for {symbol}")
