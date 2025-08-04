@@ -40,16 +40,16 @@ def load_config() -> Dict[str, Any]:
             
             # Portfolio-based position sizing
             "use_portfolio_based_sizing": os.getenv("USE_PORTFOLIO_BASED_SIZING", "true").lower() == "true",
-            "max_position_size_usd": float(os.getenv("MAX_POSITION_SIZE_USD", "50")),  # Fallback max USD per position
-            "max_position_size_percentage": float(os.getenv("MAX_POSITION_SIZE_PERCENTAGE", "2.0")),  # Max % of portfolio per position
+            "max_position_size_usd": float(os.getenv("MAX_POSITION_SIZE_USD", "100")),  # Fallback max USD per position
+            "max_position_size_percentage": float(os.getenv("MAX_POSITION_SIZE_PERCENTAGE", "10.0")),  # Max % of portfolio per position
             "max_positions_percentage": float(os.getenv("MAX_POSITIONS_PERCENTAGE", "33.33")),  # Max % of portfolio in all positions
-            "risk_percentage": float(os.getenv("RISK_PERCENTAGE", "2.0")),
-            "stop_loss_percentage": float(os.getenv("STOP_LOSS_PERCENTAGE", "2.0")),
+            "risk_percentage": float(os.getenv("RISK_PERCENTAGE", "10.0")),
+            "stop_loss_percentage": float(os.getenv("STOP_LOSS_PERCENTAGE", "5.0")),
             
             # Order monitoring settings
-            "order_timeout_minutes": float(os.getenv("ORDER_TIMEOUT_MINUTES", "30")),
+            "order_timeout_minutes": float(os.getenv("ORDER_TIMEOUT_MINUTES", ".05")),
             "enable_stale_order_cleanup": os.getenv("ENABLE_STALE_ORDER_CLEANUP", "true").lower() == "true",
-            "position_sync_interval": int(os.getenv("POSITION_SYNC_INTERVAL", "60")),  # seconds
+            "position_sync_interval": int(os.getenv("POSITION_SYNC_INTERVAL", "1")),  # seconds
             "enable_position_validation": os.getenv("ENABLE_POSITION_VALIDATION", "true").lower() == "true",
             
             # Position monitoring settings

@@ -119,9 +119,11 @@ class LeverageManager:
         # Get maximum position size from portfolio manager if available
         if self.portfolio_manager:
             max_position_size = self.portfolio_manager.calculate_max_position_size(symbol)
+            self.logger.info(f"Portfolio-based max position size for {symbol}: ${max_position_size:.2f}")
         else:
             # Fallback to fixed amount from config
             max_position_size = self.config['trading']['max_position_size_usd']
+            self.logger.info(f"Config-based max position size for {symbol}: ${max_position_size:.2f}")
         
         # Calculate maximum capital at risk per trade
         max_risk_per_trade = max_position_size
@@ -163,8 +165,10 @@ class LeverageManager:
             position_value = margin_required * leverage
             position_size = position_value / current_price
         
-        self.logger.debug(f"Position size calculation for {symbol}: {position_size:.4f} units, "
-                         f"${margin_required:.2f} capital at risk, {leverage:.1f}x leverage")
+        self.logger.info(f"Position calculation for {symbol}: size={position_size:.4f}, margin=${margin_required:.2f}, leverage={leverage:.1f}x")
+        self.logger.info(f"  - Max position size: ${max_position_size:.2f}")
+        self.logger.info(f"  - Available capital: ${available_capital:.2f}")
+        self.logger.info(f"  - Position value: ${position_value:.2f}")
         
         return position_size, margin_required, leverage
     

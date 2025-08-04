@@ -352,14 +352,22 @@ class HyperliquidSDKAPI:
                 rounded_size = round(size, 2)
                 self.logger.warning(f"Asset info not available for {symbol}, using fallback rounding to 2 decimals")
             
-            # Ensure minimum order size (0.01)
-            if rounded_size < 0.01:
-                self.logger.warning(f"Order size {rounded_size} too small for {symbol}, skipping order")
+            # Ensure minimum order size and value
+            # Hyperliquid requires minimum $10 order value
+            current_price = self.get_current_price(symbol)
+            if current_price:
+                order_value = rounded_size * current_price
+                if order_value < 10.0:
+                    min_size = 10.0 / current_price
+                    self.logger.warning(f"Order value ${order_value:.2f} too small for {symbol}, minimum is $10. Need at least {min_size:.4f} {symbol}")
+                    return None
+            else:
+                self.logger.warning(f"Could not get current price for {symbol}, skipping order")
                 return None
             
-            # Place order using correct SDK signature based on official examples
+            # Place order using correct SDK signature
             if price:
-                # Limit order
+                # Limit order at specified price
                 order_response = self.exchange_client.order(
                     symbol,
                     is_buy,
@@ -368,16 +376,58 @@ class HyperliquidSDKAPI:
                     {"limit": {"tif": "Gtc"}}
                 )
             else:
-                # Market order
-                order_response = self.exchange_client.order(
-                    symbol,
-                    is_buy,
-                    rounded_size,
-                    0,  # Market orders use 0 price
-                    {"market": {}}
-                )
+                # Market order - use more aggressive pricing and price walking
+                current_price = self.get_current_price(symbol)
+                if current_price:
+                    # More aggressive pricing: 15% above/below market for immediate fill
+                    aggressive_price = current_price * 1.15 if is_buy else current_price * 0.85
+                    
+                    # Try immediate fill first
+                    order_response = self.exchange_client.order(
+                        symbol,
+                        is_buy,
+                        rounded_size,
+                        aggressive_price,
+                        {"limit": {"tif": "Ioc"}}  # Immediate or Cancel
+                    )
+                    
+                    # Check if order filled
+                    if order_response and 'response' in order_response:
+                        response_data = order_response['response']
+                        if 'data' in response_data and 'statuses' in response_data['data']:
+                            statuses = response_data['data']['statuses']
+                            if statuses and len(statuses) > 0:
+                                status = statuses[0]
+                                if 'filled' in status:
+                                    self.logger.info(f"✅ Order filled immediately at {aggressive_price}")
+                                else:
+                                    # Order didn't fill, try price walking
+                                    self.logger.info(f"Order didn't fill at {aggressive_price}, trying price walking...")
+                                    order_response = self._price_walk_order(symbol, is_buy, rounded_size, current_price)
+                else:
+                    self.logger.error(f"Could not get current price for {symbol}")
+                    return None
             
-            order_id = order_response.get('oid')
+            # Debug: Log the actual response structure
+            self.logger.info(f"Order response structure: {order_response}")
+            self.logger.info(f"Order response type: {type(order_response)}")
+            self.logger.info(f"Order response keys: {order_response.keys() if hasattr(order_response, 'keys') else 'No keys'}")
+            
+            # Extract order ID from the response structure
+            order_id = None
+            if order_response and 'response' in order_response:
+                response_data = order_response['response']
+                if 'data' in response_data and 'statuses' in response_data['data']:
+                    statuses = response_data['data']['statuses']
+                    if statuses and len(statuses) > 0:
+                        status = statuses[0]
+                        if 'resting' in status:
+                            order_id = status['resting']['oid']
+                        elif 'filled' in status:
+                            order_id = status['filled']['oid']
+                        elif 'error' in status:
+                            self.logger.error(f"Order error: {status['error']}")
+                            return None
             
             return {
                 "status": "pending",  # Changed from "success" to "pending"
@@ -393,6 +443,59 @@ class HyperliquidSDKAPI:
         except Exception as e:
             self.logger.error(f"Error placing order: {e}")
             return None
+
+    def _price_walk_order(self, symbol: str, is_buy: bool, size: float, current_price: float) -> Optional[Dict[str, Any]]:
+        """
+        Walk the price up/down to get the order filled.
+        
+        Args:
+            symbol: Trading symbol
+            is_buy: True for buy, False for sell
+            size: Order size
+            current_price: Current market price
+            
+        Returns:
+            Order response or None if failed
+        """
+        max_attempts = 5
+        price_step = 0.02  # 2% price step
+        
+        for attempt in range(max_attempts):
+            # Calculate walking price
+            if is_buy:
+                # For buys, walk price up
+                walk_price = current_price * (1 + (attempt + 1) * price_step)
+            else:
+                # For sells, walk price down
+                walk_price = current_price * (1 - (attempt + 1) * price_step)
+            
+            self.logger.info(f"Price walk attempt {attempt + 1}: {walk_price:.4f}")
+            
+            # Place order with walking price
+            order_response = self.exchange_client.order(
+                symbol,
+                is_buy,
+                size,
+                walk_price,
+                {"limit": {"tif": "Ioc"}}  # Immediate or Cancel
+            )
+            
+            # Check if filled
+            if order_response and 'response' in order_response:
+                response_data = order_response['response']
+                if 'data' in response_data and 'statuses' in response_data['data']:
+                    statuses = response_data['data']['statuses']
+                    if statuses and len(statuses) > 0:
+                        status = statuses[0]
+                        if 'filled' in status:
+                            self.logger.info(f"✅ Order filled at walk price {walk_price}")
+                            return order_response
+            
+            # Wait a moment before next attempt
+            time.sleep(0.5)
+        
+        self.logger.warning(f"Failed to fill order after {max_attempts} price walk attempts")
+        return None
 
     def get_order_status(self, order_id: str) -> Optional[Dict[str, Any]]:
         """

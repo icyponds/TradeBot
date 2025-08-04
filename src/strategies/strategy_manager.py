@@ -71,6 +71,8 @@ class StrategyManager:
         self.positions = {}
         self.trades = []
         self.total_trades = 0
+        self.total_pnl = 0.0
+        self.winning_trades = 0
         self.is_running = False
         
         self.logger.info(f"Initialized strategy manager with {len(self.strategies)} strategies")
@@ -320,6 +322,7 @@ class StrategyManager:
         try:
             # Get actual positions from exchange
             exchange_positions = self.market_api.get_positions()
+            self.logger.debug(f"Exchange positions: {len(exchange_positions)}")
             exchange_position_symbols = {pos['symbol'] for pos in exchange_positions}
             
             # Get local position symbols
@@ -364,6 +367,12 @@ class StrategyManager:
                     if size_diff > 0.001:  # Allow for small floating point differences
                         self.logger.warning(f"Size discrepancy for {symbol}: local={local_pos.size}, exchange={exchange_pos['size']}")
                         local_pos.size = abs(exchange_pos['size'])
+            
+            # If there are local positions but no exchange positions, clear local positions
+            # This handles the case where orders were placed but not actually filled
+            if len(exchange_positions) == 0 and len(self.positions) > 0:
+                self.logger.warning(f"No exchange positions found but {len(self.positions)} local positions exist - clearing local positions")
+                self.positions.clear()
             
             # Save updated positions to file
             self.save_positions_to_file()
@@ -458,11 +467,11 @@ class StrategyManager:
         last_position_monitoring = 0
         
         # Position monitoring configuration
-        position_monitoring_interval = config['trading']['position_monitoring_interval']
-        position_timeout_hours = config['trading']['position_timeout_hours']
-        max_loss_percentage = config['trading']['max_loss_percentage']
-        max_profit_percentage = config['trading']['max_profit_percentage']
-        emergency_loss_threshold = config['trading']['emergency_loss_threshold']
+        position_monitoring_interval = self.config['trading']['position_monitoring_interval']
+        position_timeout_hours = self.config['trading']['position_timeout_hours']
+        max_loss_percentage = self.config['trading']['max_loss_percentage']
+        max_profit_percentage = self.config['trading']['max_profit_percentage']
+        emergency_loss_threshold = self.config['trading']['emergency_loss_threshold']
         
         # Statistics
         total_positions_closed = 0
@@ -476,11 +485,13 @@ class StrategyManager:
                 # With WebSocket, positions are updated in real-time
                 # Only sync periodically to ensure accuracy
                 if current_time - last_position_sync >= self.position_sync_interval:
+                    self.logger.debug(f"Syncing positions with exchange (local: {len(self.positions)})")
                     self.sync_positions_with_exchange()
                     last_position_sync = current_time
                 
                 # Continuous position monitoring and auto-closure
                 if current_time - last_position_monitoring >= position_monitoring_interval:
+                    self.logger.debug(f"Running position monitoring check ({len(self.positions)} positions)")
                     self._monitor_and_close_positions(
                         position_timeout_hours, max_loss_percentage, max_profit_percentage,
                         emergency_loss_threshold, total_positions_closed, emergency_stops_triggered,
@@ -700,21 +711,65 @@ class StrategyManager:
                 stop_loss = min(stop_loss, stop_loss_capital_based)  # Lower price = more conservative
                 take_profit = max(take_profit, take_profit_capital_based)  # Higher price = more conservative
             
-            # Place order
+            # Place order with current price to ensure proper order ID
+            current_price = self.market_api.get_current_price(symbol)
+            if not current_price:
+                self.logger.error(f"Could not get current price for {symbol}")
+                return
+                
             order_result = self.market_api.place_order(symbol, side, position_size, current_price)
             
             if order_result and order_result.get('status') == 'pending':
                 order_id = order_result.get('order_id')
                 self.logger.info(f"Placed {side} order for {symbol}: {position_size} @ {current_price} (Order ID: {order_id})")
                 
-                # Wait for order to be filled (with timeout)
-                fill_result = self.market_api.wait_for_order_fill(order_id, timeout=30)
+                # Check if order was immediately filled by examining the response
+                order_response = order_result.get('order_response', {})
+                is_filled = False
+                fill_price = current_price
+                fill_size = position_size
                 
-                if fill_result and fill_result.get('status') == 'filled':
-                    # Order was filled - use the order result data since we can't get actual fill data
-                    fill_price = current_price  # Use the order price since we don't have actual fill price
-                    fill_size = position_size   # Use the order size since we don't have actual fill size
+                # Check the order response structure for fill status
+                if order_response and 'response' in order_response:
+                    response_data = order_response['response']
+                    if 'data' in response_data and 'statuses' in response_data['data']:
+                        statuses = response_data['data']['statuses']
+                        if statuses and len(statuses) > 0:
+                            status = statuses[0]
+                            if 'filled' in status:
+                                is_filled = True
+                                fill_data = status['filled']
+                                fill_size = float(fill_data.get('totalSz', position_size))
+                                fill_price = float(fill_data.get('avgPx', current_price))
+                                self.logger.info(f"✅ Order filled immediately: {symbol} {fill_size} @ {fill_price}")
+                            elif 'resting' in status:
+                                self.logger.info(f"⏳ Order resting on books: {symbol}")
+                            elif 'error' in status:
+                                self.logger.error(f"❌ Order error: {status['error']}")
+                                return
+                
+                # If not immediately filled, wait and check exchange positions
+                if not is_filled:
+                    # Wait a moment for order to potentially fill
+                    time.sleep(2)
                     
+                    # Check if position actually exists on exchange
+                    exchange_positions = self.market_api.get_positions()
+                    actual_position = next((pos for pos in exchange_positions if pos['symbol'] == symbol), None)
+                    
+                    if actual_position:
+                        # Position exists on exchange - use actual fill data
+                        fill_price = actual_position['entry_price']
+                        fill_size = abs(actual_position['size'])
+                        is_filled = True
+                        self.logger.info(f"✅ Order filled: {symbol} {fill_size} @ {fill_price}")
+                    else:
+                        # Position doesn't exist - order didn't fill
+                        self.logger.warning(f"❌ Order for {symbol} did not fill - not recording position")
+                        return
+                
+                # Only proceed if order was filled
+                if is_filled:
                     # Create trade record with order data
                     trade = Trade(
                         symbol=symbol,
@@ -755,11 +810,10 @@ class StrategyManager:
                     self.logger.info(f"Signal strength: {signal_strength:.2f}, Volatility: {market_volatility:.2f}")
                     self.logger.info(f"Stop loss: {stop_loss:.2f}, Take profit: {take_profit:.2f}")
                     
-                else:
-                    # Order was not filled - cancel it and log
-                    self.market_api.cancel_order(order_id)
-                    self.logger.warning(f"❌ Order {order_id} for {symbol} was not filled - cancelled")
-                    
+                    # Verify position was recorded correctly
+                    exchange_positions = self.market_api.get_positions()
+                    self.logger.info(f"📊 Position recorded: {len(self.positions)} local positions, {len(exchange_positions)} exchange positions")
+                
             else:
                 self.logger.error(f"Failed to place order for {symbol}")
                 
@@ -1057,6 +1111,11 @@ class StrategyManager:
         Returns:
             True if trade should be executed, False otherwise
         """
+        # Check if we already have a position for this symbol
+        if symbol in self.positions:
+            self.logger.info(f"Already have a position for {symbol}, skipping trade")
+            return False
+        
         # Check portfolio allocation first
         allocation = self._check_portfolio_allocation()
         self.logger.info(f"Portfolio allocation for {symbol}: {allocation['allocation_percentage']:.1f}% (max: {self.max_positions_percentage}%)")
@@ -1289,6 +1348,8 @@ class StrategyManager:
         try:
             current_time = time.time()
             
+            self.logger.debug(f"Position monitoring: checking {len(self.positions)} positions")
+            
             # Check for positions that need to be closed
             positions_to_close = []
             
@@ -1319,6 +1380,9 @@ class StrategyManager:
                 self.logger.info(f"Position monitoring: closed {len(positions_to_close)} positions")
                 for symbol, reason in positions_to_close:
                     self.logger.info(f"  - {symbol}: {reason}")
+            else:
+                # Log that monitoring is active but no positions need closing
+                self.logger.debug(f"Position monitoring active: {len(self.positions)} positions checked, none need closing")
                     
         except Exception as e:
             self.logger.error(f"Error in position monitoring: {e}")

@@ -6,6 +6,11 @@ Main entry point for the trading bot.
 import logging
 import sys
 import time
+import os
+
+# Add the project root to Python path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from src.config.settings import load_config
 from src.utils.logger import setup_logging
 from src.strategies.strategy_manager import StrategyManager
