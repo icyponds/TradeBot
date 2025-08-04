@@ -19,7 +19,13 @@ from src.strategies.strategy_manager import StrategyManager
 def main():
     """Main function to run the trading bot."""
     try:
-        # Setup logging
+        # Load configuration first
+        config = load_config()
+        if not config:
+            print("ERROR: Failed to load configuration")
+            sys.exit(1)
+        
+        # Setup logging with config
         setup_logging(
             log_level=config.get('logging', {}).get('level', 'INFO'),
             log_file=config.get('logging', {}).get('file', 'trading_bot.log'),
@@ -30,9 +36,7 @@ def main():
         logger = logging.getLogger(__name__)
         
         logger.info("Starting Hyperliquid Trading Bot...")
-        
-        # Load configuration
-        config = load_config()
+        logger.info("Configuration loaded successfully")
         if not config:
             logger.error("Failed to load configuration")
             sys.exit(1)
@@ -55,11 +59,15 @@ def main():
         strategy_manager.start()
         
     except KeyboardInterrupt:
-        logger.info("Received interrupt signal, shutting down...")
+        if 'logger' in locals():
+            logger.info("Received interrupt signal, shutting down...")
         if 'strategy_manager' in locals():
             strategy_manager.stop()
     except Exception as e:
-        logger.error(f"Unexpected error: {e}")
+        if 'logger' in locals():
+            logger.error(f"Unexpected error: {e}")
+        else:
+            print(f"ERROR: {e}")
         sys.exit(1)
 
 

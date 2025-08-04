@@ -279,6 +279,11 @@ class StrategyManager:
             self.market_api.add_price_callback(self._on_price_update)
             self.logger.info("Real-time price monitoring enabled")
         
+        # Setup real-time position monitoring
+        if hasattr(self.market_api, 'add_position_callback'):
+            self.market_api.add_position_callback(self._on_position_update)
+            self.logger.info("Real-time position monitoring enabled")
+        
         # Initial portfolio update
         self._update_account_balance()
         
@@ -326,6 +331,11 @@ class StrategyManager:
         """Emergency stop - close all positions and stop trading."""
         self.logger.warning("EMERGENCY STOP: Closing all positions...")
         try:
+            # First sync with exchange to get latest position information
+            self.logger.info("Syncing positions with exchange before emergency stop...")
+            self.sync_positions_with_exchange()
+            
+            # Then close all positions
             self.close_all_positions("emergency_stop")
             self.stop()
         except Exception as e:
@@ -595,6 +605,50 @@ class StrategyManager:
                 callback(symbol, price, timestamp)
             except Exception as e:
                 self.logger.error(f"Price callback error: {e}")
+    
+    def _on_position_update(self, position_data: Dict[str, Any]):
+        """Handle real-time position updates from WebSocket."""
+        try:
+            symbol = position_data.get('symbol')
+            if not symbol:
+                return
+            
+            # Check if position was closed (size = 0 or position removed)
+            position_size = abs(float(position_data.get('size', 0)))
+            
+            if position_size == 0:
+                # Position was closed
+                if symbol in self.positions:
+                    self.logger.info(f"Real-time position update: {symbol} position closed (size: {position_size})")
+                    del self.positions[symbol]
+                    self.save_positions_to_file()
+            else:
+                # Position was opened or modified
+                if symbol not in self.positions:
+                    # New position
+                    self.logger.info(f"Real-time position update: {symbol} position opened (size: {position_size})")
+                    position = Position(
+                        symbol=symbol,
+                        side=position_data.get('side', 'unknown'),
+                        size=position_size,
+                        entry_price=float(position_data.get('entry_price', 0)),
+                        entry_time=datetime.now(),
+                        strategy='unknown',
+                        current_price=float(position_data.get('mark_price', 0))
+                    )
+                    self.positions[symbol] = position
+                    self.save_positions_to_file()
+                else:
+                    # Existing position updated
+                    local_position = self.positions[symbol]
+                    old_size = local_position.size
+                    if abs(position_size - old_size) > 0.001:  # Significant size change
+                        self.logger.info(f"Real-time position update: {symbol} size changed {old_size} → {position_size}")
+                        local_position.size = position_size
+                        self.save_positions_to_file()
+            
+        except Exception as e:
+            self.logger.error(f"Error handling position update: {e}")
     
     def _analyze_symbol(self, symbol: str):
         """Analyze a single symbol and execute strategies."""
@@ -918,10 +972,24 @@ class StrategyManager:
     def close_all_positions(self, reason: str = "kill_switch"):
         """Close all open positions."""
         self.logger.info(f"Closing all positions due to {reason}...")
-        symbols_to_close = list(self.positions.keys())
+        
+        # First, get all positions from exchange to ensure we close everything
+        try:
+            exchange_positions = self.market_api.get_positions()
+            exchange_symbols = {pos['symbol'] for pos in exchange_positions}
+            self.logger.info(f"Found {len(exchange_positions)} positions on exchange: {list(exchange_symbols)}")
+        except Exception as e:
+            self.logger.error(f"Error getting exchange positions: {e}")
+            exchange_symbols = set()
+        
+        # Combine local and exchange positions to ensure we close everything
+        local_symbols = set(self.positions.keys())
+        all_symbols_to_close = local_symbols.union(exchange_symbols)
+        
+        self.logger.info(f"Closing {len(all_symbols_to_close)} positions: local={list(local_symbols)}, exchange={list(exchange_symbols)}")
         closed_count = 0
         
-        for symbol in symbols_to_close:
+        for symbol in all_symbols_to_close:
             try:
                 # Try to close position with timeout
                 self.close_position(symbol, reason)
@@ -930,7 +998,7 @@ class StrategyManager:
             except Exception as e:
                 self.logger.error(f"Error closing position for {symbol}: {e}")
         
-        self.logger.info(f"Attempted to close {len(symbols_to_close)} positions, successfully closed {closed_count}.")
+        self.logger.info(f"Attempted to close {len(all_symbols_to_close)} positions, successfully closed {closed_count}.")
     
     def get_performance_summary(self) -> Dict[str, Any]:
         """Get performance summary."""
@@ -1191,17 +1259,6 @@ class StrategyManager:
         self.logger.warning(f"Position limit reached ({len(self.positions)} positions), skipping trade for {symbol}")
         return False 
 
-    def emergency_stop(self):
-        """Emergency stop - close all positions and stop trading."""
-        self.logger.warning("EMERGENCY STOP: Closing all positions...")
-        try:
-            self.close_all_positions("emergency_stop")
-            self.stop()
-        except Exception as e:
-            self.logger.error(f"Error during emergency stop: {e}")
-        finally:
-            self.logger.info("Emergency stop complete")
-    
     def save_positions_to_file(self):
         """Save current positions to a JSON file."""
         positions_data = {}
