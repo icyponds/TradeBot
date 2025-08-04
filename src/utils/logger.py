@@ -5,21 +5,85 @@ Logging utilities for the trading bot.
 import logging
 import logging.handlers
 import os
+import glob
 from datetime import datetime
 
 
-def setup_logging(log_level: str = "INFO", log_file: str = "trading_bot.log"):
+def purge_old_logs(log_dir: str = "logs", max_log_files: int = 10, max_log_age_days: int = 7):
+    """
+    Purge old log files to prevent disk space issues.
+    
+    Args:
+        log_dir: Directory containing log files
+        max_log_files: Maximum number of log files to keep
+        max_log_age_days: Maximum age of log files in days
+    """
+    try:
+        if not os.path.exists(log_dir):
+            return
+        
+        # Get all log files
+        log_pattern = os.path.join(log_dir, "*.log*")
+        log_files = glob.glob(log_pattern)
+        
+        if not log_files:
+            return
+        
+        # Sort by modification time (oldest first)
+        log_files.sort(key=lambda x: os.path.getmtime(x))
+        
+        # Remove files older than max_log_age_days
+        current_time = datetime.now().timestamp()
+        max_age_seconds = max_log_age_days * 24 * 3600
+        
+        for log_file in log_files:
+            file_age = current_time - os.path.getmtime(log_file)
+            if file_age > max_age_seconds:
+                try:
+                    os.remove(log_file)
+                    print(f"Removed old log file: {log_file}")
+                except Exception as e:
+                    print(f"Failed to remove old log file {log_file}: {e}")
+        
+        # Keep only the most recent max_log_files
+        remaining_files = glob.glob(log_pattern)
+        if len(remaining_files) > max_log_files:
+            # Sort by modification time (oldest first)
+            remaining_files.sort(key=lambda x: os.path.getmtime(x))
+            
+            # Remove oldest files
+            files_to_remove = remaining_files[:-max_log_files]
+            for log_file in files_to_remove:
+                try:
+                    os.remove(log_file)
+                    print(f"Removed excess log file: {log_file}")
+                except Exception as e:
+                    print(f"Failed to remove excess log file {log_file}: {e}")
+                    
+    except Exception as e:
+        print(f"Error purging old logs: {e}")
+
+
+def setup_logging(log_level: str = "INFO", log_file: str = "trading_bot.log", 
+                 purge_logs: bool = True, max_log_files: int = 10, max_log_age_days: int = 7):
     """
     Setup logging configuration for the trading bot.
     
     Args:
         log_level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
         log_file: Log file path
+        purge_logs: Whether to purge old logs on startup
+        max_log_files: Maximum number of log files to keep
+        max_log_age_days: Maximum age of log files in days
     """
     # Create logs directory if it doesn't exist
     log_dir = "logs"
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
+    
+    # Purge old logs if requested
+    if purge_logs:
+        purge_old_logs(log_dir, max_log_files, max_log_age_days)
     
     # Full path for log file
     log_path = os.path.join(log_dir, log_file)
@@ -47,6 +111,9 @@ def setup_logging(log_level: str = "INFO", log_file: str = "trading_bot.log"):
     # Log startup message
     logger = logging.getLogger(__name__)
     logger.info("Logging setup complete")
+    
+    if purge_logs:
+        logger.info(f"Log purging enabled: max {max_log_files} files, max {max_log_age_days} days old")
 
 
 def get_logger(name: str) -> logging.Logger:

@@ -20,11 +20,10 @@ def load_config() -> Dict[str, Any]:
     config = {
         # Hyperliquid API Configuration
         "api": {
-            "base_url": os.getenv("HYPERLIQUID_API_URL", "https://api.hyperliquid.xyz"),
-            "ws_url": os.getenv("HYPERLIQUID_WS_URL", "wss://api.hyperliquid.xyz/ws"),
+            "base_url": os.getenv("HYPERLIQUID_API_URL"),
+            "ws_url": os.getenv("HYPERLIQUID_WS_URL"),
             "ws_alternative_urls": [
-                url.strip() for url in os.getenv("HYPERLIQUID_WS_ALTERNATIVE_URLS", 
-                "wss://api.hyperliquid.xyz/stream,wss://api.hyperliquid.xyz/v1/ws,wss://api.hyperliquid.xyz/ws/v1").split(",")
+                url.strip() for url in os.getenv("HYPERLIQUID_WS_ALTERNATIVE_URLS", "").split(",")
                 if url.strip()
             ],
             "private_key": os.getenv("HYPERLIQUID_PRIVATE_KEY", ""),
@@ -71,6 +70,17 @@ def load_config() -> Dict[str, Any]:
             "liquidation_risk_threshold": float(os.getenv("LIQUIDATION_RISK_THRESHOLD", "80")),
         },
         
+        # Leverage Management Configuration
+        "leverage_management": {
+            "base_leverage": float(os.getenv("LEVERAGE_BASE", "2.0")),
+            "signal_adjustment_max": float(os.getenv("LEVERAGE_SIGNAL_ADJUSTMENT_MAX", "0.5")),
+            "volatility_min": float(os.getenv("LEVERAGE_VOLATILITY_MIN", "0.1")),
+            "min_leverage": float(os.getenv("LEVERAGE_MIN", "1.0")),
+            "max_leverage": float(os.getenv("LEVERAGE_MAX", "10.0")),
+            "ma_strategy_adjustment": float(os.getenv("LEVERAGE_MA_STRATEGY_ADJUSTMENT", "1.1")),
+            "rsi_strategy_adjustment": float(os.getenv("LEVERAGE_RSI_STRATEGY_ADJUSTMENT", "0.9")),
+        },
+        
         # Strategy Configuration
         "strategies": {
             "enabled": os.getenv("ENABLED_STRATEGIES", "moving_average,rsi").split(","),
@@ -79,6 +89,13 @@ def load_config() -> Dict[str, Any]:
             "moving_average": {
                 "short_period": int(os.getenv("MA_SHORT_PERIOD", "5")),
                 "long_period": int(os.getenv("MA_LONG_PERIOD", "10")),
+                "trend_strength_multiplier": float(os.getenv("MA_TREND_STRENGTH_MULTIPLIER", "10")),
+                "volatility_cap": float(os.getenv("MA_VOLATILITY_CAP", "2.0")),
+                "base_take_profit_percentage": float(os.getenv("MA_BASE_TAKE_PROFIT_PERCENTAGE", "0.06")),
+                "trend_adjustment_max": float(os.getenv("MA_TREND_ADJUSTMENT_MAX", "0.5")),
+                "volatility_adjustment_max": float(os.getenv("MA_VOLATILITY_ADJUSTMENT_MAX", "0.3")),
+                "take_profit_min": float(os.getenv("MA_TAKE_PROFIT_MIN", "0.02")),
+                "take_profit_max": float(os.getenv("MA_TAKE_PROFIT_MAX", "0.15")),
             },
             "rsi": {
                 "period": int(os.getenv("RSI_PERIOD", "14")),
@@ -96,6 +113,9 @@ def load_config() -> Dict[str, Any]:
         "logging": {
             "level": os.getenv("LOG_LEVEL", "INFO"),
             "file": os.getenv("LOG_FILE", "trading_bot.log"),
+            "purge_logs": os.getenv("PURGE_LOGS_ON_STARTUP", "true").lower() == "true",
+            "max_log_files": int(os.getenv("MAX_LOG_FILES", "10")),
+            "max_log_age_days": int(os.getenv("MAX_LOG_AGE_DAYS", "7")),
         },
         
         # Backtesting Configuration
@@ -103,6 +123,44 @@ def load_config() -> Dict[str, Any]:
             "enabled": os.getenv("BACKTESTING_ENABLED", "false").lower() == "true",
             "start_date": os.getenv("BACKTEST_START_DATE", "2024-01-01"),
             "end_date": os.getenv("BACKTEST_END_DATE", "2024-12-31"),
+        },
+        
+        # Order Management Configuration
+        "order_management": {
+            "walk_max_attempts": int(os.getenv("ORDER_WALK_MAX_ATTEMPTS", "5")),
+            "walk_price_step": float(os.getenv("ORDER_WALK_PRICE_STEP", "0.02")),
+            "walk_delay": float(os.getenv("ORDER_WALK_DELAY", "0.5")),
+            "status_timeout": int(os.getenv("ORDER_STATUS_TIMEOUT", "30")),
+        },
+        
+        # WebSocket Configuration
+        "websocket": {
+            "reconnect_max_attempts": int(os.getenv("WS_RECONNECT_MAX_ATTEMPTS", "5")),
+            "reconnect_backoff_base": int(os.getenv("WS_RECONNECT_BACKOFF_BASE", "2")),
+            "connection_timeout": int(os.getenv("WS_CONNECTION_TIMEOUT", "10")),
+        },
+        
+        # Data Collection Configuration
+        "data_collection": {
+            "price_history_max_length": int(os.getenv("PRICE_HISTORY_MAX_LENGTH", "1000")),
+            "ohlcv_history_max_length": int(os.getenv("OHLCV_HISTORY_MAX_LENGTH", "1000")),
+        },
+        
+        # Pair Selection Configuration
+        "pair_selection": {
+            "min_volume_threshold": float(os.getenv("MIN_VOLUME_THRESHOLD", "10000")),
+            "min_volume_threshold_strict": float(os.getenv("MIN_VOLUME_THRESHOLD_STRICT", "100000")),
+            "volume_normalization_factor": float(os.getenv("VOLUME_NORMALIZATION_FACTOR", "1000000")),
+        },
+        
+        # RSI Strategy Configuration
+        "rsi_strategy": {
+            "oversold_threshold": float(os.getenv("RSI_OVERSOLD_THRESHOLD", "30")),
+            "overbought_threshold": float(os.getenv("RSI_OVERBOUGHT_THRESHOLD", "70")),
+            "neutral_threshold": float(os.getenv("RSI_NEUTRAL_THRESHOLD", "60")),
+            "factor_oversold": float(os.getenv("RSI_FACTOR_OVERSOLD", "1.3")),
+            "factor_overbought": float(os.getenv("RSI_FACTOR_OVERBOUGHT", "0.7")),
+            "volatility_adjustment_max": float(os.getenv("RSI_VOLATILITY_ADJUSTMENT_MAX", "0.3")),
         },
     }
     
@@ -121,6 +179,14 @@ def validate_config(config: Dict[str, Any]) -> bool:
     """
     try:
         # Validate API configuration
+        if not config['api']['base_url']:
+            print("ERROR: HYPERLIQUID_API_URL environment variable is required")
+            return False
+        
+        if not config['api']['ws_url']:
+            print("ERROR: HYPERLIQUID_WS_URL environment variable is required")
+            return False
+        
         if not config['api']['private_key'] or not config['api']['wallet_address']:
             print("ERROR: Hyperliquid private key and wallet address are required")
             return False

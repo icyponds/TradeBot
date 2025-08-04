@@ -56,25 +56,32 @@ class MovingAverageStrategy(BaseStrategy):
             self.logger.warning(f"Invalid current price in moving average strategy: {current_price}")
             return super().calculate_take_profit(entry_price, side, ohlcv, signal_strength, market_volatility)
         
+        # Get configuration values
+        ma_config = self.config.get('strategies', {}).get('moving_average', {})
+        trend_strength_multiplier = ma_config.get('trend_strength_multiplier', 10)
+        volatility_cap = ma_config.get('volatility_cap', 2.0)
+        base_percentage = ma_config.get('base_take_profit_percentage', 0.06)
+        trend_adjustment_max = ma_config.get('trend_adjustment_max', 0.5)
+        volatility_adjustment_max = ma_config.get('volatility_adjustment_max', 0.3)
+        take_profit_min = ma_config.get('take_profit_min', 0.02)
+        take_profit_max = ma_config.get('take_profit_max', 0.15)
+        
         ma_spread = abs(short_ma_current - long_ma_current) / current_price
-        trend_strength = min(ma_spread * 10, 1.0)  # Normalize to 0-1
+        trend_strength = min(ma_spread * trend_strength_multiplier, 1.0)  # Normalize to 0-1
         
         # Calculate volatility-based adjustment
         price_volatility = ohlcv['close'].pct_change().std()
-        volatility_factor = min(price_volatility * 100, 2.0)  # Cap at 2x
-        
-        # Base take profit percentage
-        base_percentage = 0.06  # 6% base
+        volatility_factor = min(price_volatility * 100, volatility_cap)  # Cap volatility factor
         
         # Adjust based on trend strength and volatility
-        trend_adjustment = 1.0 + (trend_strength * 0.5)  # Up to 50% increase for strong trends
-        volatility_adjustment = 1.0 + (volatility_factor * 0.3)  # Up to 30% increase for high volatility
+        trend_adjustment = 1.0 + (trend_strength * trend_adjustment_max)  # Up to max increase for strong trends
+        volatility_adjustment = 1.0 + (volatility_factor * volatility_adjustment_max)  # Up to max increase for high volatility
         
         # Final take profit percentage
         take_profit_percentage = base_percentage * trend_adjustment * volatility_adjustment * signal_strength
         
-        # Ensure reasonable bounds (2% to 15%)
-        take_profit_percentage = max(0.02, min(0.15, take_profit_percentage))
+        # Ensure reasonable bounds
+        take_profit_percentage = max(take_profit_min, min(take_profit_max, take_profit_percentage))
         
         if side == 'buy':
             return entry_price * (1 + take_profit_percentage)

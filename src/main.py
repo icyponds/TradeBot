@@ -20,7 +20,13 @@ def main():
     """Main function to run the trading bot."""
     try:
         # Setup logging
-        setup_logging()
+        setup_logging(
+            log_level=config.get('logging', {}).get('level', 'INFO'),
+            log_file=config.get('logging', {}).get('file', 'trading_bot.log'),
+            purge_logs=config.get('logging', {}).get('purge_logs', True),
+            max_log_files=config.get('logging', {}).get('max_log_files', 10),
+            max_log_age_days=config.get('logging', {}).get('max_log_age_days', 7)
+        )
         logger = logging.getLogger(__name__)
         
         logger.info("Starting Hyperliquid Trading Bot...")

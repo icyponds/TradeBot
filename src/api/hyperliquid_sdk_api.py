@@ -455,8 +455,9 @@ class HyperliquidSDKAPI:
         Returns:
             Order response or None if failed
         """
-        max_attempts = 5
-        price_step = 0.02  # 2% price step
+        max_attempts = self.config.get('order_management', {}).get('walk_max_attempts', 5)
+        price_step = self.config.get('order_management', {}).get('walk_price_step', 0.02)
+        walk_delay = self.config.get('order_management', {}).get('walk_delay', 0.5)
         
         for attempt in range(max_attempts):
             # Calculate walking price
@@ -490,7 +491,7 @@ class HyperliquidSDKAPI:
                             return order_response
             
             # Wait a moment before next attempt
-            time.sleep(0.5)
+            time.sleep(walk_delay)
         
         self.logger.warning(f"Failed to fill order after {max_attempts} price walk attempts")
         return None
@@ -528,7 +529,7 @@ class HyperliquidSDKAPI:
             self.logger.error(f"Error getting order status: {e}")
             return None
 
-    def wait_for_order_fill(self, order_id: str, timeout: int = 30) -> Optional[Dict[str, Any]]:
+    def wait_for_order_fill(self, order_id: str, timeout: int = None) -> Optional[Dict[str, Any]]:
         """
         Wait for an order to be filled.
         
@@ -539,6 +540,9 @@ class HyperliquidSDKAPI:
         Returns:
             Order status when filled or None if timeout/cancelled
         """
+        if timeout is None:
+            timeout = self.config.get('order_management', {}).get('status_timeout', 30)
+        
         start_time = time.time()
         
         while time.time() - start_time < timeout:

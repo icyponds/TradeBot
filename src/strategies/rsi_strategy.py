@@ -54,31 +54,40 @@ class RSIStrategy(BaseStrategy):
         # Base take profit percentage
         base_percentage = 0.06  # 6% base
         
+        # Get configuration values
+        rsi_config = self.config.get('rsi_strategy', {})
+        oversold_threshold = rsi_config.get('oversold_threshold', 30)
+        overbought_threshold = rsi_config.get('overbought_threshold', 70)
+        neutral_threshold = rsi_config.get('neutral_threshold', 60)
+        factor_oversold = rsi_config.get('factor_oversold', 1.3)
+        factor_overbought = rsi_config.get('factor_overbought', 0.7)
+        volatility_adjustment_max = rsi_config.get('volatility_adjustment_max', 0.3)
+        
         # RSI-based adjustments
         rsi_factor = 1.0
         
         if side == 'buy':
             # For buy signals, higher take profit if RSI is oversold
-            if rsi < 30:
+            if rsi < oversold_threshold:
                 rsi_factor = 1.5  # 50% increase for extreme oversold
             elif rsi < 40:
-                rsi_factor = 1.3  # 30% increase for oversold
-            elif rsi > 70:
-                rsi_factor = 0.7  # 30% decrease for overbought (shorter target)
+                rsi_factor = factor_oversold  # Configurable increase for oversold
+            elif rsi > overbought_threshold:
+                rsi_factor = factor_overbought  # Configurable decrease for overbought (shorter target)
         else:
             # For sell signals, higher take profit if RSI is overbought
-            if rsi > 70:
+            if rsi > overbought_threshold:
                 rsi_factor = 1.5  # 50% increase for extreme overbought
-            elif rsi > 60:
-                rsi_factor = 1.3  # 30% increase for overbought
-            elif rsi < 30:
-                rsi_factor = 0.7  # 30% decrease for oversold (shorter target)
+            elif rsi > neutral_threshold:
+                rsi_factor = factor_oversold  # Configurable increase for overbought
+            elif rsi < oversold_threshold:
+                rsi_factor = factor_overbought  # Configurable decrease for oversold (shorter target)
         
         # Momentum-based adjustment
         momentum_factor = 1.0 + (rsi_momentum * 0.5)  # Up to 50% increase for high momentum
         
         # Volatility adjustment
-        volatility_factor = 1.0 + (market_volatility * 0.3)  # Up to 30% increase for high volatility
+        volatility_factor = 1.0 + (market_volatility * volatility_adjustment_max)  # Up to max increase for high volatility
         
         # Final take profit percentage
         take_profit_percentage = base_percentage * rsi_factor * momentum_factor * volatility_factor * signal_strength

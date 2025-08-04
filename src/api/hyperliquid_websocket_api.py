@@ -29,14 +29,10 @@ class HyperliquidWebSocketAPI:
         self.logger = logging.getLogger(__name__)
         
         # WebSocket configuration
-        self.ws_url = config['api'].get('ws_url', 'wss://api.hyperliquid.xyz/ws')
+        self.ws_url = config['api'].get('ws_url')
         
-        # Get alternative WebSocket URLs from config or use defaults
-        alternative_urls = config['api'].get('ws_alternative_urls', [
-            'wss://api.hyperliquid.xyz/ws',
-            'wss://api.hyperliquid.xyz/stream',
-            'wss://api.hyperliquid.xyz/v1/ws'
-        ])
+        # Get alternative WebSocket URLs from config
+        alternative_urls = config['api'].get('ws_alternative_urls', [])
         
         # Create list of URLs to try, starting with the configured URL
         self.ws_urls = [self.ws_url] + alternative_urls
@@ -49,11 +45,13 @@ class HyperliquidWebSocketAPI:
         self.ws = None
         self.is_connected = False
         self.reconnect_attempts = 0
-        self.max_reconnect_attempts = 5
+        self.max_reconnect_attempts = config.get('websocket', {}).get('reconnect_max_attempts', 5)
         
         # Data storage
-        self.price_data = defaultdict(lambda: deque(maxlen=1000))  # symbol -> price history
-        self.ohlcv_data = defaultdict(lambda: deque(maxlen=1000))  # symbol -> OHLCV history
+        price_max_len = config.get('data_collection', {}).get('price_history_max_length', 1000)
+        ohlcv_max_len = config.get('data_collection', {}).get('ohlcv_history_max_length', 1000)
+        self.price_data = defaultdict(lambda: deque(maxlen=price_max_len))  # symbol -> price history
+        self.ohlcv_data = defaultdict(lambda: deque(maxlen=ohlcv_max_len))  # symbol -> OHLCV history
         self.position_data = {}
         self.order_data = {}
         
@@ -105,7 +103,8 @@ class HyperliquidWebSocketAPI:
                 self.logger.error(f"WebSocket error: {e}")
                 if self.reconnect_attempts < self.max_reconnect_attempts:
                     self.reconnect_attempts += 1
-                    time.sleep(2 ** self.reconnect_attempts)  # Exponential backoff
+                    backoff_base = self.config.get('websocket', {}).get('reconnect_backoff_base', 2)
+                    time.sleep(backoff_base ** self.reconnect_attempts)  # Exponential backoff
                 else:
                     self.logger.error("Max reconnection attempts reached")
                     break
@@ -396,8 +395,8 @@ class HyperliquidWebSocketAPI:
     
     def test_connection(self) -> bool:
         """Test WebSocket connection."""
-        # Wait for connection to be established (max 10 seconds)
-        timeout = 10
+        # Wait for connection to be established
+        timeout = self.config.get('websocket', {}).get('connection_timeout', 10)
         start_time = time.time()
         
         while not self.is_connected and (time.time() - start_time) < timeout:

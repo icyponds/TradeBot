@@ -139,9 +139,10 @@ class DynamicPairSelector:
                     continue
                 
                 # Check for minimum volume
-                if volume_24h < 10000:  # $10k minimum daily volume
+                min_volume_threshold = self.config.get('pair_selection', {}).get('min_volume_threshold', 10000)
+                if volume_24h < min_volume_threshold:  # Minimum daily volume
                     if len(eligible_assets) < 3:
-                        self.logger.debug(f"  Skipped {asset_name}: Vol ${volume_24h:,.0f} < min $10,000")
+                        self.logger.debug(f"  Skipped {asset_name}: Vol ${volume_24h:,.0f} < min ${min_volume_threshold:,.0f}")
                     continue
                 
                 # Check for valid price
@@ -179,7 +180,8 @@ class DynamicPairSelector:
         try:
             # Check for minimum volume
             volume_24h = float(asset.get('volume24h', 0))
-            if volume_24h < 100000:  # $100k minimum daily volume
+            min_volume_threshold_strict = self.config.get('pair_selection', {}).get('min_volume_threshold_strict', 100000)
+            if volume_24h < min_volume_threshold_strict:  # $100k minimum daily volume
                 return False
             
             # Check for valid price
@@ -219,8 +221,9 @@ class DynamicPairSelector:
         df = pd.DataFrame(eligible_assets)
         
         # Calculate ranking scores using real market data
+        volume_normalization_factor = self.config.get('pair_selection', {}).get('volume_normalization_factor', 1000000)
         df['open_interest_score'] = df['openInterest'].astype(float) / 1000000  # Normalize to millions
-        df['volume_score'] = df['volume24h'].astype(float) / 1000000  # Normalize to millions
+        df['volume_score'] = df['volume24h'].astype(float) / volume_normalization_factor  # Normalize to millions
         
         # Handle leverage score - use default if not available
         if 'maxLeverage' in df.columns:

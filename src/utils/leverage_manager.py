@@ -64,32 +64,37 @@ class LeverageManager:
         Returns:
             Dynamic leverage value
         """
-        # Base leverage calculation
-        base_leverage = 2.0  # Conservative base leverage
+        # Get configuration values
+        leverage_config = self.config.get('leverage_management', {})
+        base_leverage = leverage_config.get('base_leverage', 2.0)
+        signal_adjustment_max = leverage_config.get('signal_adjustment_max', 0.5)
+        volatility_min = leverage_config.get('volatility_min', 0.1)
+        min_leverage = leverage_config.get('min_leverage', 1.0)
+        max_leverage = leverage_config.get('max_leverage', 10.0)
+        ma_strategy_adjustment = leverage_config.get('ma_strategy_adjustment', 1.1)
+        rsi_strategy_adjustment = leverage_config.get('rsi_strategy_adjustment', 0.9)
         
         # Adjust leverage based on signal strength
-        signal_adjustment = 1.0 + (signal_strength * 0.5)  # Up to 50% increase for strong signals
+        signal_adjustment = 1.0 + (signal_strength * signal_adjustment_max)  # Up to max increase for strong signals
         
         # Adjust leverage based on market volatility (inverse relationship)
         # Handle edge case where market_volatility is -1.0 (which would cause division by zero)
         if market_volatility <= -1.0:
-            volatility_adjustment = 0.1  # Very low leverage for extreme volatility
+            volatility_adjustment = volatility_min  # Very low leverage for extreme volatility
         else:
             volatility_adjustment = 1.0 / (1.0 + market_volatility)  # Lower leverage for high volatility
         
         # Strategy-specific adjustments
         strategy_adjustment = 1.0
         if strategy_name == 'moving_average':
-            strategy_adjustment = 1.1  # Slightly higher leverage for trend-following
+            strategy_adjustment = ma_strategy_adjustment  # Slightly higher leverage for trend-following
         elif strategy_name == 'rsi':
-            strategy_adjustment = 0.9  # Lower leverage for mean-reversion
+            strategy_adjustment = rsi_strategy_adjustment  # Lower leverage for mean-reversion
         
         # Calculate final leverage
         dynamic_leverage = base_leverage * signal_adjustment * volatility_adjustment * strategy_adjustment
         
         # Apply limits
-        min_leverage = 1.0
-        max_leverage = 10.0  # Conservative maximum leverage
         
         dynamic_leverage = max(min_leverage, min(max_leverage, dynamic_leverage))
         
