@@ -97,7 +97,7 @@ class StrategyManager:
         """Setup signal handlers for kill switch functionality."""
         def signal_handler(signum, frame):
             self.logger.warning(f"Received signal {signum}, initiating emergency stop...")
-            self.emergency_stop()
+            self.stop(close_positions=True)
             sys.exit(0)
         
         signal.signal(signal.SIGINT, signal_handler)
@@ -313,13 +313,26 @@ class StrategyManager:
         except Exception as e:
             self.logger.error(f"Error updating account balance: {e}")
     
-    def stop(self):
-        """Stop the strategy manager."""
+    def stop(self, close_positions: bool = False):
+        """
+        Stop the strategy manager.
+        
+        Args:
+            close_positions: Whether to close all positions before stopping
+        """
         if not self.is_running:
             return
         
         self.logger.info("Stopping strategy manager...")
         self.is_running = False
+        
+        if close_positions:
+            self.logger.warning("Closing all positions before stopping...")
+            try:
+                self.sync_positions_with_exchange()
+                self.close_all_positions("shutdown")
+            except Exception as e:
+                self.logger.error(f"Error closing positions during stop: {e}")
         
         # Stop market API (only if it has a stop method)
         if hasattr(self.market_api, 'stop'):
@@ -330,18 +343,7 @@ class StrategyManager:
     def emergency_stop(self):
         """Emergency stop - close all positions and stop trading."""
         self.logger.warning("EMERGENCY STOP: Closing all positions...")
-        try:
-            # First sync with exchange to get latest position information
-            self.logger.info("Syncing positions with exchange before emergency stop...")
-            self.sync_positions_with_exchange()
-            
-            # Then close all positions
-            self.close_all_positions("emergency_stop")
-            self.stop()
-        except Exception as e:
-            self.logger.error(f"Error during emergency stop: {e}")
-        finally:
-            self.logger.info("Emergency stop complete")
+        self.stop(close_positions=True)
     
     def sync_positions_with_exchange(self):
         """
@@ -938,7 +940,9 @@ class StrategyManager:
             close_side = 'sell' if position.side == 'long' else 'buy'
             
             # Place close order
-            order_result = self.market_api.place_order(symbol, close_side, position.size, current_price)
+            # Use market order (price=None) to ensure immediate fill/close
+            # This uses the SDK's aggressive IOC + price walking logic
+            order_result = self.market_api.place_order(symbol, close_side, position.size, None)
             
             if order_result and order_result.get('status') in ['success', 'pending']:
                 # For kill switch, we'll assume the order was successful
@@ -994,7 +998,7 @@ class StrategyManager:
                 # Try to close position with timeout
                 self.close_position(symbol, reason)
                 closed_count += 1
-                time.sleep(0.5)  # Small delay between orders to avoid rate limiting
+                time.sleep(0.1)  # Small delay between orders to avoid rate limiting
             except Exception as e:
                 self.logger.error(f"Error closing position for {symbol}: {e}")
         

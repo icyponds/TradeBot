@@ -63,14 +63,18 @@ def main():
     except KeyboardInterrupt:
         if 'logger' in locals():
             logger.info("Received interrupt signal, shutting down...")
-        if 'strategy_manager' in locals():
-            strategy_manager.stop()
     except Exception as e:
         if 'logger' in locals():
             logger.error(f"Unexpected error: {e}")
         else:
             print(f"ERROR: {e}")
         sys.exit(1)
+    finally:
+        if 'strategy_manager' in locals() and 'logger' in locals():
+            logger.info("Ensuring proper shutdown...")
+            # We force close_positions=True to ensure all trades are closed before exit
+            if hasattr(strategy_manager, 'is_running') and strategy_manager.is_running:
+                 strategy_manager.stop(close_positions=True)
 
 
 if __name__ == "__main__":
