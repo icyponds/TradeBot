@@ -16,6 +16,7 @@ from src.api.hyperliquid_websocket_api import HyperliquidWebSocketAPI as Hyperli
 from src.utils.pair_selector import DynamicPairSelector
 from src.utils.leverage_manager import LeverageManager
 from src.utils.portfolio_manager import PortfolioManager
+from src.utils.correlation_manager import CorrelationManager
 from .moving_average_strategy import MovingAverageStrategy
 from .rsi_strategy import RSIStrategy
 from .bollinger_band_strategy import BollingerBandSqueezeStrategy
@@ -46,6 +47,9 @@ class StrategyManager:
         
         # Initialize market API
         self.market_api = self._initialize_market_api()
+        
+        # Initialize correlation manager
+        self.correlation_manager = CorrelationManager(self.market_api, config)
         
         # Initialize strategies
         self.strategies = self._initialize_strategies()
@@ -295,14 +299,15 @@ class StrategyManager:
     
     def _initialize_strategies(self):
         """Initialize trading strategies."""
-        return {
+        strategies = {
             'moving_average': MovingAverageStrategy(self.config),
             'rsi': RSIStrategy(self.config),
             'bollinger_band': BollingerBandSqueezeStrategy(self.config),
             'supertrend': SupertrendStrategy(self.config),
             'vwap': VWAPStrategy(self.config),
-            'stat_arb': StatisticalArbitrageStrategy(self.config),
+            'stat_arb': StatisticalArbitrageStrategy(self.config, self.market_api, self.correlation_manager),
         }
+        return strategies
     
     def _initialize_pair_selector(self):
         """Initialize the pair selector."""
@@ -589,6 +594,13 @@ class StrategyManager:
                 # Clean up stale orders
                 self._cleanup_stale_orders()
                 
+                # Update correlations periodically
+                if self.correlation_manager.should_update():
+                    # Get all potential symbols from pair selector or config
+                    all_symbols = self.pair_selector.get_current_pairs()
+                    if all_symbols:
+                        self.correlation_manager.update_correlations(all_symbols)
+                
                 # Get current trading pairs
                 trading_pairs = self.pair_selector.get_current_pairs()
                 
@@ -736,7 +748,11 @@ class StrategyManager:
         """Execute a single strategy."""
         try:
             # Generate signal
-            signal = strategy.generate_signal(ohlcv)
+            if strategy_name == 'stat_arb':
+                # Stat Arb needs special handling to fetch correlated pair data
+                signal = strategy.generate_signal_with_symbol(symbol, ohlcv)
+            else:
+                signal = strategy.generate_signal(ohlcv)
             
             if not signal:
                 return

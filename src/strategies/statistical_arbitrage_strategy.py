@@ -17,27 +17,24 @@ class StatisticalArbitrageStrategy(BaseStrategy):
     and trades mean reversion on their spread/ratio.
     """
     
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], market_api=None, correlation_manager=None):
         super().__init__(config)
         
         # Strategy parameters
         self.z_score_threshold = config['strategies'].get('stat_arb', {}).get('z_score_threshold', 2.0)
         self.window_size = config['strategies'].get('stat_arb', {}).get('window_size', 100)
         
-        # We need a way to access other pairs' data. 
-        # In a real implementation, the StrategyManager would pass a context with all market data.
-        # For now, we'll assume we can request it or it's passed in.
+        # Dependencies
+        self.market_api = market_api
+        self.correlation_manager = correlation_manager
         
         self.logger.info(f"Initialized Stat Arb Strategy: z_threshold={self.z_score_threshold}, window={self.window_size}")
-        
-        # Hardcoded correlations for demo (in production, this would be dynamic)
-        self.correlated_pairs = {
-            'ETH': 'BTC',
-            'SOL': 'ETH',
-            'AVAX': 'SOL',
-            'MATIC': 'AVAX'
-        }
     
+    def set_dependencies(self, market_api, correlation_manager):
+        """Set external dependencies."""
+        self.market_api = market_api
+        self.correlation_manager = correlation_manager
+        
     def calculate_z_score(self, series: pd.Series) -> float:
         """Calculate Z-Score of the last element."""
         mean = series.mean()
@@ -50,25 +47,76 @@ class StatisticalArbitrageStrategy(BaseStrategy):
         """
         Generate trading signal based on OHLCV data.
         
-        Note: This strategy requires data from a second asset (the pair).
-        Since the standard interface only provides one OHLCV dataframe,
-        this is a placeholder for the logic. The actual implementation
-        would need the StrategyManager to provide the correlated asset's data.
-        
         Args:
             ohlcv: OHLCV data DataFrame for the primary asset
             
         Returns:
             Signal dictionary or None
         """
-        # This strategy is unique because it needs two assets.
-        # The standard generate_signal signature doesn't support this easily without
-        # external data access.
+        if not self.market_api or not self.correlation_manager:
+            self.logger.warning("Stat Arb strategy missing dependencies (market_api or correlation_manager)")
+            return None
+            
+        # Get the symbol from the OHLCV data (assuming it's passed or we can infer it)
+        # Since we don't have the symbol in the args, we need to rely on the caller
+        # But wait, the caller (StrategyManager) calls this method.
+        # We need to change the signature or use a workaround.
+        # Actually, StrategyManager calls generate_signal(ohlcv).
+        # We can't easily get the symbol from just the dataframe unless it's in the columns.
         
-        # For now, we will return None to prevent errors, as this requires
-        # a more complex integration with the StrategyManager to fetch the second pair.
-        # See the implementation note below.
+        # WORKAROUND: We will return None here and rely on a specialized method 
+        # that StrategyManager should call for this strategy, OR we update StrategyManager
+        # to pass the symbol.
+        
+        # For now, let's assume StrategyManager will be updated to call a specific method
+        # or we can't proceed.
+        
+        # However, looking at StrategyManager._execute_strategy:
+        # signal = strategy.generate_signal(ohlcv)
+        
+        # We need to update StrategyManager to pass the symbol to generate_signal
+        # or use a different method.
+        
         return None
+
+    def generate_signal_with_symbol(self, symbol: str, ohlcv: pd.DataFrame) -> Optional[Dict[str, Any]]:
+        """
+        Generate signal with symbol context.
+        
+        Args:
+            symbol: Current symbol being analyzed
+            ohlcv: OHLCV data for the symbol
+            
+        Returns:
+            Signal dictionary or None
+        """
+        if not self.market_api or not self.correlation_manager:
+            return None
+            
+        # Get correlated pair
+        correlated_symbol = self.correlation_manager.get_correlated_symbol(symbol)
+        
+        if not correlated_symbol:
+            # No correlation found for this symbol
+            return None
+            
+        # Fetch data for correlated symbol
+        # Use the same timeframe and limit as the primary symbol
+        # We can infer timeframe/limit from the config or the ohlcv length
+        limit = len(ohlcv)
+        timeframe = self.config['strategies']['timeframe']
+        
+        try:
+            ohlcv_pair = self.market_api.get_ohlcv(correlated_symbol, timeframe, limit)
+            
+            if ohlcv_pair is None or len(ohlcv_pair) < self.window_size:
+                return None
+                
+            return self.generate_pair_signal(symbol, ohlcv, correlated_symbol, ohlcv_pair)
+            
+        except Exception as e:
+            self.logger.error(f"Error fetching correlated data for {correlated_symbol}: {e}")
+            return None
 
     def generate_pair_signal(self, symbol_a: str, ohlcv_a: pd.DataFrame, 
                            symbol_b: str, ohlcv_b: pd.DataFrame) -> Optional[Dict[str, Any]]:
@@ -94,6 +142,7 @@ class StatisticalArbitrageStrategy(BaseStrategy):
             return None
             
         # Calculate Spread Ratio
+        # We use Close prices
         ratio = ohlcv_a['close'] / ohlcv_b['close']
         
         # Calculate Z-Score of the ratio
@@ -126,4 +175,3 @@ class StatisticalArbitrageStrategy(BaseStrategy):
             'pair_symbol': symbol_b,
             'z_score': z_score
         }
-
