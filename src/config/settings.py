@@ -83,7 +83,7 @@ def load_config() -> Dict[str, Any]:
         
         # Strategy Configuration
         "strategies": {
-            "enabled": os.getenv("ENABLED_STRATEGIES", "moving_average,rsi").split(","),
+            "enabled": os.getenv("ENABLED_STRATEGIES", "moving_average,rsi,bollinger_band,supertrend,vwap,stat_arb").split(","),
             "timeframe": os.getenv("STRATEGY_TIMEFRAME", "1m"),
             "ohlcv_limit": int(os.getenv("OHLCV_LIMIT", "100")),
             "moving_average": {
@@ -101,6 +101,25 @@ def load_config() -> Dict[str, Any]:
                 "period": int(os.getenv("RSI_PERIOD", "14")),
                 "overbought": float(os.getenv("RSI_OVERBOUGHT", "70")),
                 "oversold": float(os.getenv("RSI_OVERSOLD", "30")),
+            },
+            "bollinger_band": {
+                "period": int(os.getenv("BB_PERIOD", "20")),
+                "std_dev": float(os.getenv("BB_STD_DEV", "2.0")),
+                "kc_mult": float(os.getenv("BB_KC_MULT", "1.5")),
+            },
+            "supertrend": {
+                "atr_period": int(os.getenv("SUPERTREND_ATR_PERIOD", "10")),
+                "multiplier": float(os.getenv("SUPERTREND_MULTIPLIER", "3.0")),
+            },
+            "vwap": {
+                "std_dev_mult": float(os.getenv("VWAP_STD_DEV_MULT", "2.0")),
+                "rsi_period": int(os.getenv("VWAP_RSI_PERIOD", "14")),
+                "rsi_overbought": float(os.getenv("VWAP_RSI_OVERBOUGHT", "70")),
+                "rsi_oversold": float(os.getenv("VWAP_RSI_OVERSOLD", "30")),
+            },
+            "stat_arb": {
+                "z_score_threshold": float(os.getenv("STAT_ARB_Z_SCORE_THRESHOLD", "2.0")),
+                "window_size": int(os.getenv("STAT_ARB_WINDOW_SIZE", "100")),
             },
         },
         

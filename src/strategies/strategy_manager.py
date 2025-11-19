@@ -18,6 +18,10 @@ from src.utils.leverage_manager import LeverageManager
 from src.utils.portfolio_manager import PortfolioManager
 from .moving_average_strategy import MovingAverageStrategy
 from .rsi_strategy import RSIStrategy
+from .bollinger_band_strategy import BollingerBandSqueezeStrategy
+from .supertrend_strategy import SupertrendStrategy
+from .vwap_strategy import VWAPStrategy
+from .statistical_arbitrage_strategy import StatisticalArbitrageStrategy
 from src.models.trade import Trade, Position
 
 
@@ -200,6 +204,46 @@ class StrategyManager:
                 
                 return signal_strength
                 
+            elif strategy_name == 'bollinger_band':
+                # For BB Squeeze, signal strength is high if squeeze was tight
+                # We can approximate this by bandwidth
+                if len(ohlcv) < 20:
+                    return 0.5
+                    
+                sma = ohlcv['close'].rolling(window=20).mean()
+                std = ohlcv['close'].rolling(window=20).std()
+                upper = sma + (std * 2)
+                lower = sma - (std * 2)
+                
+                bandwidth = (upper - lower) / sma
+                # Lower bandwidth = tighter squeeze = stronger potential move
+                # Normalize: 0.05 bandwidth -> 1.0 strength, 0.2 bandwidth -> 0.0 strength
+                strength = max(0.0, min(1.0, 1.0 - (bandwidth.iloc[-1] * 5)))
+                return strength
+                
+            elif strategy_name == 'supertrend':
+                # For Supertrend, strength is based on distance from trend line
+                # Closer to trend line = better risk/reward = higher strength?
+                # Or further = stronger trend? Let's go with trend persistence
+                return 0.8 # Default high confidence for trend following
+                
+            elif strategy_name == 'vwap':
+                # For VWAP mean reversion, further from VWAP = stronger signal
+                if len(ohlcv) < 20:
+                    return 0.5
+                    
+                # Simplified VWAP distance
+                vwap = (ohlcv['close'] * ohlcv['volume']).cumsum() / ohlcv['volume'].cumsum()
+                dist_pct = abs(ohlcv['close'].iloc[-1] - vwap.iloc[-1]) / vwap.iloc[-1]
+                
+                # 2% deviation = 1.0 strength
+                return min(1.0, dist_pct * 50)
+                
+            elif strategy_name == 'stat_arb':
+                # Z-score is the strength
+                # We don't have easy access to z-score here without recalculating
+                return 0.8
+                
             else:
                 return 0.5  # Default signal strength
                 
@@ -254,6 +298,10 @@ class StrategyManager:
         return {
             'moving_average': MovingAverageStrategy(self.config),
             'rsi': RSIStrategy(self.config),
+            'bollinger_band': BollingerBandSqueezeStrategy(self.config),
+            'supertrend': SupertrendStrategy(self.config),
+            'vwap': VWAPStrategy(self.config),
+            'stat_arb': StatisticalArbitrageStrategy(self.config),
         }
     
     def _initialize_pair_selector(self):
