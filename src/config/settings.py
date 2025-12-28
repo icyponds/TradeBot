@@ -183,6 +183,7 @@ def load_config() -> Dict[str, Any]:
             "factor_overbought": float(os.getenv("RSI_FACTOR_OVERBOUGHT", "0.7")),
             "volatility_adjustment_max": float(os.getenv("RSI_VOLATILITY_ADJUSTMENT_MAX", "0.3")),
         },
+        
     }
     
     return config

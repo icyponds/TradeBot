@@ -17,12 +17,14 @@ from src.utils.pair_selector import DynamicPairSelector
 from src.utils.leverage_manager import LeverageManager
 from src.utils.portfolio_manager import PortfolioManager
 from src.utils.correlation_manager import CorrelationManager
+from src.utils.performance_tracker import PerformanceTracker
 from .moving_average_strategy import MovingAverageStrategy
 from .rsi_strategy import RSIStrategy
 from .bollinger_band_strategy import BollingerBandSqueezeStrategy
 from .supertrend_strategy import SupertrendStrategy
 from .vwap_strategy import VWAPStrategy
 from .statistical_arbitrage_strategy import StatisticalArbitrageStrategy
+from .strategy_selector import StrategySelector
 from src.models.trade import Trade, Position
 
 
@@ -51,8 +53,14 @@ class StrategyManager:
         # Initialize correlation manager
         self.correlation_manager = CorrelationManager(self.market_api, config)
         
+        # Initialize performance tracker
+        self.performance_tracker = PerformanceTracker(config, data_dir='data')
+        
         # Initialize strategies
         self.strategies = self._initialize_strategies()
+        
+        # Initialize strategy selector for performance-based selection
+        self.strategy_selector = self._initialize_strategy_selector()
         
         # Initialize pair selector
         self.pair_selector = self._initialize_pair_selector()
@@ -309,6 +317,13 @@ class StrategyManager:
         }
         return strategies
     
+    def _initialize_strategy_selector(self):
+        """Initialize the strategy selector for automatic performance-based selection."""
+        return StrategySelector(
+            performance_tracker=self.performance_tracker,
+            config=self.config,
+        )
+    
     def _initialize_pair_selector(self):
         """Initialize the pair selector."""
         return DynamicPairSelector(self.config, self.market_api, self)
@@ -344,6 +359,11 @@ class StrategyManager:
         self.leverage_manager.update_available_margin(
             self.portfolio_manager.calculate_available_capital_for_trading()
         )
+        
+        # Initialize performance tracker with current equity
+        initial_equity = self.portfolio_manager.calculate_available_capital_for_trading()
+        self.performance_tracker.set_initial_equity(initial_equity)
+        self.logger.info(f"Performance tracker initialized with ${initial_equity:.2f} initial equity")
         
         # Start trading loop
         self.is_running = True
@@ -548,6 +568,7 @@ class StrategyManager:
         # Track last position sync time
         last_position_sync = 0
         last_position_monitoring = 0
+        last_performance_report = 0
         
         # Position monitoring configuration
         position_monitoring_interval = self.config['trading']['position_monitoring_interval']
@@ -555,6 +576,9 @@ class StrategyManager:
         max_loss_percentage = self.config['trading']['max_loss_percentage']
         max_profit_percentage = self.config['trading']['max_profit_percentage']
         emergency_loss_threshold = self.config['trading']['emergency_loss_threshold']
+        
+        # Performance reporting interval (every hour)
+        performance_report_interval = 3600
         
         # Statistics
         total_positions_closed = 0
@@ -630,6 +654,11 @@ class StrategyManager:
                 if self._balance_update_counter >= 10:
                     self._update_account_balance_periodic()
                     self._balance_update_counter = 0
+                
+                # Periodic performance report (every hour)
+                if current_time - last_performance_report >= performance_report_interval:
+                    self.log_performance_report()
+                    last_performance_report = current_time
                 
                 # Wait for next execution cycle
                 time.sleep(self.execution_interval)
@@ -747,6 +776,11 @@ class StrategyManager:
     def _execute_strategy(self, symbol: str, strategy_name: str, strategy, ohlcv: pd.DataFrame, current_price: float):
         """Execute a single strategy."""
         try:
+            # Check if strategy is enabled by the strategy selector
+            if not self.strategy_selector.is_strategy_enabled(strategy_name):
+                self.logger.debug(f"Strategy {strategy_name} is disabled by selector, skipping")
+                return
+            
             # Generate signal
             if strategy_name == 'stat_arb':
                 # Stat Arb needs special handling to fetch correlated pair data
@@ -759,12 +793,20 @@ class StrategyManager:
             
             self.logger.info(f"{strategy_name} signal for {symbol}: {signal['signal']} at {current_price}")
             
+            # Get strategy weight from selector
+            strategy_weight = self.strategy_selector.get_strategy_weight(strategy_name)
+            self.logger.debug(f"Strategy {strategy_name} weight: {strategy_weight:.2f}")
+            
             # Check if we should act on the signal
             should_execute = self._should_execute_signal(symbol, signal, current_price, ohlcv, strategy_name)
             self.logger.info(f"Should execute {strategy_name} signal for {symbol}: {should_execute}")
             
             if should_execute:
-                self.logger.info(f"Executing {strategy_name} trade for {symbol}")
+                # Apply strategy weight to the signal strength for position sizing
+                if 'signal_strength' in signal:
+                    signal['signal_strength'] *= strategy_weight
+                
+                self.logger.info(f"Executing {strategy_name} trade for {symbol} (weight: {strategy_weight:.2f})")
                 self._execute_trade(symbol, signal, current_price, strategy_name, ohlcv)
             else:
                 self.logger.info(f"Skipping {strategy_name} signal for {symbol} - conditions not met")
@@ -986,11 +1028,20 @@ class StrategyManager:
         except Exception as e:
             self.logger.error(f"Error executing trade for {symbol}: {e}")
     
-    def close_position(self, symbol: str, reason: str = "manual"):
-        """Close a position."""
+    def close_position(self, symbol: str, reason: str = "manual") -> bool:
+        """
+        Close a position and record it in performance tracker.
+        
+        Args:
+            symbol: Trading symbol
+            reason: Reason for closing (stop_loss, take_profit, manual, timeout, etc.)
+            
+        Returns:
+            True if position was closed successfully, False otherwise
+        """
         if symbol not in self.positions:
             self.logger.warning(f"No position to close for {symbol}")
-            return
+            return False
         
         try:
             position = self.positions[symbol]
@@ -998,7 +1049,7 @@ class StrategyManager:
             
             if not current_price:
                 self.logger.error(f"Could not get current price for {symbol}")
-                return
+                return False
             
             # Determine close side
             close_side = 'sell' if position.side == 'long' else 'buy'
@@ -1014,14 +1065,41 @@ class StrategyManager:
                 order_id = order_result.get('order_id')
                 if order_id:
                     self.logger.info(f"Close order placed for {symbol}: {order_id}")
+                
                 # Close position in leverage manager
                 result = self.leverage_manager.close_position(symbol, current_price)
                 
                 if result:
-                    # Update performance
-                    self.total_pnl += result['leveraged_pnl']
-                    if result['leveraged_pnl'] > 0:
+                    # Record completed trade in performance tracker
+                    self.performance_tracker.record_trade_from_position(
+                        symbol=symbol,
+                        strategy=position.strategy,
+                        side=position.side,
+                        entry_price=position.entry_price,
+                        exit_price=current_price,
+                        size=position.size,
+                        entry_time=position.entry_time,
+                        exit_time=datetime.now(),
+                        capital_at_risk=position.capital_at_risk or result.get('margin_used', position.size * position.entry_price),
+                        exit_reason=reason,
+                        stop_loss=position.stop_loss,
+                        take_profit=position.take_profit,
+                        leverage=result.get('leverage'),
+                    )
+                    
+                    # Update performance counters
+                    trade_pnl = result['pnl']
+                    self.total_pnl += trade_pnl
+                    self.total_trades += 1
+                    if trade_pnl > 0:
                         self.winning_trades += 1
+                    
+                    # Update pair selector performance
+                    self.pair_selector.update_pair_performance(symbol, trade_pnl)
+                    
+                    # Check if strategy should go into cooling-off (after loss)
+                    if trade_pnl < 0:
+                        self.strategy_selector.check_for_cooling_off(position.strategy)
                     
                     # Remove position
                     del self.positions[symbol]
@@ -1029,13 +1107,16 @@ class StrategyManager:
                     # Save positions to file for kill switch access
                     self.save_positions_to_file()
                     
-                    self.logger.info(f"Closed position for {symbol}: {result['leveraged_pnl']:.2f} USDC ({result['leveraged_pnl_percentage']:.2f}%)")
+                    self.logger.info(f"✅ Closed position for {symbol} ({reason}): ${trade_pnl:.2f} ({result['pnl_percentage']:.2f}%)")
+                    return True
                 
             else:
                 self.logger.error(f"Failed to close position for {symbol}")
+                return False
                 
         except Exception as e:
             self.logger.error(f"Error closing position for {symbol}: {e}")
+            return False
     
     def close_all_positions(self, reason: str = "kill_switch"):
         """Close all open positions."""
@@ -1069,7 +1150,11 @@ class StrategyManager:
         self.logger.info(f"Attempted to close {len(all_symbols_to_close)} positions, successfully closed {closed_count}.")
     
     def get_performance_summary(self) -> Dict[str, Any]:
-        """Get performance summary."""
+        """Get comprehensive performance summary from performance tracker."""
+        # Get comprehensive metrics from performance tracker
+        tracker_summary = self.performance_tracker.get_performance_summary()
+        overall_metrics = tracker_summary['overall']
+        
         # Get pair performance from selector
         pair_performance = self.pair_selector.get_pair_performance_summary()
         
@@ -1077,15 +1162,59 @@ class StrategyManager:
         margin_summary = self.leverage_manager.get_margin_summary()
         risk_summary = self.leverage_manager.get_risk_summary()
         
-        # Calculate win rate
-        win_rate = (self.winning_trades / self.total_trades * 100) if self.total_trades > 0 else 0
-        
         return {
-            'total_trades': self.total_trades,
-            'winning_trades': self.winning_trades,
-            'win_rate': win_rate,
-            'total_pnl': self.total_pnl,
+            # Basic metrics
+            'total_trades': overall_metrics['total_trades'],
+            'winning_trades': overall_metrics['winning_trades'],
+            'losing_trades': overall_metrics['losing_trades'],
+            'win_rate': overall_metrics['win_rate'],
+            'total_pnl': overall_metrics['total_pnl'],
             'open_positions': len(self.positions),
+            
+            # PnL metrics
+            'average_pnl': overall_metrics['average_pnl'],
+            'average_win': overall_metrics['average_win'],
+            'average_loss': overall_metrics['average_loss'],
+            'largest_win': overall_metrics['largest_win'],
+            'largest_loss': overall_metrics['largest_loss'],
+            'gross_profit': overall_metrics['gross_profit'],
+            'gross_loss': overall_metrics['gross_loss'],
+            
+            # Risk metrics
+            'profit_factor': overall_metrics['profit_factor'],
+            'risk_reward_ratio': overall_metrics['risk_reward_ratio'],
+            'expectancy': overall_metrics['expectancy'],
+            'max_drawdown': overall_metrics['max_drawdown'],
+            'max_drawdown_percentage': overall_metrics['max_drawdown_percentage'],
+            
+            # Advanced metrics
+            'sharpe_ratio': overall_metrics['sharpe_ratio'],
+            'sortino_ratio': overall_metrics['sortino_ratio'],
+            'calmar_ratio': overall_metrics['calmar_ratio'],
+            
+            # Streak metrics
+            'max_win_streak': overall_metrics['max_win_streak'],
+            'max_lose_streak': overall_metrics['max_lose_streak'],
+            'current_win_streak': overall_metrics['current_win_streak'],
+            'current_lose_streak': overall_metrics['current_lose_streak'],
+            
+            # Time metrics
+            'average_trade_duration_hours': overall_metrics['average_trade_duration_hours'],
+            'exit_reasons': overall_metrics['exit_reasons'],
+            
+            # Strategy breakdown
+            'strategy_breakdown': tracker_summary['strategy_breakdown'],
+            
+            # Recent performance
+            'recent_7_days': tracker_summary['recent_7_days'],
+            'daily_pnl': tracker_summary['daily_pnl'],
+            'monthly_pnl': tracker_summary['monthly_pnl'],
+            
+            # Symbol analysis
+            'top_symbols': tracker_summary['top_symbols'],
+            'worst_symbols': tracker_summary['worst_symbols'],
+            
+            # Existing summaries
             'pair_performance': pair_performance,
             'data_summary': self.market_api.get_data_summary(),
             'margin_summary': margin_summary,
@@ -1099,6 +1228,30 @@ class StrategyManager:
                 },
             },
         }
+    
+    def log_performance_report(self):
+        """Log a comprehensive performance report."""
+        self.performance_tracker.log_performance_report()
+        # Also log strategy rankings
+        self.strategy_selector._log_rankings()
+    
+    def get_strategy_performance(self, strategy: str) -> Dict[str, Any]:
+        """Get performance metrics for a specific strategy."""
+        metrics = self.performance_tracker.get_strategy_metrics(strategy)
+        return metrics.to_dict()
+    
+    def get_all_strategy_performance(self) -> Dict[str, Dict[str, Any]]:
+        """Get performance metrics for all strategies."""
+        all_metrics = self.performance_tracker.get_all_strategy_metrics()
+        return {name: metrics.to_dict() for name, metrics in all_metrics.items()}
+    
+    def get_strategy_rankings(self) -> Dict[str, Any]:
+        """Get current strategy rankings summary."""
+        return self.strategy_selector.get_rankings_summary()
+    
+    def get_enabled_strategies(self) -> List[str]:
+        """Get list of currently enabled strategies."""
+        return self.strategy_selector.get_enabled_strategies()
     
     def force_pair_rescan(self):
         """Force a rescan of trading pairs."""
