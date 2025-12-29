@@ -829,3 +829,4 @@ class PerformanceTracker:
         self._save_trade_history()
         self.logger.info("Performance tracker reset")
 
+
