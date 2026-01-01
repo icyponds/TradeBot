@@ -1805,30 +1805,48 @@ class HyperliquidAPI:
             return None
     
     def get_spot_price(self, base_token: str, quote_token: str = "USDC") -> Optional[float]:
-        """Get spot price for a token pair."""
+        """
+        Get spot price for a token using the tokenDetails endpoint.
+        
+        Note: The spotMetaAndAssetCtxs endpoint returns lot-scaled prices which
+        are incorrect. The tokenDetails endpoint returns the actual market price.
+        """
         try:
-            result = self.get_spot_meta_and_asset_ctxs()
-            if not result:
+            # Get token metadata to find the tokenId
+            spot_meta = self.get_spot_meta()
+            if not spot_meta:
                 return None
             
-            spot_meta, contexts = result
+            # Find the base token's tokenId
+            token_id = None
+            for token in spot_meta.get('tokens', []):
+                if token.get('name') == base_token:
+                    token_id = token.get('tokenId')
+                    break
             
-            for i, pair in enumerate(spot_meta.get('universe', [])):
-                tokens = pair.get('tokens', [])
-                if len(tokens) >= 2:
-                    token_list = spot_meta.get('tokens', [])
-                    base_idx, quote_idx = tokens[0], tokens[1]
-                    
-                    if base_idx < len(token_list) and quote_idx < len(token_list):
-                        if (token_list[base_idx].get('name') == base_token and
-                            token_list[quote_idx].get('name') == quote_token):
-                            if i < len(contexts):
-                                return float(contexts[i].get('midPx', 0))
+            if not token_id:
+                self.logger.debug(f"Token {base_token} not found in spot metadata")
+                return None
+            
+            # Use tokenDetails endpoint to get the correct price
+            # This returns the actual market price, not lot-scaled
+            import requests
+            response = requests.post(
+                'https://api.hyperliquid.xyz/info',
+                json={'type': 'tokenDetails', 'tokenId': token_id},
+                timeout=10
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                mid_px = data.get('midPx')
+                if mid_px:
+                    return float(mid_px)
             
             return None
             
         except Exception as e:
-            self.logger.error(f"Error getting spot price: {e}")
+            self.logger.error(f"Error getting spot price for {base_token}: {e}")
             return None
     
     def get_spot_balances(self) -> Dict[str, float]:
@@ -2059,13 +2077,12 @@ class HyperliquidAPI:
         'ETH': 'UETH',
         'SOL': 'USOL',
         'BONK': 'UBONK',
-        'DOGE': 'UDOGE',
+        # 'DOGE': 'UDOGE',  # Not available on exchange as of Jan 2026
         'MOG': 'UMOG',
         'WLD': 'UWLD',
         'ENA': 'UENA',
         'XPL': 'UXPL',
-        # NOTE: MON perp ($0.02) does NOT match UMON spot ($145) - different assets
-        # MON spot exists but prices don't align with perp - needs investigation
+        'MON': 'UMON',  # Monad - verified via tokenDetails endpoint
         'PUMP': 'UPUMP',
         'FARTCOIN': 'UFART',
         'MEGA': 'UMEGA',
