@@ -1,82 +1,41 @@
 # Trading Bot for Hyperliquid
 
-An automated trading bot that connects to Hyperliquid perpetual futures exchange and executes automated trading strategies.
+An automated multi-strategy trading bot for Hyperliquid perpetual futures exchange with real-time monitoring dashboard, adaptive risk management, and strategy-specific position controls.
 
 ## Features
 
-- Real-time market data fetching from Hyperliquid API
-- WebSocket connection for live price updates
-- Configurable trading strategies for perpetual futures
-- Risk management and position sizing
-- Performance tracking and analytics
-- **Accurate position and order monitoring**
-- **Real-time position synchronization with exchange**
-- **Stale order cleanup and validation**
-- Modular architecture for easy strategy development
+- **Multi-Strategy Architecture**: Four distinct quantitative strategies running concurrently
+- **Real-Time Dashboard**: Web-based monitoring at `localhost:5050` with positions, PnL, trade history
+- **Dynamic Pair Selection**: Automatically trades all assets meeting liquidity/volume/open interest thresholds
+- **Strategy-Specific Risk Management**: Custom TP/SL logic and trailing stops per strategy
+- **Capital Rotation**: Automatically closes weaker positions for stronger signals
+- **Graceful Shutdown**: Ensures positions are closed on Ctrl+C, kill signals, or crashes
+- **SQLite Performance Tracking**: Persistent trade history and per-strategy analytics
 
-## Position & Order Monitoring
+## Trading Strategies
 
-The bot includes comprehensive monitoring to ensure accurate tracking of positions and orders:
+| Strategy | Description | Exit Logic |
+|----------|-------------|------------|
+| `ou_mean_reversion` | Ornstein-Uhlenbeck mean reversion on Z-score deviations | Z-score reverts or overshoots mean |
+| `momentum_factor` | Cross-sectional momentum ranking top/bottom performers | Asset falls out of top N rankings |
+| `stat_arb` | Statistical arbitrage on correlated pairs | Spread Z-score normalizes |
+| `funding_rate_arbitrage` | Delta-neutral funding rate capture | Funding rate threshold breach |
 
-### Position Monitoring
-- **Real-time synchronization** with exchange positions
-- **Automatic detection** of closed positions
-- **Size and price discrepancy** validation
-- **Position integrity checks** to prevent data corruption
-- **Continuous monitoring** with automatic position closure
-- **Stop-loss and take-profit enforcement**
-- **Position timeout management**
-- **Emergency stop capabilities**
+Each strategy has:
+- Custom stop loss calculation (volatility-adjusted, capped 3-12%)
+- Trailing stop loss (activates after profit threshold)
+- Take profit targets based on strategy mechanics
 
-### Order Monitoring
-- **Open order tracking** and status monitoring
-- **Stale order detection** and automatic cleanup
-- **Order timeout management** (configurable)
-- **Order validation** to prevent invalid orders
+## Dashboard
 
-### Monitoring Components
-- `src/strategies/strategy_manager.py` - Runs the live trading loop, cleans up stale orders, and enforces position/risk rules every cycle
-- `src/utils/portfolio_manager.py` - Keeps the real account equity and available capital in sync with Hyperliquid
-- `positions.json` - Persisted snapshot of open positions so a kill switch or restart can immediately reconcile state
-- `logs/trading_bot.log` - Structured log stream with validation results, emergency-stop alerts, and execution traces
+Access the real-time dashboard at **http://localhost:5050** when the bot is running.
 
-### Integrated Position Monitoring
-
-Position monitoring is now **automatically integrated** into the main trading bot and runs continuously:
-
-```bash
-# Start the trading bot (position monitoring runs automatically)
-python src/main.py
-```
-
-#### Automatic Position Monitoring Features:
-- **Real-time position tracking** every 10 seconds (configurable)
-- **Automatic position closure** based on:
-  - Stop-loss and take-profit levels
-  - Maximum loss percentage (default: 5%)
-  - Maximum profit percentage (default: 20%)
-  - Position timeout (default: 24 hours)
-- **Emergency stop** when portfolio loss exceeds threshold (default: 10%)
-- **Position synchronization** with exchange data
-- **Comprehensive logging** and status display
-
-The position monitoring runs as part of the main trading loop, ensuring positions are constantly monitored and closed when needed without requiring separate services or manual intervention.
-
-### Configuration
-```bash
-# Order monitoring settings (optimized for scalping)
-ORDER_TIMEOUT_MINUTES=0.5          # 30 seconds before order is considered stale
-ENABLE_STALE_ORDER_CLEANUP=true    # Enable automatic stale order cleanup
-POSITION_SYNC_INTERVAL=10          # 10 seconds between position syncs
-ENABLE_POSITION_VALIDATION=true    # Enable position integrity checks
-
-# Integrated position monitoring settings
-POSITION_MONITORING_INTERVAL=10    # Check positions every 10 seconds
-POSITION_TIMEOUT_HOURS=24          # Close positions after 24 hours
-MAX_LOSS_PERCENTAGE=5.0            # Close if loss > 5%
-MAX_PROFIT_PERCENTAGE=20.0         # Close if profit > 20%
-EMERGENCY_LOSS_THRESHOLD=10.0      # Emergency stop at 10% loss
-```
+### Dashboard Features
+- **Account Summary**: Equity, available capital, total PnL (realized + unrealized)
+- **Open Positions**: Symbol, side, size, entry/current price, notional, margin, leverage, liquidation price, PnL
+- **Strategy Performance**: Per-strategy trade count, win rate, realized PnL
+- **Trade History**: Complete log of closed trades with exit reasons
+- **Visual Alerts**: Color-coded liquidation warnings (red <10%, yellow <20%)
 
 ## Project Structure
 
@@ -84,128 +43,197 @@ EMERGENCY_LOSS_THRESHOLD=10.0      # Emergency stop at 10% loss
 TradeBot/
 ├── README.md
 ├── requirements.txt
+├── .env                    # API credentials and optional overrides
 ├── env.example
 ├── docs/
-│   └── setup.md                # Extended setup & risk notes
+│   └── setup.md            # Extended setup & risk notes
 ├── logs/
-│   └── trading_bot.log         # Default runtime log file
-├── positions.json              # Auto-generated open-position snapshot
+│   └── trading_bot.log     # Runtime logs
+├── data/
+│   └── trades.db           # SQLite trade history database
+├── positions.json          # Open position snapshot for recovery
+├── scripts/
+│   └── close_all_positions.py  # Emergency position closure script
 └── src/
-    ├── main.py                 # Entry point that wires config + strategies
+    ├── main.py             # Entry point
     ├── config/
-    │   └── settings.py         # Loads .env and builds the config dictionary
-    ├── api/                    # Hyperliquid REST / WebSocket / hybrid clients
-    ├── strategies/             # Strategy implementations + manager
-    ├── utils/                  # Portfolio, leverage, correlation, logging helpers
-    └── models/                 # Trade & position dataclasses
+    │   └── settings.py     # Configuration loader
+    ├── api/
+    │   └── hyperliquid_api.py  # Exchange API client
+    ├── strategies/
+    │   ├── strategy_manager.py         # Orchestrates all strategies
+    │   ├── base_strategy.py            # Abstract base class
+    │   ├── ou_mean_reversion_strategy.py
+    │   ├── momentum_factor_strategy.py
+    │   ├── statistical_arbitrage_strategy.py
+    │   └── funding_rate_arbitrage_strategy.py
+    ├── dashboard/
+    │   ├── app.py          # Flask dashboard server
+    │   └── templates/
+    │       └── dashboard.html
+    ├── utils/
+    │   ├── pair_selector.py        # Dynamic pair selection
+    │   ├── portfolio_manager.py    # Capital and equity management
+    │   ├── performance_tracker.py  # Analytics and metrics
+    │   └── trade_database.py       # SQLite storage
+    └── models/
+        └── trade.py        # Position and Trade dataclasses
 ```
 
 ## Requirements
 
-- Python 3.8+ (aligned with `docs/setup.md`)
-- Hyperliquid perpetuals account with API access, private key, and wallet address
-- USDC balance on Hyperliquid for margin requirements
-- macOS/Linux recommended for long-running processes (Windows via WSL is fine)
-
-Install project dependencies with:
+- Python 3.8+
+- Hyperliquid perpetuals account with API access
+- Private key and wallet address
+- USDC balance for margin
 
 ```bash
-python -m pip install -r requirements.txt
+pip install -r requirements.txt
 ```
 
 ## Quick Start
 
-1. **Clone & install**
+1. **Clone & Install**
    ```bash
    git clone <repo-url>
    cd TradeBot
-   python -m venv .venv && source .venv/bin/activate  # optional but recommended
-   python -m pip install --upgrade pip
-   python -m pip install -r requirements.txt
+   python -m venv .venv && source .venv/bin/activate
+   pip install -r requirements.txt
    ```
-2. **Configure environment**
+
+2. **Configure Environment**
    ```bash
    cp env.example .env
-   # edit .env with your Hyperliquid credentials and preferred risk limits
+   # Edit .env with your credentials
    ```
-3. **Run the bot**
+
+   **Required variables:**
    ```bash
-   python src/main.py
+   HYPERLIQUID_PRIVATE_KEY=your_private_key
+   HYPERLIQUID_WALLET_ADDRESS=your_wallet_address
+   HYPERLIQUID_PUBLIC_ACCOUNT_ADDRESS=your_public_address
    ```
-   The bot validates connectivity, starts the WebSocket feed, syncs open positions, and then executes strategies on the configured interval.
-4. **Monitor in real-time**
+
+3. **Run the Bot**
+   ```bash
+   python -m src.main
+   ```
+
+4. **Access Dashboard**
+   Open http://localhost:5050 in your browser
+
+5. **Monitor Logs**
    ```bash
    tail -f logs/trading_bot.log
    ```
-   Watch for execution summaries, position monitoring output, and any emergency-stop alerts.
 
-> For a longer, opinionated walkthrough (including leverage assumptions and capital-at-risk math) see `docs/setup.md`.
+## Risk Management
 
-## Configuration Overview
+### Position Sizing
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `MAX_POSITION_SIZE_PERCENTAGE` | 20% | Max size per position (% of equity) |
+| `MAX_POSITIONS_PERCENTAGE` | 80% | Max total capital deployed |
+| `MAX_ACCOUNT_LOSS_PER_TRADE` | 3% | Max account loss from any single trade |
 
-All runtime behavior is controlled through `.env` and loaded by `src/config/settings.py`. The defaults in `env.example` mirror the hard-coded fallbacks in `settings.py`, so you only need to override what differs from your preferred risk posture.
+### Leverage
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `LEVERAGE_BASE` | 3x | Default leverage |
+| `LEVERAGE_MIN` | 1.5x | Minimum leverage |
+| `LEVERAGE_MAX` | 5x | Maximum leverage |
 
-### API & Authentication
-- `HYPERLIQUID_API_URL`, `HYPERLIQUID_WS_URL`, `HYPERLIQUID_WS_ALTERNATIVE_URLS`
-- `HYPERLIQUID_PRIVATE_KEY`, `HYPERLIQUID_WALLET_ADDRESS`, `HYPERLIQUID_PUBLIC_ACCOUNT_ADDRESS`
-- `API_TIMEOUT` for REST calls
+### Stop Loss Hierarchy
+1. **Strategy-Specific SL**: Each strategy calculates its own stop loss (3-12% range)
+2. **Trailing Stop**: Activates after profit threshold, locks in gains
+3. **Global Fallback**: 3% max account loss per trade (safety net)
 
-### Trading & Risk
-- `DYNAMIC_PAIR_SELECTION`, `MIN_OPEN_INTEREST`, `SCAN_INTERVAL_MINUTES`, `EXCLUDED_ASSETS`, `INCLUDED_ASSETS`
-- Portfolio sizing: `USE_PORTFOLIO_BASED_SIZING`, `MAX_POSITION_SIZE_USD`, `MAX_POSITION_SIZE_PERCENTAGE`, `MAX_POSITIONS_PERCENTAGE`, `RISK_PERCENTAGE`, `STOP_LOSS_PERCENTAGE`
-- Kill-switch & monitoring: `POSITION_MONITORING_INTERVAL`, `POSITION_TIMEOUT_HOURS`, `MAX_LOSS_PERCENTAGE`, `MAX_PROFIT_PERCENTAGE`, `EMERGENCY_LOSS_THRESHOLD`
-- Order health: `ORDER_TIMEOUT_MINUTES`, `ENABLE_STALE_ORDER_CLEANUP`, `POSITION_SYNC_INTERVAL`, `ENABLE_POSITION_VALIDATION`
+### Capital Rotation
+When portfolio limits are reached and a stronger signal appears:
+- Bot evaluates profitability scores of all positions
+- Closes least profitable position if new signal is 20%+ stronger
+- Enables capturing better opportunities without over-allocating
 
-### Strategy Controls
-- `ENABLED_STRATEGIES` (comma-separated)
-- Timeframes are auto-selected per strategy (e.g., stat_arb=15m, funding_rate=1h)
-- Per-strategy knobs such as `MA_SHORT_PERIOD`, `RSI_PERIOD`, `BB_STD_DEV`, `SUPERTREND_MULTIPLIER`, `VWAP_STD_DEV_MULT`, `STAT_ARB_Z_SCORE_THRESHOLD`
+## Configuration
 
-### Leverage & Execution
-- `LEVERAGE_BASE`, `LEVERAGE_MIN`, `LEVERAGE_MAX`, and strategy-specific leverage multipliers
-- Smart order execution with automatic price walking (no configuration needed)
-- Logging lifecycle: `LOG_LEVEL`, `LOG_FILE`, `PURGE_LOGS_ON_STARTUP`, `CLEAR_CURRENT_LOG_ON_STARTUP`, `MAX_LOG_FILES`, `MAX_LOG_FILE_SIZE_MB`
+Most settings have sensible defaults in `src/config/settings.py`. Only override in `.env` if needed:
 
-## Built-in Strategies
+```bash
+# === REQUIRED ===
+HYPERLIQUID_PRIVATE_KEY=
+HYPERLIQUID_WALLET_ADDRESS=
+HYPERLIQUID_PUBLIC_ACCOUNT_ADDRESS=
 
-- `MovingAverageStrategy` – short/long MA crossover with trend strength + volatility caps
-- `RSIStrategy` – configurable RSI thresholds with volatility-adjusted position sizing
-- `BollingerBandSqueezeStrategy` – detects low-volatility squeezes ahead of breakouts
-- `SupertrendStrategy` – ATR-based trailing trend follower
-- `VWAPStrategy` – VWAP-centered mean reversion with RSI confirmation
-- `StatisticalArbitrageStrategy` – correlation-aware spread trades powered by `CorrelationManager`
+# === OPTIONAL OVERRIDES ===
+# Strategies (comma-separated)
+ENABLED_STRATEGIES=ou_mean_reversion,momentum_factor,stat_arb,funding_rate_arbitrage
 
-Enable or disable individual strategies via `ENABLED_STRATEGIES` and tailor their parameters in `.env`. The `StrategyManager` will still apply centralized risk limits and kill-switch logic regardless of the strategy mix.
+# Pair Selection
+MIN_OPEN_INTEREST=500000
+MIN_VOLUME=1000000
+EXCLUDED_ASSETS=PURR,HFUN
 
-## Logging, Monitoring & Kill Switch
+# Position Sizing (override defaults)
+# MAX_POSITION_SIZE_PERCENTAGE=20.0
+# MAX_POSITIONS_PERCENTAGE=80.0
 
-- **Logs**: `logs/trading_bot.log` captures startup checks, pair selection output, signal decisions, stale-order cleanups, and emergency-stop triggers. Rotate behavior is governed by the logging block in `settings.py`.
-- **Position snapshot**: `positions.json` is continuously updated so that a restart or kill switch immediately reconciles with on-exchange positions.
-- **Emergency stop**: Portfolio-level drawdowns beyond `EMERGENCY_LOSS_THRESHOLD` automatically close all positions via `StrategyManager.close_all_positions`.
-- **Graceful shutdown**: `Ctrl+C` or `kill` signals trigger `StrategyManager.stop(close_positions=True)` so orders are cancelled and positions are synced before exit.
+# Leverage (override defaults)
+# LEVERAGE_BASE=3.0
+# LEVERAGE_MIN=1.5
+# LEVERAGE_MAX=5.0
 
-## Testing & Developer Tooling
+# Dashboard
+DASHBOARD_PORT=5050
 
-- Unit/strategy tests (if present) can be executed with:
-  ```bash
-  pytest
-  ```
-- Format and lint before committing:
-  ```bash
-  black src
-  flake8 src
-  ```
-- Use `docs/setup.md` for deeper guidance on leverage assumptions, troubleshooting WebSocket connectivity, and operational checklists.
+# Logging
+LOG_LEVEL=INFO
+```
+
+## Emergency Position Closure
+
+If the bot crashes hard (kill -9) and positions remain open:
+
+```bash
+python scripts/close_all_positions.py
+```
+
+This standalone script loads your credentials and closes all open positions.
+
+## Shutdown Behavior
+
+The bot handles shutdown gracefully in these scenarios:
+
+| Signal | Behavior |
+|--------|----------|
+| `Ctrl+C` | Closes all positions, cancels orders, exits cleanly |
+| `kill <pid>` | Same as Ctrl+C |
+| Terminal closed | SIGHUP handler triggers graceful shutdown |
+| Python crash | atexit handler attempts position closure |
+| `kill -9` | Use `close_all_positions.py` script |
+
+## Monitoring & Logs
+
+- **Dashboard**: Real-time web UI at localhost:5050
+- **Logs**: `logs/trading_bot.log` with execution traces, signals, and alerts
+- **Position Snapshot**: `positions.json` for restart recovery
+- **Trade Database**: `data/trades.db` SQLite with full history
 
 ## Troubleshooting
 
-- **API/WebSocket failures**: verify credentials in `.env`, ensure network connectivity, and confirm the configured URLs respond with `curl`.
-- **No pairs selected**: relax `MIN_OPEN_INTEREST`, whitelist symbols via `INCLUDED_ASSETS`, or shorten `SCAN_INTERVAL_MINUTES`.
-- **Orders stuck pending**: lower `ORDER_TIMEOUT_MINUTES` so stale orders are cancelled more aggressively, and watch the logs for the cleanup summary.
-- **Unexpected allocation**: tail the log for “Portfolio Allocation” lines and adjust `MAX_POSITION_SIZE_PERCENTAGE` or `MAX_POSITIONS_PERCENTAGE`.
-
-For a longer FAQ—including scalping presets, leverage math, and security guidance—see `docs/setup.md`.
+| Issue | Solution |
+|-------|----------|
+| No pairs selected | Lower `MIN_OPEN_INTEREST`, check `EXCLUDED_ASSETS` |
+| API rate limits | Bot has built-in circuit breaker, will auto-recover |
+| Dashboard not loading | Ensure bot is running, check port 5050 is free |
+| Positions not closing | Check logs for errors, use emergency script |
+| Wrong leverage | Verify `LEVERAGE_*` settings in .env |
 
 ## Disclaimer
 
-This bot is built for high-frequency, leveraged trading on Hyperliquid. Running it with real capital implies significant risk of loss, rapid liquidation, and API-related failure modes. Test with paper-sized capital, monitor continuously, and never deploy funds you cannot afford to lose.
+This bot executes leveraged trades on Hyperliquid perpetual futures. Trading involves significant risk of loss. Features include:
+
+- Automated position entry/exit
+- Leveraged exposure (up to 5x default)
+- 24/7 operation without supervision
+
+**Never deploy capital you cannot afford to lose. Test thoroughly with small amounts first. Monitor continuously during initial deployment.**
