@@ -89,8 +89,6 @@ class StrategyManager:
         
         # Calculate execution interval based on timeframe
         self.execution_interval = self._get_execution_interval()
-        # For testing, force a short interval (60s) to accelerate signal generation
-        self.execution_interval = min(self.execution_interval, 60)
         
         # Trading state
         self.positions = {}  # Single-leg positions: symbol -> Position
