@@ -4,8 +4,9 @@ Base strategy class for all trading strategies.
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 import pandas as pd
+from datetime import datetime
 
 
 class BaseStrategy(ABC):
@@ -77,23 +78,50 @@ class BaseStrategy(ABC):
         
         return position_size
     
-    def calculate_stop_loss(self, entry_price: float, side: str) -> float:
+    def calculate_stop_loss(self, entry_price: float, side: str, 
+                           signal_context: Dict[str, Any] = None) -> float:
         """
-        Calculate stop loss price.
+        Calculate stop loss price based on strategy-specific logic.
         
         Args:
             entry_price: Entry price
             side: 'buy' or 'sell'
+            signal_context: Additional context from the signal (e.g., z-score, volatility)
             
         Returns:
             Stop loss price
         """
+        # Default implementation uses global config
+        # Subclasses should override for strategy-specific logic
         stop_loss_percentage = self.config['trading']['stop_loss_percentage'] / 100
         
         if side == 'buy':
             return entry_price * (1 - stop_loss_percentage)
         else:
             return entry_price * (1 + stop_loss_percentage)
+    
+    def should_exit(self, position: Any, current_price: float, 
+                   current_data: Dict[str, Any] = None) -> Tuple[bool, Optional[str]]:
+        """
+        Determine if an existing position should be closed based on strategy logic.
+        
+        This method allows strategies to define custom exit conditions beyond
+        simple price-based TP/SL. For example:
+        - OU Mean Reversion: Exit when Z-score returns to zero
+        - Momentum: Exit on rebalance when asset falls out of top/bottom N
+        - Funding Arb: Exit when funding rate normalizes
+        
+        Args:
+            position: The current position object
+            current_price: Current market price
+            current_data: Additional market data (OHLCV, indicators, etc.)
+            
+        Returns:
+            Tuple of (should_exit: bool, reason: str or None)
+        """
+        # Default implementation - no strategy-specific exit
+        # Subclasses should override for custom exit logic
+        return False, None
     
     def calculate_take_profit(self, entry_price: float, side: str, ohlcv: pd.DataFrame = None, 
                             signal_strength: float = 1.0, market_volatility: float = 1.0) -> float:

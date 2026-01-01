@@ -110,10 +110,13 @@ def load_config() -> Dict[str, Any]:
             
             # Position monitoring settings
             "position_monitoring_interval": int(os.getenv("POSITION_MONITORING_INTERVAL", "10")),  # seconds
-            "position_timeout_hours": float(os.getenv("POSITION_TIMEOUT_HOURS", "24")),  # hours
-            "max_loss_percentage": float(os.getenv("MAX_LOSS_PERCENTAGE", "5.0")),  # percentage
+            "position_timeout_hours": float(os.getenv("POSITION_TIMEOUT_HOURS", "24")),  # (Deprecated) hours - not used
+            "max_loss_percentage": float(os.getenv("MAX_LOSS_PERCENTAGE", "5.0")),  # percentage per position
             "max_profit_percentage": float(os.getenv("MAX_PROFIT_PERCENTAGE", "20.0")),  # percentage
             "emergency_loss_threshold": float(os.getenv("EMERGENCY_LOSS_THRESHOLD", "10.0")),  # percentage
+            
+            # Global risk limit: max % of account that can be lost on any single trade
+            "max_account_loss_per_trade": float(os.getenv("MAX_ACCOUNT_LOSS_PER_TRADE", "3.0")),  # 3% of account
         },
         
         # Risk Management Configuration

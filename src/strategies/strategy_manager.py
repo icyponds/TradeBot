@@ -1629,42 +1629,86 @@ class StrategyManager:
             signal_strength = signal['signal_strength']
             market_volatility = signal['market_volatility']
             
-            # Calculate stop loss and take profit with leverage
-            # Note: leverage_manager uses 'long'/'short', strategies use 'buy'/'sell'
-            stop_loss = self.leverage_manager.calculate_stop_loss_with_leverage(
+            # === STOP LOSS CALCULATION ===
+            # Three stop loss approaches, use the most conservative:
+            # 1. Strategy-specific stop loss
+            # 2. 3% max account loss (global safety net)
+            # 3. Leverage-based stop loss
+            
+            strategy = self.strategies[strategy_name]
+            
+            # Build signal context for strategy-specific calculations
+            signal_context = {
+                'z_score': signal.get('z_score'),
+                'sigma': signal.get('sigma'),
+                'mu': signal.get('mu'),
+                'market_volatility': market_volatility,
+                'signal_strength': signal_strength,
+            }
+            
+            # 1. Strategy-specific stop loss (strategies expect 'buy'/'sell')
+            strategy_stop_loss = strategy.calculate_stop_loss(
+                current_price, side, signal_context
+            )
+            
+            # 2. Global safety net: Max X% of account value loss per trade (default 3%)
+            # Get account equity
+            account_equity = self.portfolio_manager.total_equity if self.portfolio_manager else 10000
+            max_account_loss_pct = self.config['trading'].get('max_account_loss_per_trade', 3.0) / 100
+            max_account_loss = account_equity * max_account_loss_pct
+            
+            # Position notional value
+            notional_value = position_size * current_price
+            
+            # Calculate price move that would cause 3% account loss
+            # Loss = position_size * price_change
+            # So price_change = max_loss / position_size
+            max_price_change = max_account_loss / position_size if position_size > 0 else current_price * 0.05
+            
+            if position_side == 'long':
+                stop_loss_account_based = current_price - max_price_change
+            else:
+                stop_loss_account_based = current_price + max_price_change
+            
+            # 3. Leverage-based stop loss (original method)
+            stop_loss_leverage_based = self.leverage_manager.calculate_stop_loss_with_leverage(
                 current_price, position_side, leverage
             )
             
-            # Calculate strategy-specific take profit
-            # Strategies expect 'buy'/'sell' for the side parameter, not 'long'/'short'
-            strategy = self.strategies[strategy_name]
+            # Use the MOST CONSERVATIVE stop loss (closest to entry price)
+            if position_side == 'long':
+                # For longs, higher price = more conservative (triggers earlier)
+                stop_loss = max(strategy_stop_loss, stop_loss_account_based, stop_loss_leverage_based)
+            else:
+                # For shorts, lower price = more conservative (triggers earlier)
+                stop_loss = min(strategy_stop_loss, stop_loss_account_based, stop_loss_leverage_based)
+            
+            self.logger.debug(f"Stop loss calculation for {symbol}:")
+            self.logger.debug(f"  Strategy SL: {strategy_stop_loss:.4f}")
+            self.logger.debug(f"  Account 3% SL: {stop_loss_account_based:.4f}")
+            self.logger.debug(f"  Leverage SL: {stop_loss_leverage_based:.4f}")
+            self.logger.debug(f"  Final (most conservative): {stop_loss:.4f}")
+            
+            # === TAKE PROFIT CALCULATION ===
+            # Strategy-specific take profit (strategies expect 'buy'/'sell')
             strategy_take_profit = strategy.calculate_take_profit(
-                current_price, side, ohlcv, signal_strength, market_volatility  # Use 'buy'/'sell'
+                current_price, side, ohlcv, signal_strength, market_volatility
             )
             
             take_profit = self.leverage_manager.calculate_take_profit_with_leverage(
                 current_price, position_side, leverage, strategy_take_profit
             )
             
-            # Alternative: Calculate stop-loss and take-profit based on capital at risk
-            # This gives us more precise control over dollar amounts at risk
-            max_loss_amount = margin_required * 0.5  # 50% of capital at risk as max loss
-            target_profit_amount = margin_required * 1.0  # 100% of capital at risk as target profit
-            
-            stop_loss_capital_based = self.leverage_manager.calculate_stop_loss_with_capital_at_risk(
-                current_price, position_side, margin_required, max_loss_amount
-            )
-            
+            # Capital-based take profit as alternative
+            target_profit_amount = margin_required * 1.0  # 100% of margin as target
             take_profit_capital_based = self.leverage_manager.calculate_take_profit_with_capital_at_risk(
                 current_price, position_side, margin_required, target_profit_amount
             )
             
-            # Use the more conservative of the two approaches
+            # Use more conservative take profit
             if position_side == 'long':
-                stop_loss = max(stop_loss, stop_loss_capital_based)  # Higher price = more conservative
                 take_profit = min(take_profit, take_profit_capital_based)  # Lower price = more conservative
             else:
-                stop_loss = min(stop_loss, stop_loss_capital_based)  # Lower price = more conservative
                 take_profit = max(take_profit, take_profit_capital_based)  # Higher price = more conservative
             
             # Execute order with smart price management
@@ -2565,10 +2609,17 @@ class StrategyManager:
         """
         Determine if a position should be closed.
         
+        Exit priority:
+        1. Strategy-specific exit conditions (should_exit method)
+        2. Global fallback stop loss (protects against 3%+ account loss)
+        3. Strategy-specific take profit
+        
+        Note: Position timeout removed - if strategy is still valid, position stays open.
+        
         Args:
             position: Position to check
-            timeout_hours: Hours before position timeout
-            max_loss_percentage: Maximum loss percentage
+            timeout_hours: (Deprecated, unused) Hours before position timeout
+            max_loss_percentage: Maximum loss percentage (global fallback)
             max_profit_percentage: Maximum profit percentage
             
         Returns:
@@ -2577,31 +2628,52 @@ class StrategyManager:
         if not position.current_price:
             return None
         
-        # Check stop loss
+        # 1. Check strategy-specific exit conditions first
+        strategy_name = position.strategy
+        if strategy_name and strategy_name in self.strategies:
+            strategy = self.strategies[strategy_name]
+            
+            # Build current_data for strategy exit check
+            current_data = {}
+            try:
+                # Get OHLCV data for this symbol
+                ohlcv = self.market_api.get_ohlcv(position.symbol, strategy.timeframe, strategy.ohlcv_limit)
+                if ohlcv is not None:
+                    current_data['ohlcv'] = ohlcv
+            except Exception as e:
+                self.logger.debug(f"Could not get OHLCV for exit check: {e}")
+            
+            # Call strategy's should_exit method
+            should_exit, exit_reason = strategy.should_exit(
+                position, position.current_price, current_data
+            )
+            
+            if should_exit and exit_reason:
+                return f"strategy_exit:{exit_reason}"
+        
+        # 2. Global fallback stop loss (safety net)
         if position.stop_loss:
             if position.side == 'long' and position.current_price <= position.stop_loss:
                 return "stop_loss"
             elif position.side == 'short' and position.current_price >= position.stop_loss:
                 return "stop_loss"
         
-        # Check take profit
+        # 3. Take profit check
         if position.take_profit:
             if position.side == 'long' and position.current_price >= position.take_profit:
                 return "take_profit"
             elif position.side == 'short' and position.current_price <= position.take_profit:
                 return "take_profit"
         
-        # Check position timeout
-        time_open = datetime.now() - position.entry_time
-        if time_open.total_seconds() > (timeout_hours * 3600):
-            return "timeout"
+        # NOTE: Position timeout removed - strategies decide when to exit
+        # Old timeout logic was: if time_open > timeout_hours, return "timeout"
         
-        # Check loss percentage
+        # 4. Check loss percentage (additional safety net based on unrealized PnL)
         if position.unrealized_pnl_percentage:
             if position.unrealized_pnl_percentage < -max_loss_percentage:
                 return "max_loss"
         
-        # Check profit percentage
+        # 5. Check profit percentage (optional - take profit if large gain)
         if position.unrealized_pnl_percentage:
             if position.unrealized_pnl_percentage > max_profit_percentage:
                 return "max_profit"

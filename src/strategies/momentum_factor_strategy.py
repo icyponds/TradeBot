@@ -10,7 +10,10 @@ This creates a market-neutral portfolio that profits from momentum persistence.
 """
 
 import logging
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, List, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.models.trade import Position
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import pandas as pd
@@ -437,6 +440,67 @@ class MomentumFactorStrategy(BaseStrategy):
             return entry_price * (1 + base_tp_pct)
         else:
             return entry_price * (1 - base_tp_pct)
+    
+    def calculate_stop_loss(self, entry_price: float, side: str, 
+                           signal_context: Dict[str, Any] = None) -> float:
+        """
+        Calculate stop loss for momentum positions.
+        
+        Momentum uses a wider stop loss since positions are held for rebalance periods.
+        Stop loss is based on maximum expected drawdown during the holding period.
+        """
+        # Momentum positions have longer holding periods, use wider stops
+        # But still protect against severe adverse moves
+        base_sl_pct = 0.08  # 8% base stop loss
+        
+        if signal_context:
+            # Adjust based on volatility if available
+            volatility = signal_context.get('market_volatility', 1.0)
+            base_sl_pct = base_sl_pct * max(0.5, min(2.0, volatility))
+        
+        # Clamp to reasonable range (5% to 12%)
+        base_sl_pct = max(0.05, min(0.12, base_sl_pct))
+        
+        if side == 'buy':
+            return entry_price * (1 - base_sl_pct)
+        else:
+            return entry_price * (1 + base_sl_pct)
+    
+    def should_exit(self, position: Any, current_price: float, 
+                   current_data: Dict[str, Any] = None) -> Tuple[bool, Optional[str]]:
+        """
+        Determine if momentum position should exit.
+        
+        Exit conditions:
+        1. Asset has fallen out of top/bottom N rankings
+        2. Rebalance period triggered
+        """
+        if current_data is None:
+            return False, None
+        
+        symbol = getattr(position, 'symbol', None)
+        if not symbol:
+            return False, None
+        
+        # Check if it's time to rebalance
+        if self._should_rebalance():
+            # Check if this symbol is still in the top/bottom N
+            if symbol in self.portfolio.rankings:
+                ranking = self.portfolio.rankings[symbol]
+                position_side = getattr(position, 'side', None)
+                
+                # If it's a long position but no longer in top N
+                if position_side == 'long' and symbol not in self.portfolio.long_positions:
+                    return True, "momentum_ranking_dropped"
+                
+                # If it's a short position but no longer in bottom N
+                if position_side == 'short' and symbol not in self.portfolio.short_positions:
+                    return True, "momentum_ranking_improved"
+            else:
+                # Symbol no longer in rankings at all
+                return True, "momentum_delisted"
+        
+        return False, None
     
     def force_rebalance(self, symbols: List[str]) -> List[Dict[str, Any]]:
         """

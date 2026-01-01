@@ -6,7 +6,10 @@ simple correlation, and employs Kalman Filter for dynamic hedge ratio estimation
 """
 
 import logging
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.models.trade import Position
 import pandas as pd
 import numpy as np
 from .base_strategy import BaseStrategy
@@ -377,3 +380,59 @@ class StatisticalArbitrageStrategy(BaseStrategy):
             return entry_price * (1 + adjusted_tp)
         else:
             return entry_price * (1 - adjusted_tp)
+    
+    def calculate_stop_loss(self, entry_price: float, side: str, 
+                           signal_context: Dict[str, Any] = None) -> float:
+        """
+        Calculate stop loss for statistical arbitrage.
+        
+        For stat arb, stop loss is based on the spread Z-score moving further
+        from the mean (wrong direction).
+        """
+        # Default stop loss percentage
+        base_sl_pct = 0.05  # 5% base
+        
+        if signal_context:
+            # Adjust based on entry Z-score
+            z_score = abs(signal_context.get('z_score', 2.0))
+            # Stop if Z-score moves to 1.5x entry
+            stop_z = z_score * 1.5
+            # Rough conversion: 1 Z-score ≈ 2-3% price move
+            base_sl_pct = stop_z * 0.025
+            
+            # Clamp to reasonable range
+            base_sl_pct = max(0.03, min(0.10, base_sl_pct))
+        
+        if side == 'buy':
+            return entry_price * (1 - base_sl_pct)
+        else:
+            return entry_price * (1 + base_sl_pct)
+    
+    def should_exit(self, position: Any, current_price: float, 
+                   current_data: Dict[str, Any] = None) -> Tuple[bool, Optional[str]]:
+        """
+        Determine if stat arb position should exit.
+        
+        Exit conditions:
+        1. Spread Z-score has returned to near zero
+        2. Cointegration relationship has broken down
+        """
+        if current_data is None:
+            return False, None
+        
+        symbol = getattr(position, 'symbol', None)
+        if not symbol:
+            return False, None
+        
+        # Check active spreads for this symbol
+        spread_data = self.active_spreads.get(symbol)
+        if not spread_data:
+            return False, None
+        
+        # If we have z_score in current_data, check for mean reversion
+        z_score = current_data.get('z_score')
+        if z_score is not None:
+            if abs(z_score) < self.zscore_exit:
+                return True, f"spread_mean_reversion_complete (z={z_score:.2f})"
+        
+        return False, None

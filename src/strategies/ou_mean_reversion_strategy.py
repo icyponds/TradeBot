@@ -7,7 +7,10 @@ when prices deviate significantly from their estimated equilibrium.
 """
 
 import logging
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.models.trade import Position
 from dataclasses import dataclass
 from datetime import datetime
 import pandas as pd
@@ -443,6 +446,94 @@ class OUMeanReversionStrategy(BaseStrategy):
             return entry_price * (1 + adjusted_tp)
         else:
             return entry_price * (1 - adjusted_tp)
+    
+    def calculate_stop_loss(self, entry_price: float, side: str, 
+                           signal_context: Dict[str, Any] = None) -> float:
+        """
+        Calculate stop loss for OU mean reversion.
+        
+        For mean reversion, stop loss is based on the Z-score moving further
+        from the mean (wrong direction), typically 1.5-2x the entry Z-score.
+        """
+        # Default stop loss if no context available
+        if signal_context is None:
+            # Use 5% as default
+            sl_pct = 0.05
+        else:
+            # Get the entry Z-score and OU sigma
+            z_score = abs(signal_context.get('z_score', 2.0))
+            sigma = signal_context.get('sigma', 0.02)
+            mu = signal_context.get('mu', entry_price)
+            
+            # Stop loss if Z-score moves to 1.5x entry (e.g., entered at 2, stop at 3)
+            stop_z = z_score * 1.5
+            
+            # Convert back to price deviation
+            # For OU: z = (ln(price) - ln(mu)) / sigma
+            # So: ln(price) = ln(mu) + z * sigma
+            # And: price = mu * exp(z * sigma)
+            if side == 'buy':
+                # Long position - price went down to enter, stop if it goes even lower
+                sl_pct = 1 - np.exp(-stop_z * sigma)
+            else:
+                # Short position - price went up to enter, stop if it goes even higher
+                sl_pct = np.exp(stop_z * sigma) - 1
+            
+            # Clamp to reasonable range (3% to 10%)
+            sl_pct = max(0.03, min(0.10, sl_pct))
+        
+        if side == 'buy':
+            return entry_price * (1 - sl_pct)
+        else:
+            return entry_price * (1 + sl_pct)
+    
+    def should_exit(self, position: Any, current_price: float, 
+                   current_data: Dict[str, Any] = None) -> Tuple[bool, Optional[str]]:
+        """
+        Determine if OU position should exit based on Z-score normalization.
+        
+        Exit conditions:
+        1. Z-score has returned to near zero (mean reversion complete)
+        2. Z-score has reversed direction significantly
+        """
+        if current_data is None:
+            return False, None
+        
+        symbol = getattr(position, 'symbol', None)
+        if not symbol:
+            return False, None
+        
+        # Get OHLCV data for Z-score calculation
+        ohlcv = current_data.get('ohlcv')
+        if ohlcv is None or len(ohlcv) < self.min_data_points:
+            return False, None
+        
+        # Get or estimate OU parameters
+        params = self._estimate_ou_parameters(ohlcv['close'])
+        if params is None:
+            return False, None
+        
+        # Calculate current Z-score
+        log_price = np.log(current_price)
+        log_mu = np.log(params.mu)
+        
+        if params.sigma <= 0:
+            return False, None
+        
+        z_score = (log_price - log_mu) / params.sigma
+        
+        # Exit if Z-score has reverted past exit threshold
+        if abs(z_score) < self.zscore_exit:
+            return True, f"mean_reversion_complete (z={z_score:.2f})"
+        
+        # Exit if Z-score has crossed zero (overshot the mean)
+        position_side = getattr(position, 'side', None)
+        if position_side == 'long' and z_score > 0.5:
+            return True, f"mean_reversion_overshot (z={z_score:.2f})"
+        elif position_side == 'short' and z_score < -0.5:
+            return True, f"mean_reversion_overshot (z={z_score:.2f})"
+        
+        return False, None
     
     def get_ou_parameters(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Get cached OU parameters for a symbol."""
