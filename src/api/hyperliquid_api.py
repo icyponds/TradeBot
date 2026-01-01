@@ -1232,24 +1232,29 @@ class HyperliquidAPI:
                     self.logger.error("Cannot place market order without price")
                     return None
                 
+                # Use aggressive price (5% slippage) and round to tick size
                 aggressive_price = current_price * 1.05 if is_buy else current_price * 0.95
+                rounded_price = self._round_to_tick(aggressive_price, symbol)
+                
                 response = self._rate_limited_call(
                     self.exchange.order,
                     symbol,
                     is_buy,
                     rounded_size,
-                    aggressive_price,
+                    rounded_price,
                     {"limit": {"tif": "Ioc"}},
                     reduce_only=reduce_only
                 )
             else:
-                # Limit order
+                # Limit order - round price to tick size
+                rounded_price = self._round_to_tick(price, symbol)
+                
                 response = self._rate_limited_call(
                     self.exchange.order,
                     symbol,
                     is_buy,
                     rounded_size,
-                    price,
+                    rounded_price,
                     {"limit": {"tif": "Gtc"}},
                     reduce_only=reduce_only
                 )
@@ -1715,6 +1720,53 @@ class HyperliquidAPI:
                 if asset['name'] == symbol:
                     return asset
         return None
+    
+    def _get_tick_size(self, price: float) -> float:
+        """
+        Calculate tick size for Hyperliquid.
+        
+        Hyperliquid uses 5 significant figures for prices.
+        Examples:
+            - $2981.15 -> tick size 0.1 (price rounds to 2981.1)
+            - $87853.00 -> tick size 1.0 (price rounds to 87853)
+            - $0.1234 -> tick size 0.0001 (price rounds to 0.1234)
+        """
+        if price <= 0:
+            return 0.01
+        
+        import math
+        # Find order of magnitude
+        magnitude = math.floor(math.log10(abs(price)))
+        # 5 significant figures means tick is 10^(magnitude - 4)
+        tick_size = 10 ** (magnitude - 4)
+        return tick_size
+    
+    def _round_to_tick(self, price: float, symbol: Optional[str] = None) -> float:
+        """
+        Round price to valid tick size for Hyperliquid.
+        
+        Args:
+            price: The price to round
+            symbol: Optional symbol for future per-asset tick sizes
+            
+        Returns:
+            Price rounded to valid tick size
+        """
+        if price <= 0:
+            return price
+        
+        tick_size = self._get_tick_size(price)
+        rounded = round(price / tick_size) * tick_size
+        
+        # Ensure we don't have floating point artifacts
+        # Determine decimal places from tick size
+        import math
+        if tick_size >= 1:
+            decimals = 0
+        else:
+            decimals = -int(math.floor(math.log10(tick_size)))
+        
+        return round(rounded, decimals)
     
     def is_data_available(self, symbol: str) -> bool:
         """Check if data is available for a symbol."""
