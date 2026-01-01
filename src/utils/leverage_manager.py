@@ -27,8 +27,11 @@ class LeverageManager:
         self.portfolio_manager = portfolio_manager
         
         # Risk management configuration
-        self.risk_percentage = config['trading']['risk_percentage']
-        self.stop_loss_percentage = config['trading']['stop_loss_percentage']
+        # Strategy-specific SL/TP and account-based risk limits are enforced in StrategyManager.
+        # These are only heuristic defaults used when a strategy doesn't provide a TP/SL.
+        self.fallback_stop_loss_pct = float(
+            config.get('leverage_management', {}).get('fallback_stop_loss_pct', 0.05)
+        )  # 5% default
         self.margin_buffer_percentage = config['risk_management']['margin_buffer_percentage']
         self.liquidation_risk_threshold = config['risk_management']['liquidation_risk_threshold']
         
@@ -191,7 +194,7 @@ class LeverageManager:
         """
         # Calculate stop loss percentage based on leverage
         # Higher leverage = tighter stop loss
-        base_stop_loss_pct = self.stop_loss_percentage / 100
+        base_stop_loss_pct = self.fallback_stop_loss_pct
         
         # Handle division by zero
         if leverage <= 0:
@@ -225,7 +228,7 @@ class LeverageManager:
             return strategy_take_profit
         
         # Default take profit based on leverage
-        base_take_profit_pct = (self.stop_loss_percentage * 2) / 100  # 2x the stop loss
+        base_take_profit_pct = self.fallback_stop_loss_pct * 2  # 2x the stop loss
         
         # Handle division by zero
         if leverage <= 0:
@@ -420,6 +423,5 @@ class LeverageManager:
         return {
             'margin_buffer': self.margin_buffer_percentage,
             'liquidation_threshold': self.liquidation_risk_threshold * 100,
-            'risk_percentage': self.risk_percentage * 100,
-            'stop_loss_percentage': self.stop_loss_percentage * 100
+            'fallback_stop_loss_pct': self.fallback_stop_loss_pct * 100,
         } 

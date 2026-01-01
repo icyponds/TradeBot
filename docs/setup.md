@@ -2,16 +2,15 @@
 
 ## Overview
 
-This trading bot is designed for Hyperliquid perpetual futures trading with **aggressive leverage** (10-20x) and real-time data collection via WebSocket connections. The bot uses dynamic pair selection based on market conditions and implements multiple trading strategies optimized for scalping timeframes.
+This trading bot is designed for Hyperliquid perpetual futures trading with multiple strategies, dynamic pair selection, and a real-time dashboard. Position sizing is based on **capital at risk** (margin), with strategy-specific exits and global safety limits.
 
 ## Features
 
 - **Real-time Data Collection**: WebSocket-based data collection for live market data
 - **Dynamic Pair Selection**: Automatically selects trading pairs based on open interest and liquidity
-- **Multiple Strategies**: Moving Average Crossover and RSI strategies
-- **Aggressive Leverage**: 10-20x leverage for maximum profit potential
-- **Scalping Optimized**: Configured for 1-minute timeframes with rapid execution
-- **Advanced Risk Management**: Leverage-adjusted stop losses and take profits
+- **Multiple Strategies**: OU mean reversion, momentum factor, statistical arbitrage, funding-rate arbitrage (plus optional legacy strategies)
+- **Dynamic Leverage**: Bounded leverage with risk controls
+- **Advanced Risk Management**: Strategy-specific SL/TP + trailing stops + account-based max loss per trade
 - **Performance Tracking**: Comprehensive trade and performance analytics
 
 ## Prerequisites
@@ -53,10 +52,8 @@ Copy the `env.example` file to `.env` and configure the following variables:
 #### Portfolio-based Position Sizing
 - `USE_PORTFOLIO_BASED_SIZING`: Enable portfolio-based position sizing (default: true)
 - `MAX_POSITION_SIZE_USD`: Maximum USD per position (fallback, default: 50)
-- `MAX_POSITION_SIZE_PERCENTAGE`: Maximum percentage of portfolio per position (default: 2.0%)
-- `MAX_POSITIONS_PERCENTAGE`: Maximum percentage of portfolio in all positions (default: 33.33%)
-- `RISK_PERCENTAGE`: Risk percentage per trade (default: 2.0%)
-- `STOP_LOSS_PERCENTAGE`: Stop loss percentage (default: 2.0%)
+- `MAX_POSITION_SIZE_PERCENTAGE`: Maximum percentage of portfolio per position (default: 10.0%)
+- `MAX_POSITIONS_PERCENTAGE`: Maximum percentage of portfolio in all positions (default: 80.0%)
 
 #### Trading Configuration
 - `DYNAMIC_PAIR_SELECTION`: Enable dynamic pair selection (default: true)
@@ -88,12 +85,11 @@ The bot uses **capital at risk-based position sizing** instead of notional posit
 
 The bot implements comprehensive risk management based on capital at risk:
 
-1. **Position Limits**: Maximum 2% of portfolio capital at risk per position
-2. **Portfolio Limits**: Maximum 33.33% of portfolio capital at risk in all positions
-3. **Dynamic Leverage**: Leverage adjusts based on signal strength and market volatility
-4. **Stop Losses**: Automatic stop losses calculated based on capital at risk (configurable)
-5. **Margin Buffer**: 20% margin buffer to prevent liquidation
-6. **Capital at Risk Tracking**: Real-time monitoring of actual capital exposed to risk
+1. **Per-position cap**: `MAX_POSITION_SIZE_USD` and `MAX_POSITION_SIZE_PERCENTAGE`
+2. **Portfolio cap**: `MAX_POSITIONS_PERCENTAGE`
+3. **Max account loss per trade**: `MAX_ACCOUNT_LOSS_PER_TRADE` (default 3% of equity)
+4. **Emergency portfolio stop**: `EMERGENCY_PORTFOLIO_LOSS_PCT` closes all positions if portfolio loss exceeds threshold
+5. **Margin buffer**: `MARGIN_BUFFER_PERCENTAGE` reduces risk of liquidation
 
 ## Hyperliquid Integration
 

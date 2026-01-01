@@ -912,7 +912,8 @@ class HyperliquidAPI:
                             self.logger.debug(f"OHLCV tick update error for {symbol}: {e}")
                                 
                     except (ValueError, TypeError):
-                        pass
+                        # Ignore malformed ticks; continue processing other symbols.
+                        continue
                         
         except Exception as e:
             self.logger.error(f"Error handling allMids update: {e}")

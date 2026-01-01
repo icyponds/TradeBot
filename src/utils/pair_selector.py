@@ -460,7 +460,7 @@ class DynamicPairSelector:
                         perf_score = sharpe_score * 0.6 + win_score * 0.4
                         return perf_score, sharpe
                 except Exception:
-                    pass
+                    self.logger.debug(f"Error getting symbol metrics for {symbol}", exc_info=True)
             
             # No history - neutral score
             return 0.5, 0.0
@@ -553,7 +553,7 @@ class DynamicPairSelector:
             elif hasattr(self.strategy_manager, 'strategies'):
                 return list(self.strategy_manager.strategies.keys())
         except Exception:
-            pass
+            self.logger.debug("Error getting active strategy types", exc_info=True)
         
         return []
     

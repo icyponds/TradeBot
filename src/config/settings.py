@@ -99,8 +99,6 @@ def load_config() -> Dict[str, Any]:
             "max_position_size_usd": float(os.getenv("MAX_POSITION_SIZE_USD", "50")),  # Fallback max USD per position
             "max_position_size_percentage": float(os.getenv("MAX_POSITION_SIZE_PERCENTAGE", "10.0")),  # Max % of portfolio per position
             "max_positions_percentage": float(os.getenv("MAX_POSITIONS_PERCENTAGE", "80.0")),  # Max % of portfolio in all positions
-            "risk_percentage": float(os.getenv("RISK_PERCENTAGE", "10.0")),
-            "stop_loss_percentage": float(os.getenv("STOP_LOSS_PERCENTAGE", "5.0")),
             
             # Order monitoring settings
             "order_timeout_minutes": float(os.getenv("ORDER_TIMEOUT_MINUTES", ".05")),
@@ -110,10 +108,6 @@ def load_config() -> Dict[str, Any]:
             
             # Position monitoring settings
             "position_monitoring_interval": int(os.getenv("POSITION_MONITORING_INTERVAL", "10")),  # seconds
-            "position_timeout_hours": float(os.getenv("POSITION_TIMEOUT_HOURS", "24")),  # (Deprecated) hours - not used
-            "max_loss_percentage": float(os.getenv("MAX_LOSS_PERCENTAGE", "5.0")),  # percentage per position
-            "max_profit_percentage": float(os.getenv("MAX_PROFIT_PERCENTAGE", "20.0")),  # percentage
-            "emergency_loss_threshold": float(os.getenv("EMERGENCY_LOSS_THRESHOLD", "10.0")),  # percentage
             
             # Global risk limit: max % of account that can be lost on any single trade
             "max_account_loss_per_trade": float(os.getenv("MAX_ACCOUNT_LOSS_PER_TRADE", "3.0")),  # 3% of account
@@ -123,6 +117,9 @@ def load_config() -> Dict[str, Any]:
         "risk_management": {
             "margin_buffer_percentage": float(os.getenv("MARGIN_BUFFER_PERCENTAGE", "20")),
             "liquidation_risk_threshold": float(os.getenv("LIQUIDATION_RISK_THRESHOLD", "80")),
+            # Emergency portfolio stop: close all positions if portfolio loss exceeds this percent
+            # Loss is computed vs total capital_at_risk across positions.
+            "emergency_portfolio_loss_pct": float(os.getenv("EMERGENCY_PORTFOLIO_LOSS_PCT", "10.0")),
         },
         
         # Leverage Management Configuration
@@ -228,11 +225,6 @@ def load_config() -> Dict[str, Any]:
                 "extreme_return_threshold": float(os.getenv("MOMENTUM_EXTREME_THRESHOLD", "0.5")),
                 "cache_ttl_hours": int(os.getenv("MOMENTUM_CACHE_TTL_HOURS", "1")),
             },
-        },
-        
-        # Database Configuration
-        "database": {
-            "url": os.getenv("DATABASE_URL", "sqlite:///trading_bot.db"),
         },
         
         # Logging Configuration
@@ -342,10 +334,6 @@ def validate_config(config: Dict[str, Any]) -> bool:
         
         if config['trading']['max_position_size_percentage'] <= 0 or config['trading']['max_position_size_percentage'] > 100:
             print("ERROR: Max position size percentage must be between 0 and 100")
-            return False
-        
-        if config['trading']['risk_percentage'] <= 0 or config['trading']['risk_percentage'] > 100:
-            print("ERROR: Risk percentage must be between 0 and 100")
             return False
         
         # Note: Strategy timeframes are auto-selected per strategy

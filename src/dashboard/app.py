@@ -242,8 +242,8 @@ def _format_position(position) -> Dict[str, Any]:
             if margin_info:
                 liquidation_price = margin_info.get('liquidation_price')
                 margin_used = margin_info.get('margin_used')
-        except Exception:
-            pass  # Use None if API call fails
+        except Exception as e:
+            logger.debug(f"Error getting margin info for {position.symbol}: {e}")
     
     return {
         'symbol': position.symbol,
@@ -409,8 +409,8 @@ def _get_current_prices(symbols: List[str]) -> Dict[str, float]:
                 price = _market_api.get_current_price(symbol)
                 if price:
                     prices[symbol] = price
-            except:
-                pass
+            except Exception as e:
+                logger.debug(f"Error getting current price for {symbol}: {e}")
     return prices
 
 
@@ -454,7 +454,7 @@ def _calculate_holding_time(entry_time_str: Optional[str]) -> str:
         entry_time = datetime.fromisoformat(entry_time_str)
         holding = datetime.now() - entry_time
         return _format_holding_time(holding.total_seconds())
-    except:
+    except Exception:
         return "?"
 
 
@@ -466,8 +466,8 @@ def _get_win_rate() -> float:
             if trades:
                 wins = sum(1 for t in trades if t.get('pnl', 0) > 0)
                 return (wins / len(trades)) * 100
-        except:
-            pass
+        except Exception as e:
+            logger.debug(f"Error getting win rate: {e}")
     return 0
 
 
@@ -477,8 +477,8 @@ def _get_total_realized_pnl() -> float:
         try:
             trades = _strategy_manager.performance_tracker.db.get_recent_trades(1000)
             return sum(t.get('pnl', 0) or 0 for t in trades)
-        except:
-            pass
+        except Exception as e:
+            logger.debug(f"Error getting total realized PnL: {e}")
     return 0
 
 
@@ -516,8 +516,8 @@ def _get_trade_stats() -> Dict[str, Any]:
                 stats['losing_trades'] = sum(1 for t in trades if (t.get('pnl') or 0) < 0)
                 if stats['total_trades'] > 0:
                     stats['win_rate'] = (stats['winning_trades'] / stats['total_trades']) * 100
-        except:
-            pass
+        except Exception as e:
+            logger.debug(f"Error getting trade stats: {e}")
     
     return stats
 
@@ -549,8 +549,8 @@ def _get_trades_data(limit: int = 50) -> List[Dict[str, Any]]:
                         holding_seconds = (exit_dt - entry_dt).total_seconds()
                         holding_hours = holding_seconds / 3600
                         holding_time = _format_holding_time(holding_seconds)
-                    except:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"Error calculating holding time for trade {trade.get('symbol')}: {e}")
                 
                 trades.append({
                     'symbol': trade.get('symbol', 'Unknown'),

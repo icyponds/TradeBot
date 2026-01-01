@@ -69,14 +69,12 @@ class BaseStrategy(ABC):
         Returns:
             Position size in base currency
         """
-        # Get maximum position size from config
-        max_position_size_usd = self.config['trading']['max_position_size_usd']
-        max_position_size_percentage = self.config['trading']['max_position_size_percentage']
-        
-        # Calculate position size based on risk
-        position_size = min(risk_amount / (self.config['trading']['risk_percentage'] / 100), max_position_size_usd)
-        
-        return position_size
+        # NOTE: Global "risk_percentage" sizing has been removed in favor of portfolio-based sizing
+        # managed by `PortfolioManager` + account-based max loss enforcement in `StrategyManager`.
+        # Here, `risk_amount` is treated as a USD cap for this position.
+        max_position_size_usd = float(self.config['trading']['max_position_size_usd'])
+        position_size_usd = min(float(risk_amount), max_position_size_usd)
+        return position_size_usd
     
     def calculate_stop_loss(self, entry_price: float, side: str, 
                            signal_context: Dict[str, Any] = None) -> float:
@@ -91,9 +89,9 @@ class BaseStrategy(ABC):
         Returns:
             Stop loss price
         """
-        # Default implementation uses global config
-        # Subclasses should override for strategy-specific logic
-        stop_loss_percentage = self.config['trading']['stop_loss_percentage'] / 100
+        # Default implementation uses a conservative fallback.
+        # Subclasses should override for strategy-specific logic.
+        stop_loss_percentage = 0.05  # 5%
         
         if side == 'buy':
             return entry_price * (1 - stop_loss_percentage)

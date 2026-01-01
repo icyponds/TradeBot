@@ -23,11 +23,12 @@ from src.models.trade import Trade, Position, MultiLegPosition, PositionLeg
 
 # Strategy imports - only used when enabled in config
 STRATEGY_CLASSES = {
-    'moving_average': ('moving_average_strategy', 'MovingAverageStrategy'),
-    'rsi': ('rsi_strategy', 'RSIStrategy'),
-    'bollinger_band': ('bollinger_band_strategy', 'BollingerBandSqueezeStrategy'),
-    'supertrend': ('supertrend_strategy', 'SupertrendStrategy'),
-    'vwap': ('vwap_strategy', 'VWAPStrategy'),
+    # Legacy strategies (kept for experimentation/backwards-compat)
+    'moving_average': ('legacy.moving_average_strategy', 'MovingAverageStrategy'),
+    'rsi': ('legacy.rsi_strategy', 'RSIStrategy'),
+    'bollinger_band': ('legacy.bollinger_band_strategy', 'BollingerBandSqueezeStrategy'),
+    'supertrend': ('legacy.supertrend_strategy', 'SupertrendStrategy'),
+    'vwap': ('legacy.vwap_strategy', 'VWAPStrategy'),
     'stat_arb': ('statistical_arbitrage_strategy', 'StatisticalArbitrageStrategy'),
     'funding_rate_arbitrage': ('funding_rate_arbitrage_strategy', 'FundingRateArbitrageStrategy'),
     'ou_mean_reversion': ('ou_mean_reversion_strategy', 'OUMeanReversionStrategy'),
@@ -116,18 +117,7 @@ class StrategyManager:
         self._price_callbacks = []
         self._last_prices = {}
         
-        # Setup signal handlers for kill switch
-        self._setup_signal_handlers()
-    
-    def _setup_signal_handlers(self):
-        """Setup signal handlers for kill switch functionality."""
-        def signal_handler(signum, frame):
-            self.logger.warning(f"Received signal {signum}, initiating emergency stop...")
-            self.stop(close_positions=True)
-            sys.exit(0)
-        
-        signal.signal(signal.SIGINT, signal_handler)
-        signal.signal(signal.SIGTERM, signal_handler)
+        # Signal handling and shutdown safety is managed by the top-level entrypoint (`src/main.py`).
     
     def _update_account_balance(self):
         """Update account balance and portfolio information."""
@@ -607,9 +597,7 @@ class StrategyManager:
                     self.logger.info(f"Open order: {symbol} {side} {size} @ {price} (ID: {order_id})")
                     
                             # Order timeout and cancellation logic implemented in _cleanup_stale_orders
-            else:
-                # No open orders to monitor
-                pass
+            # No open orders to monitor
                     
         except Exception as e:
             self.logger.error(f"Error monitoring pending orders: {e}")
@@ -625,10 +613,7 @@ class StrategyManager:
         
         # Position monitoring configuration
         position_monitoring_interval = self.config['trading']['position_monitoring_interval']
-        position_timeout_hours = self.config['trading']['position_timeout_hours']
-        max_loss_percentage = self.config['trading']['max_loss_percentage']
-        max_profit_percentage = self.config['trading']['max_profit_percentage']
-        emergency_loss_threshold = self.config['trading']['emergency_loss_threshold']
+        emergency_portfolio_loss_pct = self.config.get('risk_management', {}).get('emergency_portfolio_loss_pct', 10.0)
         
         # Performance reporting interval (every hour)
         performance_report_interval = 3600
@@ -656,9 +641,7 @@ class StrategyManager:
                 if current_time - last_position_monitoring >= position_monitoring_interval:
                     self.logger.debug(f"Running position monitoring check ({len(self.positions)} positions)")
                     self._monitor_and_close_positions(
-                        position_timeout_hours, max_loss_percentage, max_profit_percentage,
-                        emergency_loss_threshold, total_positions_closed, emergency_stops_triggered,
-                        last_emergency_check
+                        emergency_portfolio_loss_pct, total_positions_closed, emergency_stops_triggered, last_emergency_check
                     )
                     last_position_monitoring = current_time
                 
@@ -2853,8 +2836,7 @@ class StrategyManager:
         except Exception as e:
             self.logger.error(f"Error cleaning up open orders: {e}") 
 
-    def _monitor_and_close_positions(self, timeout_hours: float, max_loss_percentage: float, 
-                                   max_profit_percentage: float, emergency_threshold: float,
+    def _monitor_and_close_positions(self, emergency_threshold: float,
                                    total_closed: int, emergency_stops: int, last_emergency_check: int):
         """Monitor positions and close them if they meet closure criteria."""
         try:
@@ -2869,7 +2851,7 @@ class StrategyManager:
                 if not position.current_price:
                     continue
                 
-                close_reason = self._should_close_position(position, timeout_hours, max_loss_percentage, max_profit_percentage)
+                close_reason = self._should_close_position(position)
                 if close_reason:
                     positions_to_close.append((symbol, close_reason))
             
@@ -2899,8 +2881,7 @@ class StrategyManager:
         except Exception as e:
             self.logger.error(f"Error in position monitoring: {e}")
     
-    def _should_close_position(self, position: Position, timeout_hours: float, 
-                             max_loss_percentage: float, max_profit_percentage: float) -> Optional[str]:
+    def _should_close_position(self, position: Position) -> Optional[str]:
         """
         Determine if a position should be closed.
         
@@ -2913,10 +2894,7 @@ class StrategyManager:
         
         Args:
             position: Position to check
-            timeout_hours: (Deprecated, unused) Hours before position timeout
-            max_loss_percentage: Maximum loss percentage (global fallback)
-            max_profit_percentage: Maximum profit percentage
-            
+
         Returns:
             Reason for closure if should close, None otherwise
         """
@@ -3011,19 +2989,6 @@ class StrategyManager:
                 return "take_profit"
             elif position.side == 'short' and position.current_price <= position.take_profit:
                 return "take_profit"
-        
-        # NOTE: Position timeout removed - strategies decide when to exit
-        # Old timeout logic was: if time_open > timeout_hours, return "timeout"
-        
-        # 5. Check loss percentage (additional safety net based on unrealized PnL)
-        if position.unrealized_pnl_percentage:
-            if position.unrealized_pnl_percentage < -max_loss_percentage:
-                return "max_loss"
-        
-        # 6. Check profit percentage (optional - take profit if large gain)
-        if position.unrealized_pnl_percentage:
-            if position.unrealized_pnl_percentage > max_profit_percentage:
-                return "max_profit"
         
         return None
     
