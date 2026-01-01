@@ -53,7 +53,7 @@ class FundingRateArbitrageStrategy(BaseStrategy):
         
         # Position management
         self.max_position_pct = arb_config.get('max_position_pct', 20)    # Max % of portfolio per arb
-        self.min_holding_periods = arb_config.get('min_holding_periods', 1)  # Min funding periods to hold
+        self.min_holding_periods = arb_config.get('min_holding_periods', 4)  # Min 4 hours to cover trading fees
         self.rebalance_threshold = arb_config.get('rebalance_threshold', 0.02)  # Rebalance if delta drifts > 2%
         
         # Funding rate history settings
@@ -71,8 +71,8 @@ class FundingRateArbitrageStrategy(BaseStrategy):
         self._eligible_symbols_last_update: Optional[datetime] = None
         self._eligible_symbols_ttl = timedelta(hours=1)  # Refresh every hour
         
-        # Hyperliquid funding interval (8 hours)
-        self.funding_interval_hours = 8
+        # Hyperliquid funding interval (1 hour - paid at top of each hour)
+        self.funding_interval_hours = 1
         
         self.logger.info(f"Initialized Funding Rate Arbitrage Strategy: "
                         f"entry_threshold={self.entry_threshold:.4%}, "

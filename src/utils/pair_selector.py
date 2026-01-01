@@ -16,6 +16,7 @@ Selection Factors:
 
 import logging
 import time
+import threading
 from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime, timedelta
 from collections import defaultdict
@@ -156,6 +157,13 @@ class DynamicPairSelector:
         self.pair_history = {}
         self.backfill_queue: List[Dict[str, Any]] = []
         self.backfill_symbols_in_queue: set = set()
+        self.last_backfill_time: Optional[datetime] = None
+        
+        # Threading for independent data fetching
+        self._backfill_thread: Optional[threading.Thread] = None
+        self._backfill_running = False
+        self._backfill_lock = threading.Lock()  # Protects backfill_queue access
+        self._data_lock = threading.Lock()  # Protects price_history access
         
         self.logger.info(f"Initialized DynamicPairSelector (Mode: {self.selection_mode.value})")
         self.logger.info(f"  Weights: Liquidity={self.weight_liquidity:.0%}, Volatility={self.weight_volatility:.0%}, "
@@ -464,10 +472,12 @@ class DynamicPairSelector:
         """
         Get price history for a symbol.
         
-        Caches results for efficiency.
+        Caches results for efficiency. Thread-safe.
         """
-        if symbol in self.price_history:
-            return self.price_history[symbol]
+        # Check cache first (thread-safe read)
+        with self._data_lock:
+            if symbol in self.price_history:
+                return self.price_history[symbol]
         
         try:
             # Try to get OHLCV data from market API
@@ -481,7 +491,8 @@ class DynamicPairSelector:
                     df = pd.DataFrame(ohlcv)
                     if 'close' in df.columns:
                         prices = df['close'].astype(float)
-                        self.price_history[symbol] = prices
+                        with self._data_lock:
+                            self.price_history[symbol] = prices
                         return prices
             
             # Fallback: try to get from WebSocket price history
@@ -489,7 +500,8 @@ class DynamicPairSelector:
                 prices = self.market_api.get_price_history(symbol)
                 if prices and len(prices) > 0:
                     price_series = pd.Series(prices)
-                    self.price_history[symbol] = price_series
+                    with self._data_lock:
+                        self.price_history[symbol] = price_series
                     return price_series
             
             return None
@@ -650,6 +662,10 @@ class DynamicPairSelector:
                 if hasattr(self.market_api, 'subscribe_symbol'):
                     self.market_api.subscribe_symbol(symbol)
             
+            # Start background data fetcher if there are queued assets
+            if self.backfill_queue and not self._backfill_running:
+                self.start_background_fetcher()
+            
             return selected_pairs
             
         except Exception as e:
@@ -737,6 +753,10 @@ class DynamicPairSelector:
                 
                 # Use base token name for spot pairs to enable correlation with perps
                 # e.g., "BTC" instead of "@1" - the API can resolve "BTC/USDC" to "@1" for orders
+                # Safely get midPx with fallback to 0 if None
+                mid_px = ctx.get('midPx')
+                mark_price = float(mid_px) if mid_px is not None else 0.0
+                
                 assets.append({
                     'name': base_name,  # Human-readable name (matches perp naming)
                     'display_name': f"{base_name}/{quote_name}",  # Full pair display
@@ -746,7 +766,7 @@ class DynamicPairSelector:
                     'market_type': 'spot',
                     'dex': '',
                     'is_hip3': False,
-                    'markPrice': float(ctx.get('midPx', 0)),
+                    'markPrice': mark_price,
                     'volume24h': volume_24h,
                     'openInterest': 0,  # Spot doesn't have OI
                     'maxLeverage': 1,   # No leverage on spot
@@ -932,14 +952,15 @@ class DynamicPairSelector:
     
     def _rank_and_select_pairs(self, eligible_assets: List[Dict[str, Any]]) -> tuple:
         """
-        Rank eligible assets using sophisticated multi-factor scoring.
+        Rank eligible assets using volume-based ordering with sequential data loading.
         
-        Scoring factors (configurable weights):
-        - Liquidity (25%): OI + Volume + Spread
-        - Volatility (20%): Optimal volatility range
-        - Strategy Fit (25%): Match to active strategies
-        - Diversification (15%): Correlation penalty
-        - Historical Performance (15%): Past trading results
+        Process:
+        1. Rank all perp/HIP-3 assets by 24h volume
+        2. For each asset in order:
+           - Fetch historical OHLCV data
+           - Subscribe to WebSocket streaming
+           - If asset has corresponding spot (or vice versa), also load that pair
+        3. Respect rate limits (~20 OHLCV requests per minute)
         
         Args:
             eligible_assets: List of eligible assets
@@ -950,79 +971,125 @@ class DynamicPairSelector:
         if not eligible_assets:
             return [], {}
         
-        self.logger.info(f"Ranking {len(eligible_assets)} eligible assets (mode: {self.selection_mode.value})")
+        self.logger.info(f"Ranking {len(eligible_assets)} eligible assets by volume")
         
-        # Clear caches for fresh calculation
-        self.price_history.clear()
+        # Stop background fetcher if running (we're doing a fresh scan)
+        if self._backfill_running:
+            self.stop_background_fetcher()
+        
+        # Clear caches for fresh calculation (thread-safe)
+        with self._data_lock:
+            self.price_history.clear()
         self.asset_metrics.clear()
+        with self._backfill_lock:
+            self.backfill_queue.clear()
+            self.backfill_symbols_in_queue.clear()
         
-        # Pre-filter to top N by liquidity to avoid excessive API calls
-        # Sort by a quick liquidity proxy (OI + volume) without needing OHLCV
-        max_to_analyze = min(30, len(eligible_assets))  # Analyze at most 30 assets up front
+        # =====================================================================
+        # STEP 1: Sort ALL assets by 24h volume (descending)
+        # =====================================================================
+        def get_volume(asset):
+            return float(asset.get('volume24h', 0))
         
-        def quick_liquidity_score(asset):
-            oi = float(asset.get('openInterest', 0))
-            vol = float(asset.get('volume24h', 0))
-            return oi + vol
+        sorted_by_volume = sorted(eligible_assets, key=get_volume, reverse=True)
         
-        sorted_by_liquidity = sorted(eligible_assets, key=quick_liquidity_score, reverse=True)
-        assets_to_analyze = sorted_by_liquidity[:max_to_analyze]
-        analyze_symbols = {a.get('name', '') for a in assets_to_analyze}
-        remaining_assets = [a for a in eligible_assets if a.get('name', '') not in analyze_symbols]
+        self.logger.info(f"Top 5 by volume: {[a.get('name', '') for a in sorted_by_volume[:5]]}")
         
-        self.logger.info(f"Pre-filtered to top {len(assets_to_analyze)} assets by liquidity")
+        # =====================================================================
+        # STEP 2: Sequential loading with rate limit awareness
+        # Rate limits: ~1200 weight/min, OHLCV ~1-2 weight each
+        # Safe rate: 30-40 requests per minute = ~1.5-2 seconds between requests
+        # =====================================================================
+        RATE_LIMIT_DELAY = 1.5  # seconds between OHLCV fetches (~40/min)
+        MAX_INITIAL_LOAD = 15   # Load top 15 assets initially (~25 seconds)
         
-        # Pre-fetch price histories with rate limiting (batching to avoid 429/circuit breaker)
-        self.logger.debug("Pre-fetching price histories (with rate limiting)...")
-        batch_size = 2
-        delay_between_batches = 2.0  # seconds
-        prefetch_errors = 0
-        max_prefetch_errors = 5
-        for i, asset in enumerate(assets_to_analyze):
+        max_pairs = self._get_max_pairs_to_trade()
+        loaded_symbols = set()  # Track what we've loaded
+        assets_with_data = []   # Assets that have OHLCV data ready
+        
+        self.logger.info(f"Loading top {MAX_INITIAL_LOAD} assets by volume (~{MAX_INITIAL_LOAD * 1.5:.0f}s), then strategies start...")
+        
+        for i, asset in enumerate(sorted_by_volume):
             symbol = asset.get('name', '')
+            market_type = asset.get('market_type', 'perp')
+            
+            if not symbol or symbol in loaded_symbols:
+                continue
+            
+            # Stop initial loading after MAX_INITIAL_LOAD, queue rest for backfill
+            if len(loaded_symbols) >= MAX_INITIAL_LOAD:
+                # Queue remaining for staged backfill (thread-safe)
+                remaining = [a for a in sorted_by_volume[i:] if a.get('name', '') not in loaded_symbols]
+                with self._backfill_lock:
+                    for rem_asset in remaining:
+                        sym = rem_asset.get('name', '')
+                        if sym and sym not in self.backfill_symbols_in_queue:
+                            self.backfill_queue.append(rem_asset)
+                            self.backfill_symbols_in_queue.add(sym)
+                self.logger.info(f"Queued {len(remaining)} assets for background fetching")
+                break
+            
+            # Load this asset's historical data
             try:
+                self.logger.info(f"  [{len(loaded_symbols)+1}/{MAX_INITIAL_LOAD}] Loading {symbol} ({market_type})...")
                 self._get_price_history(symbol)
+                loaded_symbols.add(symbol)
+                assets_with_data.append(asset)
+                
+                # Subscribe to WebSocket for real-time updates
+                if hasattr(self.market_api, 'subscribe_symbol'):
+                    self.market_api.subscribe_symbol(symbol)
+                
+                # STEP 2a: If this is a perp with a corresponding spot, also load the spot
+                # Use a separate key for spot to handle direct-match tokens (HYPE perp -> HYPE spot)
+                if market_type == 'perp':
+                    spot_token = self.market_api.get_spot_token_for_perp(symbol) if hasattr(self.market_api, 'get_spot_token_for_perp') else None
+                    spot_key = f"{spot_token}_spot" if spot_token else None  # Unique key for spot
+                    if spot_token and spot_key not in loaded_symbols:
+                        self.logger.info(f"       -> Also loading spot: {spot_token}/USDC")
+                        try:
+                            time.sleep(RATE_LIMIT_DELAY)
+                            self._get_price_history(spot_token)
+                            loaded_symbols.add(spot_key)  # Use spot_key to track
+                            if hasattr(self.market_api, 'subscribe_symbol'):
+                                self.market_api.subscribe_symbol(spot_token)
+                        except Exception as e:
+                            self.logger.warning(f"       -> Failed to load spot {spot_token}: {e}")
+                            # Still subscribe to WebSocket for real-time price
+                            if hasattr(self.market_api, 'subscribe_symbol'):
+                                self.market_api.subscribe_symbol(spot_token)
+                
+                # Rate limit delay before next fetch
+                time.sleep(RATE_LIMIT_DELAY)
+                
             except Exception as e:
                 msg = str(e)
                 if "Circuit breaker is open" in msg or "429" in msg:
-                    prefetch_errors += 1
-                    self.logger.warning(f"Skipping prefetch for {symbol} due to rate limit/circuit breaker; queued for backfill")
-                    # Queue current asset for backfill; continue to next
-                    remaining_assets = [asset] + remaining_assets
-                    if prefetch_errors >= max_prefetch_errors:
-                        self.logger.warning("Prefetch error cap reached; queueing remaining assets and stopping prefetch")
-                        remaining_assets = assets_to_analyze[i+1:] + remaining_assets
-                        break
-                    # Do not retry this symbol further in this cycle; move on
-                    continue
+                    self.logger.warning(f"Rate limit hit at {symbol}, queueing remaining for background fetch...")
+                    # Queue this and remaining for backfill (thread-safe)
+                    remaining = [a for a in sorted_by_volume[i:] if a.get('name', '') not in loaded_symbols]
+                    with self._backfill_lock:
+                        for rem_asset in remaining:
+                            sym = rem_asset.get('name', '')
+                            if sym and sym not in self.backfill_symbols_in_queue:
+                                self.backfill_queue.append(rem_asset)
+                                self.backfill_symbols_in_queue.add(sym)
+                    self.logger.info(f"Queued {len(remaining)} assets for background fetching")
+                    break
                 else:
-                    self.logger.warning(f"Prefetch error for {symbol}: {e}")
-            # Throttle aggressively to stay under rate limits
-            if (i + 1) % batch_size == 0:
-                time.sleep(delay_between_batches)
-
-        # Queue remaining assets for staged backfill (processed gradually each scan)
-        if remaining_assets:
-            queued = 0
-            for asset in remaining_assets:
-                sym = asset.get('name', '')
-                if sym and sym not in self.backfill_symbols_in_queue and sym not in self.price_history:
-                    self.backfill_queue.append(asset)
-                    self.backfill_symbols_in_queue.add(sym)
-                    queued += 1
-            if queued > 0:
-                self.logger.info(f"Queued {queued} assets for staged backfill")
+                    self.logger.warning(f"Error loading {symbol}: {e}")
         
-        # Build correlation matrix
+        self.logger.info(f"Loaded historical data for {len(loaded_symbols)} symbols")
+        
+        # =====================================================================
+        # STEP 3: Build correlation matrix and calculate metrics
+        # =====================================================================
         self._build_correlation_matrix()
         
-        # Use pre-filtered assets for remaining analysis
-        eligible_assets = assets_to_analyze
-        
-        # Calculate metrics for each asset
+        # Calculate metrics for loaded assets
         all_metrics: List[AssetMetrics] = []
         
-        for asset in eligible_assets:
+        for asset in assets_with_data:
             symbol = asset.get('name', '')
             market_type = asset.get('market_type', 'perp')
             is_hip3 = asset.get('is_hip3', False)
@@ -1054,19 +1121,20 @@ class DynamicPairSelector:
             self.asset_metrics[symbol] = metrics
             all_metrics.append(metrics)
         
-        # Sort by initial composite score (without diversification) for greedy selection
+        # Sort by composite score for final selection
         for metrics in all_metrics:
             metrics.composite_score = self._calculate_composite_score(metrics, [])
         
         all_metrics.sort(key=lambda m: m.composite_score, reverse=True)
         
-        # Greedy selection with diversification penalty
-        max_pairs = self._get_max_pairs_to_trade()
+        # =====================================================================
+        # STEP 4: Select top pairs with diversification penalty
+        # =====================================================================
         selected_pairs = []
         pairs_metadata = {}
         
         self.logger.info("=" * 60)
-        self.logger.info("PAIR SELECTION RANKINGS")
+        self.logger.info("PAIR SELECTION RANKINGS (by volume + score)")
         self.logger.info("=" * 60)
         
         for metrics in all_metrics:
@@ -1107,27 +1175,14 @@ class DynamicPairSelector:
             rank = len(selected_pairs)
             self.logger.info(
                 f"Rank {rank}: {metrics.symbol} ({type_label}) | "
-                f"Score: {metrics.composite_score:.3f}"
-            )
-            self.logger.info(
-                f"        Liq: {metrics.liquidity_score:.2f} | "
-                f"Vol: {metrics.volatility_score:.2f} ({metrics.volatility*100:.1f}%) | "
-                f"Strat: {metrics.strategy_fit_score:.2f} | "
-                f"Div: {metrics.diversification_score:.2f} | "
-                f"Hist: {metrics.historical_perf_score:.2f}"
-            )
-            self.logger.info(
-                f"        OI: ${metrics.open_interest:,.0f} | "
-                f"Vol24h: ${metrics.volume_24h:,.0f} | "
-                f"Momentum: {metrics.momentum_score:.2f} | "
-                f"MeanRev: {metrics.mean_reversion_score:.2f}"
+                f"Score: {metrics.composite_score:.3f} | Vol24h: ${metrics.volume_24h:,.0f}"
             )
         
         self.logger.info("=" * 60)
         self.logger.info(f"Selected {len(selected_pairs)} pairs for trading")
         
-        # Process staged backfill queue in small batches to avoid rate limits
-        self._process_backfill_queue()
+        if self.backfill_queue:
+            self.logger.info(f"Backfill queue: {len(self.backfill_queue)} assets will load gradually while strategies run")
         
         return selected_pairs, pairs_metadata
     
@@ -1150,12 +1205,157 @@ class DynamicPairSelector:
         """
         Get currently selected trading pairs.
         
+        Data fetching runs independently in a background thread.
+        This method returns immediately with whatever pairs are available.
+        
         Returns:
             List of current trading pairs
         """
         if self.should_rescan():
             return self.scan_and_select_pairs()
         return self.selected_pairs
+    
+    def start_background_fetcher(self):
+        """Start the background data fetching thread."""
+        if self._backfill_thread is not None and self._backfill_thread.is_alive():
+            self.logger.debug("Background fetcher already running")
+            return
+        
+        self._backfill_running = True
+        self._backfill_thread = threading.Thread(
+            target=self._background_data_fetcher,
+            name="DataFetcher",
+            daemon=True
+        )
+        self._backfill_thread.start()
+        self.logger.info("Started background data fetcher thread")
+    
+    def stop_background_fetcher(self):
+        """Stop the background data fetching thread."""
+        self._backfill_running = False
+        if self._backfill_thread is not None:
+            self._backfill_thread.join(timeout=5.0)
+            self._backfill_thread = None
+        self.logger.info("Stopped background data fetcher thread")
+    
+    def _background_data_fetcher(self):
+        """
+        Background thread that continuously fetches data for queued assets.
+        
+        Runs independently of the strategy loop, respecting rate limits.
+        """
+        RATE_LIMIT_DELAY = 1.5  # ~40 requests per minute
+        
+        try:
+            self.logger.info("Background data fetcher started")
+        except Exception as log_error:
+            print(f"[BackgroundFetcher] Log error: {log_error}")
+        
+        assets_loaded = 0
+        
+        while self._backfill_running:
+            try:
+                # Get next asset from queue (thread-safe)
+                asset = None
+                with self._backfill_lock:
+                    if self.backfill_queue:
+                        asset = self.backfill_queue.pop(0)
+                
+                if asset is None:
+                    # Queue empty, sleep and check again
+                    time.sleep(1.0)
+                    continue
+                
+                sym = asset.get('name', '')
+                market_type = asset.get('market_type', 'perp')
+                
+                if not sym:
+                    continue
+                
+                # Skip if already loaded
+                with self._data_lock:
+                    if sym in self.price_history:
+                        with self._backfill_lock:
+                            self.backfill_symbols_in_queue.discard(sym)
+                        continue
+                
+                # Fetch data for this asset
+                try:
+                    assets_loaded += 1
+                    # Log every 10 assets or first few for visibility
+                    if assets_loaded <= 3 or assets_loaded % 10 == 0:
+                        self.logger.info(f"[BackgroundFetcher] Loading {sym} ({market_type})... [{assets_loaded} loaded]")
+                    else:
+                        self.logger.debug(f"[BackgroundFetcher] Loading {sym} ({market_type})...")
+                    
+                    self._get_price_history(sym)
+                    
+                    with self._backfill_lock:
+                        self.backfill_symbols_in_queue.discard(sym)
+                    
+                    # Subscribe to WebSocket
+                    if hasattr(self.market_api, 'subscribe_symbol'):
+                        self.market_api.subscribe_symbol(sym)
+                    
+                    # Also load corresponding spot if this is a perp
+                    # For direct-match tokens (HYPE perp -> HYPE spot), always try to load spot
+                    if market_type == 'perp':
+                        spot_token = self.market_api.get_spot_token_for_perp(sym) if hasattr(self.market_api, 'get_spot_token_for_perp') else None
+                        # For U-prefix tokens, check if spot is already loaded
+                        # For direct-match tokens (sym == spot_token), always load spot data
+                        with self._data_lock:
+                            is_direct_match = (spot_token == sym) if spot_token else False
+                            spot_already_loaded = (not is_direct_match) and (spot_token in self.price_history) if spot_token else True
+                        
+                        if spot_token and not spot_already_loaded:
+                            time.sleep(RATE_LIMIT_DELAY)
+                            try:
+                                self._get_price_history(spot_token)
+                                if hasattr(self.market_api, 'subscribe_symbol'):
+                                    self.market_api.subscribe_symbol(spot_token)
+                                self.logger.debug(f"[BackgroundFetcher] Loaded spot {spot_token}/USDC")
+                            except Exception as e:
+                                self.logger.warning(f"[BackgroundFetcher] Failed spot {spot_token}: {e}")
+                                # Still subscribe to WebSocket
+                                if hasattr(self.market_api, 'subscribe_symbol'):
+                                    self.market_api.subscribe_symbol(spot_token)
+                    
+                    # Rate limit delay
+                    time.sleep(RATE_LIMIT_DELAY)
+                    
+                except Exception as e:
+                    msg = str(e)
+                    if "Circuit breaker is open" in msg or "429" in msg:
+                        self.logger.warning(f"[BackgroundFetcher] Rate limit at {sym}, waiting 10s...")
+                        # Put back at end of queue
+                        with self._backfill_lock:
+                            self.backfill_queue.append(asset)
+                        time.sleep(10.0)  # Wait longer on rate limit
+                    else:
+                        self.logger.warning(f"[BackgroundFetcher] Error for {sym}: {e}")
+                        with self._backfill_lock:
+                            self.backfill_symbols_in_queue.discard(sym)
+                        time.sleep(RATE_LIMIT_DELAY)
+                        
+            except Exception as e:
+                self.logger.error(f"[BackgroundFetcher] Unexpected error: {e}")
+                time.sleep(5.0)
+        
+        self.logger.info("Background data fetcher stopped")
+    
+    def get_backfill_status(self) -> Dict[str, Any]:
+        """Get status of the background data fetcher."""
+        with self._backfill_lock:
+            queue_size = len(self.backfill_queue)
+        with self._data_lock:
+            loaded_count = len(self.price_history)
+        
+        return {
+            'running': self._backfill_running,
+            'queue_size': queue_size,
+            'loaded_assets': loaded_count,
+            'thread_alive': self._backfill_thread.is_alive() if self._backfill_thread else False
+        }
     
     def update_pair_performance(self, symbol: str, pnl: float):
         """
@@ -1256,33 +1456,6 @@ class DynamicPairSelector:
         """Get only native (non-HIP-3) perpetual pairs."""
         return self.get_pairs_by_type(market_type='perp', is_hip3=False)
 
-    def _process_backfill_queue(self, batch_size: int = 5, delay_between_batches: float = 1.0):
-        """
-        Gradually backfill historical data for queued assets to avoid rate limits.
-        
-        Args:
-            batch_size: How many assets to process per invocation
-            delay_between_batches: Delay in seconds after each batch
-        """
-        if not self.backfill_queue:
-            return
-        
-        to_process = min(batch_size, len(self.backfill_queue))
-        processed = 0
-        for i in range(to_process):
-            asset = self.backfill_queue.pop(0)
-            sym = asset.get('name', '')
-            if not sym:
-                continue
-            self._get_price_history(sym)
-            processed += 1
-            if processed % batch_size == 0:
-                time.sleep(delay_between_batches)
-        
-        # Rebuild queue symbol set
-        self.backfill_symbols_in_queue = {a.get('name', '') for a in self.backfill_queue if a.get('name', '')}
-        
-        self.logger.info(f"Backfill processed {processed} assets; {len(self.backfill_queue)} remaining in queue")
     
     def get_available_markets_summary(self) -> Dict[str, Any]:
         """

@@ -1129,14 +1129,30 @@ class HyperliquidAPI:
         """
         Get OHLCV candlestick data with in-memory rolling cache.
         Seed once, then serve from cache (updated via ticks).
+        
+        Handles both perp symbols (e.g., "BTC") and spot tokens (e.g., "UBTC").
+        Spot tokens are automatically converted to their API name (e.g., "@109").
         """
-        # Try cache first
+        # Try cache first (always use human-readable symbol for cache key)
         cached_bars = self.ohlcv_cache.get(symbol, timeframe)
         if cached_bars and len(cached_bars) >= min(limit, self.ohlcv_cache.maxlen[symbol][timeframe]):
             df = pd.DataFrame(cached_bars)
             df['timestamp'] = pd.to_datetime(df['time'], unit='s')
             df.set_index('timestamp', inplace=True)
             return df.tail(limit)
+        
+        # Determine the API symbol to use for fetching
+        # Perp symbols work directly, spot tokens need conversion to @N format
+        api_symbol = symbol
+        is_spot = False
+        
+        # Check if this might be a spot token (not a perp symbol)
+        # Spot tokens typically have names like "UBTC", "HYPE", "PURR" without being perps
+        spot_api_name = self.get_spot_api_name(symbol)
+        if spot_api_name:
+            api_symbol = spot_api_name
+            is_spot = True
+            self.logger.debug(f"Spot token {symbol} -> API name {api_symbol}")
         
         # Otherwise fetch once, seed cache
         def _fetch():
@@ -1152,7 +1168,7 @@ class HyperliquidAPI:
             end_time = int(time.time() * 1000)
             start_time = end_time - (limit * interval_ms)
             
-            candles = self.info.candles_snapshot(symbol, timeframe, start_time, end_time)
+            candles = self.info.candles_snapshot(api_symbol, timeframe, start_time, end_time)
             if not candles:
                 return None
             
@@ -1166,7 +1182,7 @@ class HyperliquidAPI:
                     'close': float(candle['c']),
                     'volume': float(candle['v']),
                 })
-            # Seed cache
+            # Seed cache using the original symbol (human-readable) as key
             self.ohlcv_cache.seed(symbol, timeframe, bars, maxlen=max(limit, 300))
             df = pd.DataFrame(bars)
             df['timestamp'] = pd.to_datetime(df['time'], unit='s')
@@ -2154,6 +2170,42 @@ class HyperliquidAPI:
             return (result[0], result[1]) if len(result) >= 2 else None
         except Exception as e:
             self.logger.error(f"Error fetching spot meta and ctxs: {e}")
+            return None
+    
+    def get_spot_api_name(self, base_token: str, quote_token: str = "USDC") -> Optional[str]:
+        """
+        Convert a human-readable spot token name to its API name for OHLCV fetching.
+        
+        The candleSnapshot endpoint requires the internal API name (e.g., "@109")
+        not the human-readable token name (e.g., "UBTC").
+        
+        Args:
+            base_token: Human-readable token name (e.g., "UBTC", "HYPE")
+            quote_token: Quote token (default "USDC")
+            
+        Returns:
+            API name (e.g., "@109") or None if not found
+        """
+        try:
+            spot_meta = self.get_spot_meta()
+            if not spot_meta:
+                return None
+            
+            token_list = spot_meta.get('tokens', [])
+            
+            for pair in spot_meta.get('universe', []):
+                tokens = pair.get('tokens', [])
+                if len(tokens) >= 2:
+                    base_idx, quote_idx = tokens[0], tokens[1]
+                    if base_idx < len(token_list) and quote_idx < len(token_list):
+                        pair_base = token_list[base_idx].get('name', '')
+                        pair_quote = token_list[quote_idx].get('name', '')
+                        if pair_base == base_token and pair_quote == quote_token:
+                            return pair.get('name')  # Returns "@109" format
+            
+            return None
+        except Exception as e:
+            self.logger.error(f"Error getting spot API name for {base_token}: {e}")
             return None
     
     def get_spot_price(self, base_token: str, quote_token: str = "USDC") -> Optional[float]:

@@ -149,17 +149,20 @@ class OUMeanReversionStrategy(BaseStrategy):
                             f"(half_life={ou_params.half_life:.1f}h, theta={ou_params.theta:.4f})")
             return None
         
-        # Calculate current deviation from mean
-        deviation = current_price - ou_params.mu
+        # Calculate Z-score in LOG space (since OU params are estimated on log prices)
+        # log(current_price) - log(mu) = log(current_price / mu)
+        log_current = np.log(current_price)
+        log_mu = np.log(ou_params.mu)
+        log_deviation = log_current - log_mu
         
-        # Calculate Z-score (deviation in standard deviations)
         # For OU process, stationary std = sigma / sqrt(2 * theta)
+        # This is in log space since sigma was estimated on log returns
         stationary_std = ou_params.sigma / np.sqrt(2 * ou_params.theta) if ou_params.theta > 0 else ou_params.sigma
         
         if stationary_std == 0:
             return None
         
-        zscore = deviation / stationary_std
+        zscore = log_deviation / stationary_std
         
         # Check for existing position
         has_position = symbol in self.active_positions

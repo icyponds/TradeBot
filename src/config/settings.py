@@ -204,7 +204,7 @@ def load_config() -> Dict[str, Any]:
             "ou_mean_reversion": {
                 "zscore_entry": float(os.getenv("OU_ZSCORE_ENTRY", "1.5")),  # Lowered from 2.0
                 "zscore_exit": float(os.getenv("OU_ZSCORE_EXIT", "0.3")),    # Lowered from 0.5
-                "half_life_max_hours": float(os.getenv("OU_HALF_LIFE_MAX", "24")),
+                "half_life_max_hours": float(os.getenv("OU_HALF_LIFE_MAX", "48")),
                 "half_life_min_hours": float(os.getenv("OU_HALF_LIFE_MIN", "1")),
                 "min_mean_reversion_speed": float(os.getenv("OU_MIN_THETA", "0.1")),
                 "estimation_lookback": int(os.getenv("OU_ESTIMATION_LOOKBACK", "100")),

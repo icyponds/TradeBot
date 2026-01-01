@@ -139,9 +139,8 @@ class StatisticalArbitrageStrategy(BaseStrategy):
             
         # Fetch data for correlated symbol
         # Use the same timeframe and limit as the primary symbol
-        # We can infer timeframe/limit from the config or the ohlcv length
         limit = len(ohlcv)
-        timeframe = self.config['strategies']['timeframe']
+        timeframe = self.timeframe  # Use strategy's preferred timeframe (15m)
         
         try:
             ohlcv_pair = self.market_api.get_ohlcv(correlated_symbol, timeframe, limit)

@@ -153,24 +153,18 @@ class StrategyManager:
     
     def _get_execution_interval(self) -> int:
         """
-        Calculate execution interval based on the fastest strategy's timeframe.
+        Get execution interval for strategy checking.
         
-        Uses the minimum timeframe across all strategies to ensure no strategy
-        misses its execution window.
+        Uses a fixed 15-second interval to ensure strategies can react
+        quickly to opportunities. OHLCV data is continuously updated
+        via WebSocket, so frequent checks don't require additional API calls.
         
         Returns:
             Execution interval in seconds
         """
-        if not self.strategies:
-            return 60 * 60  # Default 1 hour
-        
-        # Get minimum execution interval across all strategies
-        min_interval = min(
-            strategy.execution_interval_seconds 
-            for strategy in self.strategies.values()
-        )
-        
-        return min_interval
+        # Fixed 15-second interval for responsive opportunity detection
+        # WebSocket keeps price data updated in real-time
+        return 15
     
     def _calculate_signal_strength(self, ohlcv: pd.DataFrame, strategy_name: str) -> float:
         """
@@ -674,11 +668,14 @@ class StrategyManager:
                 
                 self.logger.info(f"Analyzing {len(trading_pairs)} trading pairs")
                 
-                # Analyze each symbol
+                # Analyze each symbol (per-symbol strategies)
                 for symbol in trading_pairs:
                     if not self.is_running:
                         break
                     self._analyze_symbol(symbol)
+                
+                # Run cross-sectional strategies (portfolio-level)
+                self._run_portfolio_strategies(trading_pairs)
                 
                 # Update position prices and display PnL
                 self.update_position_prices()
@@ -818,6 +815,57 @@ class StrategyManager:
         except Exception as e:
             self.logger.error(f"Error analyzing {symbol}: {e}")
     
+    def _run_portfolio_strategies(self, trading_pairs: List[str]):
+        """
+        Run cross-sectional/portfolio-level strategies.
+        
+        These strategies analyze ALL symbols at once rather than per-symbol.
+        """
+        try:
+            # Momentum Factor Strategy
+            if 'momentum_factor' in self.strategies:
+                momentum_strategy = self.strategies['momentum_factor']
+                
+                if not self.strategy_selector.is_strategy_enabled('momentum_factor'):
+                    return
+                
+                # Generate portfolio-level signals
+                signals = momentum_strategy.generate_portfolio_signals(trading_pairs)
+                
+                if signals:
+                    self.logger.info(f"Momentum strategy generated {len(signals)} rebalance signals")
+                    
+                    for signal in signals:
+                        symbol = signal.get('symbol')
+                        action = signal.get('signal')  # 'buy' or 'sell'
+                        reason = signal.get('reason', '')
+                        
+                        self.logger.info(f"Momentum signal: {action.upper()} {symbol} - {reason}")
+                        
+                        # Execute the signal
+                        # Get current price
+                        market_data = self.market_api.get_market_data(symbol)
+                        if not market_data:
+                            continue
+                        
+                        current_price = market_data['current_price']
+                        
+                        # Get OHLCV for position sizing calculations
+                        ohlcv = self.market_api.get_ohlcv(symbol, momentum_strategy.timeframe, self.ohlcv_limit)
+                        if ohlcv is None:
+                            continue
+                        
+                        # Check if we should execute
+                        should_execute = self._should_execute_signal(
+                            symbol, signal, current_price, ohlcv, 'momentum_factor'
+                        )
+                        
+                        if should_execute:
+                            self._execute_trade(symbol, signal, current_price, 'momentum_factor', ohlcv)
+                            
+        except Exception as e:
+            self.logger.error(f"Error running portfolio strategies: {e}")
+    
     def _execute_strategy(self, symbol: str, strategy_name: str, strategy, ohlcv: pd.DataFrame, current_price: float):
         """Execute a single strategy."""
         try:
@@ -835,6 +883,14 @@ class StrategyManager:
             elif strategy_name == 'funding_rate_arbitrage':
                 # Funding Rate Arbitrage needs funding rate data and multi-leg position context
                 signal = self._generate_funding_arb_signal(symbol, strategy)
+            elif strategy_name == 'ou_mean_reversion':
+                # OU Mean Reversion needs symbol context for parameter caching
+                signal = strategy.generate_signal_for_symbol(symbol, ohlcv)
+            elif strategy_name == 'momentum_factor':
+                # Momentum is a cross-sectional strategy that ranks all symbols
+                # It can't generate per-symbol signals - needs portfolio-level rebalancing
+                # TODO: Implement periodic momentum rebalancing via generate_portfolio_signals
+                return
             else:
                 signal = strategy.generate_signal(ohlcv)
             
