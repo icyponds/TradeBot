@@ -19,7 +19,7 @@ from src.utils.portfolio_manager import PortfolioManager
 from src.utils.correlation_manager import CorrelationManager
 from src.utils.performance_tracker import PerformanceTracker
 from .strategy_selector import StrategySelector
-from src.models.trade import Trade, Position
+from src.models.trade import Trade, Position, MultiLegPosition, PositionLeg
 
 # Strategy imports - only used when enabled in config
 STRATEGY_CLASSES = {
@@ -91,7 +91,8 @@ class StrategyManager:
         self.execution_interval = self._get_execution_interval()
         
         # Trading state
-        self.positions = {}
+        self.positions = {}  # Single-leg positions: symbol -> Position
+        self.multi_leg_positions = {}  # Multi-leg positions: position_id -> MultiLegPosition
         self.trades = []
         self.total_trades = 0
         self.total_pnl = 0.0
@@ -816,10 +817,15 @@ class StrategyManager:
                 self.logger.debug(f"Strategy {strategy_name} is disabled by selector, skipping")
                 return
             
-            # Generate signal
+            # Generate signal based on strategy type
+            signal = None
+            
             if strategy_name == 'stat_arb':
                 # Stat Arb needs special handling to fetch correlated pair data
                 signal = strategy.generate_signal_with_symbol(symbol, ohlcv)
+            elif strategy_name == 'funding_rate_arbitrage':
+                # Funding Rate Arbitrage needs funding rate data and multi-leg position context
+                signal = self._generate_funding_arb_signal(symbol, strategy)
             else:
                 signal = strategy.generate_signal(ohlcv)
             
@@ -828,6 +834,12 @@ class StrategyManager:
             
             self.logger.info(f"{strategy_name} signal for {symbol}: {signal['signal']} at {current_price}")
             
+            # Check if this is a multi-leg signal
+            if signal.get('signal_type') == 'multi_leg':
+                self._handle_multi_leg_signal(symbol, signal, current_price, strategy_name, ohlcv)
+                return
+            
+            # Standard single-leg signal handling
             # Get strategy weight from selector
             strategy_weight = self.strategy_selector.get_strategy_weight(strategy_name)
             self.logger.debug(f"Strategy {strategy_name} weight: {strategy_weight:.2f}")
@@ -850,6 +862,305 @@ class StrategyManager:
             self.logger.error(f"Error executing {strategy_name} strategy for {symbol}: {e}")
             import traceback
             self.logger.error(f"Traceback: {traceback.format_exc()}")
+    
+    def _generate_funding_arb_signal(self, symbol: str, strategy) -> Optional[Dict[str, Any]]:
+        """Generate signal for funding rate arbitrage strategy."""
+        try:
+            # Get funding rate from API
+            funding_rate = self.market_api.get_funding_rate(symbol)
+            if funding_rate is None:
+                return None
+            
+            # Update funding cache
+            strategy.update_funding_cache(symbol, funding_rate)
+            funding_history = strategy.get_funding_history(symbol)
+            
+            # Check if we have an existing multi-leg position for this symbol
+            existing_position = self._get_multi_leg_position_for_symbol(symbol)
+            has_position = existing_position is not None
+            position_entry_time = existing_position.entry_time if existing_position else None
+            position_perp_side = None
+            
+            if existing_position:
+                perp_leg = existing_position.get_leg('perp')
+                if perp_leg:
+                    position_perp_side = perp_leg.side
+            
+            # Generate signal
+            return strategy.generate_signal_for_symbol(
+                symbol=symbol,
+                funding_rate=funding_rate,
+                funding_history=funding_history,
+                has_existing_position=has_position,
+                position_entry_time=position_entry_time,
+                position_perp_side=position_perp_side,
+            )
+            
+        except Exception as e:
+            self.logger.error(f"Error generating funding arb signal for {symbol}: {e}")
+            return None
+    
+    def _get_multi_leg_position_for_symbol(self, symbol: str) -> Optional[MultiLegPosition]:
+        """Find a multi-leg position that includes the given symbol."""
+        for position in self.multi_leg_positions.values():
+            if position.primary_symbol == symbol:
+                return position
+        return None
+    
+    def _handle_multi_leg_signal(
+        self, 
+        symbol: str, 
+        signal: Dict[str, Any], 
+        current_price: float,
+        strategy_name: str,
+        ohlcv: pd.DataFrame
+    ):
+        """Handle multi-leg signals (entry or exit)."""
+        action = signal.get('action')
+        
+        if action == 'enter':
+            self._execute_multi_leg_entry(symbol, signal, current_price, strategy_name, ohlcv)
+        elif action == 'exit':
+            self._execute_multi_leg_exit(symbol, signal, strategy_name)
+        else:
+            self.logger.warning(f"Unknown multi-leg action: {action}")
+    
+    def _execute_multi_leg_entry(
+        self, 
+        symbol: str, 
+        signal: Dict[str, Any],
+        current_price: float,
+        strategy_name: str,
+        ohlcv: pd.DataFrame
+    ):
+        """Execute a multi-leg position entry with atomic rollback on failure."""
+        try:
+            # Check if we already have a multi-leg position for this symbol
+            if self._get_multi_leg_position_for_symbol(symbol):
+                self.logger.info(f"Already have multi-leg position for {symbol}, skipping")
+                return
+            
+            # Calculate position sizing
+            signal_strength = self._calculate_signal_strength(ohlcv, strategy_name)
+            market_volatility = self._calculate_market_volatility(ohlcv)
+            available_capital = self.portfolio_manager.calculate_available_capital_for_trading()
+            
+            position_size, margin_required, leverage = self.leverage_manager.calculate_leveraged_position_size(
+                symbol, current_price, available_capital, strategy_name, signal_strength, market_volatility
+            )
+            
+            if position_size <= 0 or margin_required <= 0:
+                self.logger.warning(f"Invalid position size for multi-leg entry: {symbol}")
+                return
+            
+            # Check if we can open the position
+            if not self.leverage_manager.can_open_position(symbol, margin_required, available_capital):
+                self.logger.info(f"Cannot open multi-leg position for {symbol}: insufficient margin")
+                return
+            
+            self.logger.info(f"Executing multi-leg entry for {symbol}: {len(signal['legs'])} legs, size={position_size:.6f}")
+            
+            # Execute legs atomically
+            legs = signal.get('legs', [])
+            executed_legs: List[PositionLeg] = []
+            is_atomic = signal.get('atomic', True)
+            
+            for i, leg_spec in enumerate(legs):
+                leg_symbol = leg_spec['symbol']
+                leg_market_type = leg_spec['market_type']
+                leg_order_side = leg_spec['order_side']
+                leg_reduce_only = leg_spec.get('reduce_only', False)
+                
+                self.logger.info(f"  Leg {i+1}/{len(legs)}: {leg_order_side} {position_size} {leg_symbol} ({leg_market_type})")
+                
+                # Execute the leg
+                result = self.market_api.execute_order(
+                    symbol=leg_symbol,
+                    side=leg_order_side,
+                    size=position_size,
+                    reduce_only=leg_reduce_only,
+                    urgency="normal",
+                    market_type=leg_market_type,
+                )
+                
+                if result and result.get('filled_size', 0) > 0:
+                    # Leg executed successfully
+                    executed_legs.append(PositionLeg(
+                        symbol=leg_symbol,
+                        market_type=leg_market_type,
+                        side=leg_spec['side'],
+                        size=result['filled_size'],
+                        entry_price=result['avg_fill_price'],
+                        order_id=result.get('order_id'),
+                    ))
+                    self.logger.info(f"    ✓ Filled: {result['filled_size']:.6f} @ {result['avg_fill_price']:.6f}")
+                else:
+                    # Leg failed
+                    self.logger.error(f"    ✗ Failed to execute leg: {leg_symbol}")
+                    
+                    if is_atomic and executed_legs:
+                        # Unwind previously executed legs
+                        self._unwind_executed_legs(executed_legs)
+                    return
+            
+            # All legs executed successfully - create multi-leg position
+            position_id = f"{strategy_name}_{symbol}_{int(datetime.now().timestamp() * 1000)}"
+            
+            multi_leg_position = MultiLegPosition(
+                position_id=position_id,
+                strategy=strategy_name,
+                entry_time=datetime.now(),
+                legs=executed_legs,
+                capital_at_risk=margin_required,
+                metadata=signal.get('metadata', {}),
+            )
+            
+            self.multi_leg_positions[position_id] = multi_leg_position
+            
+            # Record in leverage manager
+            self.leverage_manager.record_position(
+                symbol, 'multi_leg', position_size, current_price, leverage, margin_required
+            )
+            
+            # Save positions
+            self.save_positions_to_file()
+            
+            self.logger.info(f"✅ Multi-leg position opened: {position_id}")
+            self.logger.info(f"   Net delta: {multi_leg_position.net_delta:.6f}")
+            self.logger.info(f"   Total notional: ${multi_leg_position.total_notional:.2f}")
+            
+        except Exception as e:
+            self.logger.error(f"Error executing multi-leg entry for {symbol}: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+    
+    def _execute_multi_leg_exit(self, symbol: str, signal: Dict[str, Any], strategy_name: str):
+        """Execute a multi-leg position exit."""
+        try:
+            # Find the position to close
+            position = self._get_multi_leg_position_for_symbol(symbol)
+            if not position:
+                self.logger.warning(f"No multi-leg position found for {symbol}")
+                return
+            
+            self.logger.info(f"Executing multi-leg exit for {symbol}: {len(position.legs)} legs")
+            
+            urgency = signal.get('urgency', 'normal')
+            legs_spec = signal.get('legs', [])
+            
+            # Close each leg
+            exit_results = []
+            for i, leg in enumerate(position.legs):
+                # Find corresponding spec or derive from position
+                order_side = 'sell' if leg.side == 'long' else 'buy'
+                reduce_only = leg.market_type == 'perp'
+                
+                # Check if there's a spec override
+                for spec in legs_spec:
+                    if spec.get('market_type') == leg.market_type:
+                        order_side = spec.get('order_side', order_side)
+                        reduce_only = spec.get('reduce_only', reduce_only)
+                        break
+                
+                self.logger.info(f"  Closing leg {i+1}/{len(position.legs)}: {order_side} {leg.size} {leg.symbol}")
+                
+                result = self.market_api.execute_order(
+                    symbol=leg.symbol,
+                    side=order_side,
+                    size=leg.size,
+                    reduce_only=reduce_only,
+                    urgency=urgency,
+                    market_type=leg.market_type,
+                )
+                
+                if result and result.get('filled_size', 0) > 0:
+                    exit_results.append({
+                        'leg': leg,
+                        'exit_price': result['avg_fill_price'],
+                        'filled_size': result['filled_size'],
+                    })
+                    self.logger.info(f"    ✓ Closed: {result['filled_size']:.6f} @ {result['avg_fill_price']:.6f}")
+                else:
+                    self.logger.error(f"    ✗ Failed to close leg: {leg.symbol}")
+            
+            # Calculate P&L
+            total_pnl = 0.0
+            for result in exit_results:
+                leg = result['leg']
+                exit_price = result['exit_price']
+                price_diff = exit_price - leg.entry_price
+                if leg.side == 'short':
+                    price_diff = -price_diff
+                leg_pnl = price_diff * leg.size
+                total_pnl += leg_pnl
+            
+            # Record trade in performance tracker
+            self.performance_tracker.record_trade_from_position(
+                symbol=position.primary_symbol,
+                strategy=strategy_name,
+                side='multi_leg',
+                entry_price=sum(leg.entry_price * leg.size for leg in position.legs) / position.total_notional if position.total_notional > 0 else 0,
+                exit_price=sum(r['exit_price'] * r['filled_size'] for r in exit_results) / sum(r['filled_size'] for r in exit_results) if exit_results else 0,
+                size=sum(r['filled_size'] for r in exit_results),
+                entry_time=position.entry_time,
+                exit_time=datetime.now(),
+                capital_at_risk=position.capital_at_risk or 0,
+                exit_reason=signal.get('reason', 'signal'),
+            )
+            
+            # Close position in leverage manager
+            self.leverage_manager.close_position(position.primary_symbol, 0)  # Price not needed for tracking
+            
+            # Remove from active positions
+            del self.multi_leg_positions[position.position_id]
+            
+            # Update stats
+            self.total_pnl += total_pnl
+            self.total_trades += 1
+            if total_pnl > 0:
+                self.winning_trades += 1
+            
+            # Update pair selector performance
+            self.pair_selector.update_pair_performance(position.primary_symbol, total_pnl)
+            
+            # Save positions
+            self.save_positions_to_file()
+            
+            self.logger.info(f"✅ Multi-leg position closed: {position.position_id}")
+            self.logger.info(f"   P&L: ${total_pnl:.2f}")
+            
+        except Exception as e:
+            self.logger.error(f"Error executing multi-leg exit for {symbol}: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+    
+    def _unwind_executed_legs(self, executed_legs: List[PositionLeg]):
+        """Unwind executed legs on failure (atomic rollback)."""
+        self.logger.warning(f"Unwinding {len(executed_legs)} executed legs due to failure")
+        
+        for leg in executed_legs:
+            try:
+                # Determine opposite side
+                unwind_side = 'sell' if leg.side == 'long' else 'buy'
+                
+                self.logger.info(f"  Unwinding: {unwind_side} {leg.size} {leg.symbol}")
+                
+                result = self.market_api.execute_order(
+                    symbol=leg.symbol,
+                    side=unwind_side,
+                    size=leg.size,
+                    reduce_only=leg.market_type == 'perp',
+                    urgency="high",
+                    market_type=leg.market_type,
+                )
+                
+                if result and result.get('filled_size', 0) > 0:
+                    self.logger.info(f"    ✓ Unwound successfully")
+                else:
+                    self.logger.error(f"    ✗ Failed to unwind - manual intervention required!")
+                    
+            except Exception as e:
+                self.logger.error(f"    ✗ Error unwinding leg: {e}")
     
     def _should_execute_signal(self, symbol: str, signal: Dict[str, Any], current_price: float, 
                               ohlcv: pd.DataFrame, strategy_name: str) -> bool:
@@ -1492,6 +1803,7 @@ class StrategyManager:
 
     def save_positions_to_file(self):
         """Save current positions to a JSON file."""
+        # Single-leg positions
         positions_data = {}
         for symbol, position in self.positions.items():
             positions_data[symbol] = {
@@ -1502,13 +1814,25 @@ class StrategyManager:
                 'strategy': position.strategy,
                 'stop_loss': position.stop_loss,
                 'take_profit': position.take_profit,
-                'capital_at_risk': position.capital_at_risk, # Save capital at risk
+                'capital_at_risk': position.capital_at_risk,
             }
+        
+        # Multi-leg positions
+        multi_leg_data = {}
+        for position_id, position in self.multi_leg_positions.items():
+            multi_leg_data[position_id] = position.to_dict()
+        
+        all_data = {
+            'single_leg': positions_data,
+            'multi_leg': multi_leg_data,
+        }
         
         try:
             with open('positions.json', 'w') as f:
-                json.dump(positions_data, f, indent=2, default=str)
-            self.logger.info(f"Saved {len(positions_data)} positions to positions.json")
+                json.dump(all_data, f, indent=2, default=str)
+            total_positions = len(positions_data) + len(multi_leg_data)
+            self.logger.info(f"Saved {total_positions} positions to positions.json "
+                           f"({len(positions_data)} single-leg, {len(multi_leg_data)} multi-leg)")
         except Exception as e:
             self.logger.error(f"Failed to save positions: {e}")
     
@@ -1516,10 +1840,19 @@ class StrategyManager:
         """Load positions from JSON file."""
         try:
             with open('positions.json', 'r') as f:
-                positions_data = json.load(f)
+                all_data = json.load(f)
             
+            # Handle both old format (just positions) and new format (single_leg + multi_leg)
+            if 'single_leg' in all_data:
+                positions_data = all_data['single_leg']
+                multi_leg_data = all_data.get('multi_leg', {})
+            else:
+                # Old format - all positions are single-leg
+                positions_data = all_data
+                multi_leg_data = {}
+            
+            # Load single-leg positions
             for symbol, pos_data in positions_data.items():
-                # Convert entry_time back to datetime
                 entry_time = datetime.fromisoformat(pos_data['entry_time'])
                 
                 position = Position(
@@ -1531,11 +1864,18 @@ class StrategyManager:
                     strategy=pos_data['strategy'],
                     stop_loss=pos_data.get('stop_loss'),
                     take_profit=pos_data.get('take_profit'),
-                    capital_at_risk=pos_data.get('capital_at_risk'),  # Load capital at risk
+                    capital_at_risk=pos_data.get('capital_at_risk'),
                 )
                 self.positions[symbol] = position
             
-            self.logger.info(f"Loaded {len(positions_data)} positions from positions.json")
+            # Load multi-leg positions
+            for position_id, pos_data in multi_leg_data.items():
+                position = MultiLegPosition.from_dict(pos_data)
+                self.multi_leg_positions[position_id] = position
+            
+            total_loaded = len(positions_data) + len(multi_leg_data)
+            self.logger.info(f"Loaded {total_loaded} positions from positions.json "
+                           f"({len(positions_data)} single-leg, {len(multi_leg_data)} multi-leg)")
             return True
         except FileNotFoundError:
             self.logger.info("No positions.json file found")

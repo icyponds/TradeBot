@@ -2,9 +2,111 @@
 Trade model for representing trading data.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
+
+
+@dataclass
+class PositionLeg:
+    """Represents a single leg of a multi-leg position."""
+    
+    symbol: str
+    market_type: str  # 'perp', 'hip3', or 'spot'
+    side: str  # 'long' or 'short'
+    size: float
+    entry_price: float
+    order_id: Optional[str] = None
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'symbol': self.symbol,
+            'market_type': self.market_type,
+            'side': self.side,
+            'size': self.size,
+            'entry_price': self.entry_price,
+            'order_id': self.order_id,
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'PositionLeg':
+        return cls(
+            symbol=data['symbol'],
+            market_type=data['market_type'],
+            side=data['side'],
+            size=data['size'],
+            entry_price=data['entry_price'],
+            order_id=data.get('order_id'),
+        )
+
+
+@dataclass
+class MultiLegPosition:
+    """
+    Represents a multi-leg position (e.g., funding rate arbitrage with perp + spot).
+    
+    Multi-leg positions are managed as a unit - all legs must be entered/exited together.
+    """
+    
+    position_id: str  # Unique identifier for this multi-leg position
+    strategy: str
+    entry_time: datetime
+    legs: List[PositionLeg] = field(default_factory=list)
+    capital_at_risk: Optional[float] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)  # Strategy-specific data
+    
+    @property
+    def primary_symbol(self) -> str:
+        """Return the primary symbol (first leg's symbol without market suffix)."""
+        if self.legs:
+            symbol = self.legs[0].symbol
+            return symbol.split('/')[0] if '/' in symbol else symbol
+        return ""
+    
+    @property
+    def net_delta(self) -> float:
+        """Calculate net delta across all legs."""
+        delta = 0.0
+        for leg in self.legs:
+            leg_delta = leg.size if leg.side == 'long' else -leg.size
+            delta += leg_delta
+        return delta
+    
+    @property
+    def total_notional(self) -> float:
+        """Calculate total notional value across all legs."""
+        return sum(leg.size * leg.entry_price for leg in self.legs)
+    
+    def get_leg(self, market_type: str) -> Optional[PositionLeg]:
+        """Get leg by market type."""
+        for leg in self.legs:
+            if leg.market_type == market_type:
+                return leg
+        return None
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'position_id': self.position_id,
+            'strategy': self.strategy,
+            'entry_time': self.entry_time.isoformat(),
+            'legs': [leg.to_dict() for leg in self.legs],
+            'capital_at_risk': self.capital_at_risk,
+            'metadata': self.metadata,
+            'primary_symbol': self.primary_symbol,
+            'net_delta': self.net_delta,
+            'total_notional': self.total_notional,
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'MultiLegPosition':
+        return cls(
+            position_id=data['position_id'],
+            strategy=data['strategy'],
+            entry_time=datetime.fromisoformat(data['entry_time']),
+            legs=[PositionLeg.from_dict(leg) for leg in data['legs']],
+            capital_at_risk=data.get('capital_at_risk'),
+            metadata=data.get('metadata', {}),
+        )
 
 
 @dataclass
