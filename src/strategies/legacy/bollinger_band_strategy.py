@@ -6,7 +6,7 @@ import logging
 from typing import Dict, Any, Optional
 import pandas as pd
 import numpy as np
-from .base_strategy import BaseStrategy
+from ..base_strategy import BaseStrategy
 
 
 class BollingerBandSqueezeStrategy(BaseStrategy):
