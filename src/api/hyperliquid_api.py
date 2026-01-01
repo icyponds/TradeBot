@@ -13,6 +13,7 @@ Features:
 import logging
 import time
 import threading
+import math
 from typing import Dict, List, Optional, Any, Callable, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -226,6 +227,70 @@ class TTLCache:
             expired = [k for k, v in self._cache.items() if v.is_expired()]
             for k in expired:
                 del self._cache[k]
+
+
+class OhlcvCache:
+    """
+    In-memory rolling OHLCV cache per symbol/timeframe.
+    Supports seeding from API fetch and incremental updates from ticks.
+    """
+    def __init__(self):
+        self.cache = defaultdict(lambda: defaultdict(lambda: deque()))
+        self.timeframe_seconds = {
+            "1m": 60,
+            "5m": 300,
+            "15m": 900,
+            "30m": 1800,
+            "1h": 3600,
+            "4h": 14400,
+            "1d": 86400,
+        }
+        self.maxlen = defaultdict(lambda: defaultdict(lambda: 300))
+    
+    def seed(self, symbol: str, timeframe: str, bars: list, maxlen: int = 300):
+        if timeframe not in self.timeframe_seconds:
+            return
+        dq = deque(maxlen=maxlen)
+        for bar in bars:
+            dq.append(bar)
+        self.cache[symbol][timeframe] = dq
+        self.maxlen[symbol][timeframe] = maxlen
+    
+    def get(self, symbol: str, timeframe: str):
+        if timeframe not in self.cache.get(symbol, {}):
+            return None
+        return list(self.cache[symbol][timeframe])
+    
+    def ensure_timeframe(self, symbol: str, timeframe: str, maxlen: int):
+        _ = self.cache[symbol][timeframe]
+        self.cache[symbol][timeframe].maxlen = maxlen
+        self.maxlen[symbol][timeframe] = maxlen
+    
+    def _get_bar_key(self, ts: float, timeframe: str) -> Optional[float]:
+        secs = self.timeframe_seconds.get(timeframe)
+        if not secs:
+            return None
+        return math.floor(ts / secs) * secs
+    
+    def update_from_tick(self, symbol: str, price: float, volume: float, ts: float):
+        if symbol not in self.cache:
+            return
+        for timeframe, dq in self.cache[symbol].items():
+            self._update_bar_for_timeframe(timeframe, dq, price, volume, ts)
+    
+    def _update_bar_for_timeframe(self, timeframe: str, dq: deque, price: float, volume: float, ts: float):
+        key = self._get_bar_key(ts, timeframe)
+        if key is None:
+            return
+        if dq and dq[-1].get("time") == key:
+            bar = dq[-1]
+        else:
+            bar = {"time": key, "open": price, "high": price, "low": price, "close": price, "volume": 0.0}
+            dq.append(bar)
+        bar["close"] = price
+        bar["high"] = max(bar["high"], price)
+        bar["low"] = min(bar["low"], price)
+        bar["volume"] = bar.get("volume", 0.0) + (volume or 0.0)
 
 
 # =============================================================================
@@ -684,6 +749,7 @@ class HyperliquidAPI:
         self.cache_ttl_market_data = cache_config.get('market_data_ttl', 0.5)
         self.cache_ttl_asset_info = cache_config.get('asset_info_ttl', 5.0)
         self.cache_ttl_positions = cache_config.get('positions_ttl', 1.0)
+        self.ohlcv_cache = OhlcvCache()
         
         # Health monitoring configuration
         health_config = config.get('api', {}).get('health_monitor', {})
@@ -838,6 +904,12 @@ class HyperliquidAPI:
                                 callback(symbol, price, timestamp)
                             except Exception as e:
                                 self.logger.error(f"Price callback error: {e}")
+                        
+                        # Update rolling OHLCV cache from tick
+                        try:
+                            self.update_ohlcv_from_tick(symbol, price, volume=0.0, ts=timestamp)
+                        except Exception as e:
+                            self.logger.debug(f"OHLCV tick update error for {symbol}: {e}")
                                 
                     except (ValueError, TypeError):
                         pass
@@ -1054,14 +1126,20 @@ class HyperliquidAPI:
     
     @with_retry(max_attempts=3, base_delay=0.5)
     def get_ohlcv(self, symbol: str, timeframe: str = '1h', limit: int = 100) -> Optional[pd.DataFrame]:
-        """Get OHLCV candlestick data."""
-        cache_key = f"ohlcv_{symbol}_{timeframe}_{limit}"
-        cached = self.cache.get(cache_key)
-        if cached is not None:
-            return cached
+        """
+        Get OHLCV candlestick data with in-memory rolling cache.
+        Seed once, then serve from cache (updated via ticks).
+        """
+        # Try cache first
+        cached_bars = self.ohlcv_cache.get(symbol, timeframe)
+        if cached_bars and len(cached_bars) >= min(limit, self.ohlcv_cache.maxlen[symbol][timeframe]):
+            df = pd.DataFrame(cached_bars)
+            df['timestamp'] = pd.to_datetime(df['time'], unit='s')
+            df.set_index('timestamp', inplace=True)
+            return df.tail(limit)
         
+        # Otherwise fetch once, seed cache
         def _fetch():
-            # Convert timeframe to milliseconds
             timeframe_ms = {
                 '1m': 60 * 1000,
                 '5m': 5 * 60 * 1000,
@@ -1070,34 +1148,38 @@ class HyperliquidAPI:
                 '4h': 4 * 60 * 60 * 1000,
                 '1d': 24 * 60 * 60 * 1000,
             }
-            
             interval_ms = timeframe_ms.get(timeframe, 60 * 60 * 1000)
             end_time = int(time.time() * 1000)
             start_time = end_time - (limit * interval_ms)
             
             candles = self.info.candles_snapshot(symbol, timeframe, start_time, end_time)
-            
             if not candles:
                 return None
             
-            data = []
+            bars = []
             for candle in candles:
-                data.append({
-                    'timestamp': pd.to_datetime(candle['t'], unit='ms'),
+                bars.append({
+                    'time': candle['t'] // 1000,
                     'open': float(candle['o']),
                     'high': float(candle['h']),
                     'low': float(candle['l']),
                     'close': float(candle['c']),
                     'volume': float(candle['v']),
                 })
-            
-            df = pd.DataFrame(data)
+            # Seed cache
+            self.ohlcv_cache.seed(symbol, timeframe, bars, maxlen=max(limit, 300))
+            df = pd.DataFrame(bars)
+            df['timestamp'] = pd.to_datetime(df['time'], unit='s')
             df.set_index('timestamp', inplace=True)
-            
-            self.cache.set(cache_key, df, ttl=60.0)  # Cache for 1 minute
-            return df
+            return df.tail(limit)
         
         return self._rate_limited_call(_fetch)
+
+    def update_ohlcv_from_tick(self, symbol: str, price: float, volume: float = 0.0, ts: Optional[float] = None):
+        """Update rolling OHLCV cache from a live tick."""
+        if ts is None:
+            ts = time.time()
+        self.ohlcv_cache.update_from_tick(symbol, price, volume, ts)
     
     def get_all_prices(self) -> Dict[str, float]:
         """Get current prices for all symbols."""

@@ -724,6 +724,12 @@ class StrategyManager:
         old_price = self._last_prices.get(symbol)
         self._last_prices[symbol] = price
         
+        # Update rolling OHLCV cache in market_api from tick
+        try:
+            self.market_api.update_ohlcv_from_tick(symbol, price, volume=0.0, ts=timestamp)
+        except Exception as e:
+            self.logger.debug(f"OHLCV tick update error for {symbol}: {e}")
+        
         if old_price is not None:
             price_change = ((price - old_price) / old_price) * 100
             if abs(price_change) > 1.0:  # Log significant price changes (>1%)
