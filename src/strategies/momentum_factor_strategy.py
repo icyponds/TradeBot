@@ -79,6 +79,9 @@ class MomentumFactorStrategy(BaseStrategy):
         - rebalance_hours: Hours between rebalances
     """
     
+    # Momentum is a slower signal - 4h timeframe balances noise vs responsiveness
+    PREFERRED_TIMEFRAME = '4h'
+    
     def __init__(self, config: Dict[str, Any], market_api=None):
         super().__init__(config)
         

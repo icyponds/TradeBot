@@ -62,6 +62,9 @@ class OUMeanReversionStrategy(BaseStrategy):
         5. Only trade assets with reasonable half-life (not too slow)
     """
     
+    # OU mean reversion needs granular data to detect short-term reversions
+    PREFERRED_TIMEFRAME = '15m'
+    
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         

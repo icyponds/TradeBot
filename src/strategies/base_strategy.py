@@ -11,6 +11,15 @@ import pandas as pd
 class BaseStrategy(ABC):
     """Base class for all trading strategies."""
     
+    # Default timeframe - subclasses should override with optimal value
+    PREFERRED_TIMEFRAME = '15m'
+    
+    # Timeframe to minutes mapping
+    TIMEFRAME_MINUTES = {
+        '1m': 1, '5m': 5, '15m': 15, '30m': 30,
+        '1h': 60, '4h': 240, '1d': 1440
+    }
+    
     def __init__(self, config: Dict[str, Any]):
         """
         Initialize the base strategy.
@@ -25,9 +34,15 @@ class BaseStrategy(ABC):
         self.is_active = True
         self.trades = []
         
-        # Configuration
-        self.timeframe = config['strategies']['timeframe']
+        # Timeframe - use class-defined preferred timeframe
+        self.timeframe = self.PREFERRED_TIMEFRAME
         self.ohlcv_limit = config['strategies']['ohlcv_limit']
+    
+    @property
+    def execution_interval_seconds(self) -> int:
+        """Get execution interval in seconds based on timeframe."""
+        minutes = self.TIMEFRAME_MINUTES.get(self.timeframe, 15)
+        return minutes * 60
     
     @abstractmethod
     def generate_signal(self, ohlcv: pd.DataFrame) -> Optional[Dict[str, Any]]:

@@ -136,7 +136,7 @@ def load_config() -> Dict[str, Any]:
         # Strategy Configuration
         "strategies": {
             "enabled": os.getenv("ENABLED_STRATEGIES", "stat_arb,funding_rate_arbitrage,ou_mean_reversion,momentum_factor").split(","),
-            "timeframe": os.getenv("STRATEGY_TIMEFRAME", "1m"),
+            # Note: timeframe is now auto-selected per strategy (see each strategy class)
             "ohlcv_limit": int(os.getenv("OHLCV_LIMIT", "100")),
             "moving_average": {
                 "short_period": int(os.getenv("MA_SHORT_PERIOD", "5")),
@@ -348,11 +348,7 @@ def validate_config(config: Dict[str, Any]) -> bool:
             print("ERROR: Risk percentage must be between 0 and 100")
             return False
         
-        # Validate strategy configuration
-        valid_timeframes = ['1m', '5m', '15m', '30m', '1h', '4h', '1d']
-        if config['strategies']['timeframe'] not in valid_timeframes:
-            print(f"ERROR: Invalid timeframe. Must be one of: {valid_timeframes}")
-            return False
+        # Note: Strategy timeframes are auto-selected per strategy
         
         return True
         

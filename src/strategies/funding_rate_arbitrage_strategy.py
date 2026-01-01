@@ -71,6 +71,9 @@ class FundingRateArbitrageStrategy(BaseStrategy):
     P&L = Funding payments received - Trading fees - Slippage
     """
     
+    # Funding rates are paid every 8 hours, 1h timeframe is optimal for monitoring
+    PREFERRED_TIMEFRAME = '1h'
+    
     def __init__(self, config: Dict[str, Any], market_api=None):
         super().__init__(config)
         

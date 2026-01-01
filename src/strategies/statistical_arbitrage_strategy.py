@@ -26,6 +26,9 @@ class StatisticalArbitrageStrategy(BaseStrategy):
     - Proper spread calculation: spread = price_A - hedge_ratio * price_B
     """
     
+    # Stat arb works best on 15m-1h timeframes for spread mean reversion
+    PREFERRED_TIMEFRAME = '15m'
+    
     def __init__(self, config: Dict[str, Any], market_api=None, correlation_manager=None):
         super().__init__(config)
         

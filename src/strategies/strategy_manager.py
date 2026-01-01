@@ -73,7 +73,7 @@ class StrategyManager:
         self.pair_selector = self._initialize_pair_selector()
         
         # Trading configuration
-        self.timeframe = config['strategies']['timeframe']
+        # Note: timeframe is now per-strategy, not global
         self.ohlcv_limit = config['strategies']['ohlcv_limit']
         self.max_positions_percentage = config['trading']['max_positions_percentage']
         self.base_currency = config['trading']['base_currency']
@@ -99,7 +99,9 @@ class StrategyManager:
         self.is_running = False
         
         self.logger.info(f"Initialized strategy manager with {len(self.strategies)} strategies")
-        self.logger.info(f"Timeframe: {self.timeframe}, Execution interval: {self.execution_interval}s")
+        for name, strat in self.strategies.items():
+            self.logger.info(f"  {name}: timeframe={strat.timeframe}")
+        self.logger.info(f"Execution interval: {self.execution_interval}s (based on fastest strategy)")
         self.logger.info(f"Position limit: {self.max_positions_percentage}% of portfolio")
         self.logger.info("Dynamic leverage management enabled")
         
@@ -150,18 +152,24 @@ class StrategyManager:
     
     def _get_execution_interval(self) -> int:
         """
-        Calculate execution interval based on timeframe.
+        Calculate execution interval based on the fastest strategy's timeframe.
+        
+        Uses the minimum timeframe across all strategies to ensure no strategy
+        misses its execution window.
         
         Returns:
             Execution interval in seconds
         """
-        timeframe_minutes = {
-            '1m': 1, '5m': 5, '15m': 15, '30m': 30,
-            '1h': 60, '4h': 240, '1d': 1440
-        }
+        if not self.strategies:
+            return 60 * 60  # Default 1 hour
         
-        minutes = timeframe_minutes.get(self.timeframe, 60)
-        return minutes * 60  # Convert to seconds
+        # Get minimum execution interval across all strategies
+        min_interval = min(
+            strategy.execution_interval_seconds 
+            for strategy in self.strategies.values()
+        )
+        
+        return min_interval
     
     def _calculate_signal_strength(self, ohlcv: pd.DataFrame, strategy_name: str) -> float:
         """
@@ -769,7 +777,7 @@ class StrategyManager:
             self.logger.error(f"Error handling position update: {e}")
     
     def _analyze_symbol(self, symbol: str):
-        """Analyze a single symbol and execute strategies."""
+        """Analyze a single symbol and execute strategies with per-strategy timeframes."""
         try:
             # Subscribe to real-time data for this symbol
             self._subscribe_to_symbol(symbol)
@@ -779,22 +787,22 @@ class StrategyManager:
                 self.logger.debug(f"Insufficient data for {symbol}, skipping")
                 return
             
-            # Get market data
-            market_data = self.market_api.get_market_data(symbol, self.timeframe)
+            # Get current price (timeframe doesn't matter for current price)
+            market_data = self.market_api.get_market_data(symbol)
             if not market_data:
                 self.logger.warning(f"Could not get market data for {symbol}")
                 return
             
-            # Get OHLCV data
-            ohlcv = self.market_api.get_ohlcv(symbol, self.timeframe, self.ohlcv_limit)
-            if ohlcv is None or len(ohlcv) < 20:  # Need at least 20 candles for analysis
-                self.logger.debug(f"Insufficient OHLCV data for {symbol}")
-                return
-            
             current_price = market_data['current_price']
             
-            # Run each strategy
+            # Run each strategy with its preferred timeframe
             for strategy_name, strategy in self.strategies.items():
+                # Get OHLCV data for this strategy's timeframe
+                ohlcv = self.market_api.get_ohlcv(symbol, strategy.timeframe, self.ohlcv_limit)
+                if ohlcv is None or len(ohlcv) < 20:  # Need at least 20 candles for analysis
+                    self.logger.debug(f"Insufficient {strategy.timeframe} OHLCV data for {symbol}/{strategy_name}")
+                    continue
+                
                 self._execute_strategy(symbol, strategy_name, strategy, ohlcv, current_price)
                 
         except Exception as e:
