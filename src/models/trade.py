@@ -177,6 +177,14 @@ class Position:
     current_price: Optional[float] = None
     capital_at_risk: Optional[float] = None  # Actual capital at risk
     
+    # Trailing stop fields
+    trailing_stop_enabled: bool = False
+    trailing_stop_pct: float = 0.0  # e.g., 0.05 = 5% trail
+    trailing_stop_activation_pct: float = 0.0  # Minimum gain before trailing starts (e.g., 0.03 = 3%)
+    highest_price: Optional[float] = None  # For longs - track highest price since entry
+    lowest_price: Optional[float] = None   # For shorts - track lowest price since entry
+    trailing_stop_active: bool = False  # Whether trailing stop has been activated
+    
     @property
     def unrealized_pnl(self) -> Optional[float]:
         """Calculate unrealized PnL based on actual capital at risk."""
@@ -238,6 +246,12 @@ class Position:
             'unrealized_pnl': self.unrealized_pnl,
             'unrealized_pnl_percentage': self.unrealized_pnl_percentage,
             'capital_at_risk_pnl_percentage': self.capital_at_risk_pnl_percentage,
+            'trailing_stop_enabled': self.trailing_stop_enabled,
+            'trailing_stop_pct': self.trailing_stop_pct,
+            'trailing_stop_activation_pct': self.trailing_stop_activation_pct,
+            'highest_price': self.highest_price,
+            'lowest_price': self.lowest_price,
+            'trailing_stop_active': self.trailing_stop_active,
         }
     
     @classmethod
@@ -254,4 +268,10 @@ class Position:
             take_profit=data.get('take_profit'),
             current_price=data.get('current_price'),
             capital_at_risk=data.get('capital_at_risk'),
+            trailing_stop_enabled=data.get('trailing_stop_enabled', False),
+            trailing_stop_pct=data.get('trailing_stop_pct', 0.0),
+            trailing_stop_activation_pct=data.get('trailing_stop_activation_pct', 0.0),
+            highest_price=data.get('highest_price'),
+            lowest_price=data.get('lowest_price'),
+            trailing_stop_active=data.get('trailing_stop_active', False),
         ) 

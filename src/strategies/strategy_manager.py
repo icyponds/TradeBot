@@ -1743,6 +1743,9 @@ class StrategyManager:
                     order_id=order_id,
                 )
                 
+                # Get trailing stop config from strategy
+                trailing_config = strategy.get_trailing_stop_config()
+                
                 # Create position record
                 position = Position(
                     symbol=symbol,
@@ -1754,6 +1757,12 @@ class StrategyManager:
                     stop_loss=stop_loss,
                     take_profit=take_profit,
                     capital_at_risk=margin_required,
+                    trailing_stop_enabled=trailing_config.get('enabled', False),
+                    trailing_stop_pct=trailing_config.get('trail_pct', 0.0),
+                    trailing_stop_activation_pct=trailing_config.get('activation_pct', 0.0),
+                    highest_price=fill_price if position_side == 'long' else None,
+                    lowest_price=fill_price if position_side == 'short' else None,
+                    trailing_stop_active=False,
                 )
                 
                 # Record position in leverage manager
@@ -1774,6 +1783,9 @@ class StrategyManager:
                 )
                 self.logger.info(f"Signal strength: {signal_strength:.2f}, Volatility: {market_volatility:.2f}")
                 self.logger.info(f"Stop loss: {stop_loss:.2f}, Take profit: {take_profit:.2f}")
+                if trailing_config.get('enabled'):
+                    self.logger.info(f"Trailing stop: {trailing_config['trail_pct']*100:.1f}% trail, "
+                                    f"activates at {trailing_config['activation_pct']*100:.1f}% gain")
                 
                 # Verify position was recorded correctly
                 exchange_positions = self.market_api.get_positions()
@@ -2651,14 +2663,66 @@ class StrategyManager:
             if should_exit and exit_reason:
                 return f"strategy_exit:{exit_reason}"
         
-        # 2. Global fallback stop loss (safety net)
+        # 2. Update trailing stop if enabled
+        if position.trailing_stop_enabled:
+            current_price = position.current_price
+            
+            if position.side == 'long':
+                # Update highest price watermark
+                if position.highest_price is None or current_price > position.highest_price:
+                    position.highest_price = current_price
+                
+                # Check if trailing stop should be activated
+                gain_pct = (current_price - position.entry_price) / position.entry_price
+                
+                if not position.trailing_stop_active and gain_pct >= position.trailing_stop_activation_pct:
+                    position.trailing_stop_active = True
+                    self.logger.info(f"🎯 Trailing stop ACTIVATED for {position.symbol} at {gain_pct*100:.2f}% gain")
+                
+                # Update trailing stop loss if active
+                if position.trailing_stop_active and position.highest_price:
+                    new_trailing_sl = position.highest_price * (1 - position.trailing_stop_pct)
+                    
+                    # Only move stop loss UP (more protective), never down
+                    if position.stop_loss is None or new_trailing_sl > position.stop_loss:
+                        old_sl = position.stop_loss
+                        position.stop_loss = new_trailing_sl
+                        self.logger.debug(f"Trailing SL updated for {position.symbol}: "
+                                         f"{old_sl:.4f} → {new_trailing_sl:.4f} (high: {position.highest_price:.4f})")
+            
+            else:  # short position
+                # Update lowest price watermark
+                if position.lowest_price is None or current_price < position.lowest_price:
+                    position.lowest_price = current_price
+                
+                # Check if trailing stop should be activated
+                gain_pct = (position.entry_price - current_price) / position.entry_price
+                
+                if not position.trailing_stop_active and gain_pct >= position.trailing_stop_activation_pct:
+                    position.trailing_stop_active = True
+                    self.logger.info(f"🎯 Trailing stop ACTIVATED for {position.symbol} (short) at {gain_pct*100:.2f}% gain")
+                
+                # Update trailing stop loss if active
+                if position.trailing_stop_active and position.lowest_price:
+                    new_trailing_sl = position.lowest_price * (1 + position.trailing_stop_pct)
+                    
+                    # Only move stop loss DOWN (more protective), never up
+                    if position.stop_loss is None or new_trailing_sl < position.stop_loss:
+                        old_sl = position.stop_loss
+                        position.stop_loss = new_trailing_sl
+                        self.logger.debug(f"Trailing SL updated for {position.symbol} (short): "
+                                         f"{old_sl:.4f} → {new_trailing_sl:.4f} (low: {position.lowest_price:.4f})")
+        
+        # 3. Global fallback stop loss (safety net) - includes trailing stop
         if position.stop_loss:
             if position.side == 'long' and position.current_price <= position.stop_loss:
-                return "stop_loss"
+                reason = "trailing_stop" if position.trailing_stop_active else "stop_loss"
+                return reason
             elif position.side == 'short' and position.current_price >= position.stop_loss:
-                return "stop_loss"
+                reason = "trailing_stop" if position.trailing_stop_active else "stop_loss"
+                return reason
         
-        # 3. Take profit check
+        # 4. Take profit check
         if position.take_profit:
             if position.side == 'long' and position.current_price >= position.take_profit:
                 return "take_profit"
@@ -2668,12 +2732,12 @@ class StrategyManager:
         # NOTE: Position timeout removed - strategies decide when to exit
         # Old timeout logic was: if time_open > timeout_hours, return "timeout"
         
-        # 4. Check loss percentage (additional safety net based on unrealized PnL)
+        # 5. Check loss percentage (additional safety net based on unrealized PnL)
         if position.unrealized_pnl_percentage:
             if position.unrealized_pnl_percentage < -max_loss_percentage:
                 return "max_loss"
         
-        # 5. Check profit percentage (optional - take profit if large gain)
+        # 6. Check profit percentage (optional - take profit if large gain)
         if position.unrealized_pnl_percentage:
             if position.unrealized_pnl_percentage > max_profit_percentage:
                 return "max_profit"

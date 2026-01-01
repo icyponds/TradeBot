@@ -149,6 +149,25 @@ class BaseStrategy(ABC):
         else:
             return entry_price * (1 - adjusted_percentage)
     
+    def get_trailing_stop_config(self) -> Dict[str, Any]:
+        """
+        Get trailing stop configuration for this strategy.
+        
+        Override this method in subclasses to enable trailing stops.
+        
+        Returns:
+            Dictionary with:
+                - enabled: bool - Whether trailing stop is enabled
+                - trail_pct: float - Trailing percentage (e.g., 0.05 = 5%)
+                - activation_pct: float - Minimum gain before trailing activates (e.g., 0.03 = 3%)
+        """
+        # Default: trailing stop disabled
+        return {
+            'enabled': False,
+            'trail_pct': 0.0,
+            'activation_pct': 0.0,
+        }
+    
     def record_trade(self, symbol: str, side: str, price: float, size: float, timestamp):
         """
         Record a completed trade.

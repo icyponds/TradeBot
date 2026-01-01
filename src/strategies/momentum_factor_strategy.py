@@ -502,6 +502,23 @@ class MomentumFactorStrategy(BaseStrategy):
         
         return False, None
     
+    def get_trailing_stop_config(self) -> Dict[str, Any]:
+        """
+        Get trailing stop configuration for momentum strategy.
+        
+        Momentum rides trends, so trailing stops lock in gains as the trend continues.
+        - Trail at 5%: if price rises 10%, stop moves to +5% from entry
+        - Activates after 3% gain to avoid whipsaws
+        
+        Returns:
+            Trailing stop configuration
+        """
+        return {
+            'enabled': True,
+            'trail_pct': 0.05,         # 5% trailing stop
+            'activation_pct': 0.03,    # Activate after 3% gain
+        }
+    
     def force_rebalance(self, symbols: List[str]) -> List[Dict[str, Any]]:
         """
         Force a portfolio rebalance regardless of timing.

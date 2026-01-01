@@ -436,3 +436,19 @@ class StatisticalArbitrageStrategy(BaseStrategy):
                 return True, f"spread_mean_reversion_complete (z={z_score:.2f})"
         
         return False, None
+    
+    def get_trailing_stop_config(self) -> Dict[str, Any]:
+        """
+        Get trailing stop configuration for statistical arbitrage.
+        
+        Similar to OU mean reversion - we expect spread to revert, so we
+        don't want aggressive trailing. Only protect large overshoots.
+        
+        Returns:
+            Trailing stop configuration
+        """
+        return {
+            'enabled': True,
+            'trail_pct': 0.04,         # 4% trailing stop (loose)
+            'activation_pct': 0.05,    # Only activate after 5% gain (spread overshoot)
+        }

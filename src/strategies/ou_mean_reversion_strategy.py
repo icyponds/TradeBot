@@ -535,6 +535,25 @@ class OUMeanReversionStrategy(BaseStrategy):
         
         return False, None
     
+    def get_trailing_stop_config(self) -> Dict[str, Any]:
+        """
+        Get trailing stop configuration for OU mean reversion.
+        
+        Mean reversion expects price to return to the mean, so we DON'T want
+        aggressive trailing that cuts profits short before full reversion.
+        
+        However, if price significantly overshoots the mean (big gain), we use
+        a loose trailing stop to protect those gains.
+        
+        Returns:
+            Trailing stop configuration
+        """
+        return {
+            'enabled': True,
+            'trail_pct': 0.04,         # 4% trailing stop (loose)
+            'activation_pct': 0.05,    # Only activate after 5% gain (overshoot)
+        }
+    
     def get_ou_parameters(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Get cached OU parameters for a symbol."""
         if symbol in self.ou_params_cache:
