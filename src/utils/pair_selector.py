@@ -953,14 +953,37 @@ class DynamicPairSelector:
         self.price_history.clear()
         self.asset_metrics.clear()
         
-        # Pre-fetch price histories for all assets (for correlation and volatility)
-        self.logger.debug("Pre-fetching price histories...")
-        for asset in eligible_assets:
+        # Pre-filter to top N by liquidity to avoid excessive API calls
+        # Sort by a quick liquidity proxy (OI + volume) without needing OHLCV
+        max_to_analyze = min(30, len(eligible_assets))  # Analyze at most 30 assets up front
+        
+        def quick_liquidity_score(asset):
+            oi = float(asset.get('openInterest', 0))
+            vol = float(asset.get('volume24h', 0))
+            return oi + vol
+        
+        sorted_by_liquidity = sorted(eligible_assets, key=quick_liquidity_score, reverse=True)
+        assets_to_analyze = sorted_by_liquidity[:max_to_analyze]
+        
+        self.logger.info(f"Pre-filtered to top {len(assets_to_analyze)} assets by liquidity")
+        
+        # Pre-fetch price histories with rate limiting (batching to avoid 429/circuit breaker)
+        self.logger.debug("Pre-fetching price histories (with rate limiting)...")
+        import time
+        batch_size = 5
+        delay_between_batches = 1.0  # seconds
+        for i, asset in enumerate(assets_to_analyze):
             symbol = asset.get('name', '')
             self._get_price_history(symbol)
+            # Throttle aggressively to stay under rate limits
+            if (i + 1) % batch_size == 0:
+                time.sleep(delay_between_batches)
         
         # Build correlation matrix
         self._build_correlation_matrix()
+        
+        # Use pre-filtered assets for remaining analysis
+        eligible_assets = assets_to_analyze
         
         # Calculate metrics for each asset
         all_metrics: List[AssetMetrics] = []
