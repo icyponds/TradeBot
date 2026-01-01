@@ -164,6 +164,7 @@ class DynamicPairSelector:
         self._backfill_running = False
         self._backfill_lock = threading.Lock()  # Protects backfill_queue access
         self._data_lock = threading.Lock()  # Protects price_history access
+        self._pairs_lock = threading.Lock()  # Protects selected_pairs access (prevents race with background fetcher)
         
         self.logger.info(f"Initialized DynamicPairSelector (Mode: {self.selection_mode.value})")
         self.logger.info(f"  Weights: Liquidity={self.weight_liquidity:.0%}, Volatility={self.weight_volatility:.0%}, "
@@ -699,9 +700,10 @@ class DynamicPairSelector:
             eligible_pairs = self._filter_assets(all_assets)
             selected_pairs, pairs_metadata = self._rank_and_select_pairs(eligible_pairs)
             
-            # Update state
-            self.selected_pairs = selected_pairs
-            self.selected_pairs_metadata = pairs_metadata
+            # Update state (thread-safe)
+            with self._pairs_lock:
+                self.selected_pairs = selected_pairs
+                self.selected_pairs_metadata = pairs_metadata
             self.last_scan_time = datetime.now()
             
             self.logger.info(f"Selected {len(selected_pairs)} pairs for trading: {selected_pairs}")
@@ -1258,12 +1260,18 @@ class DynamicPairSelector:
         Data fetching runs independently in a background thread.
         This method returns immediately with whatever pairs are available.
         
+        Returns a COPY of the list to prevent race conditions with the
+        background fetcher that may add new pairs concurrently.
+        
         Returns:
-            List of current trading pairs
+            List of current trading pairs (copy, safe to iterate)
         """
         if self.should_rescan():
             return self.scan_and_select_pairs()
-        return self.selected_pairs
+        
+        # Return a copy to prevent race condition with background thread
+        with self._pairs_lock:
+            return self.selected_pairs.copy()
     
     def start_background_fetcher(self):
         """Start the background data fetching thread."""
@@ -1417,6 +1425,8 @@ class DynamicPairSelector:
         Called by background fetcher after loading an asset's data.
         Adds the asset if it passes quality filters (no max_pairs limit).
         Quality filters: min_open_interest, min_volume_threshold, liquidity.
+        
+        Thread-safe: Uses _pairs_lock to prevent race conditions with main thread.
         """
         try:
             symbol = asset.get('name', '')
@@ -1429,32 +1439,35 @@ class DynamicPairSelector:
             if market_type == 'spot':
                 return
             
-            # Already in selected pairs?
-            if symbol in self.selected_pairs:
-                return
+            # Thread-safe check and add
+            with self._pairs_lock:
+                # Already in selected pairs?
+                if symbol in self.selected_pairs:
+                    return
+                
+                # Calculate metrics for this asset
+                metrics = self._calculate_asset_metrics(asset)
+                if not metrics or metrics.composite_score <= 0:
+                    self.logger.debug(f"[DynamicPairs] Skipped {symbol}: insufficient metrics or score")
+                    return
+                
+                # Apply diversification penalty based on current pairs
+                final_score = self._calculate_composite_score(metrics, self.selected_pairs)
+                
+                current_count = len(self.selected_pairs)
+                
+                # No max_pairs limit - add all assets that pass quality filters
+                self.selected_pairs.append(symbol)
+                self.selected_pairs_metadata[symbol] = {
+                    'market_type': market_type,
+                    'is_hip3': asset.get('is_hip3', False),
+                    'dex': asset.get('dex', ''),
+                    'open_interest': asset.get('openInterest', 0),
+                    'volume_24h': asset.get('volume_24h', 0),
+                    'max_leverage': asset.get('maxLeverage', 10),
+                    'composite_score': final_score,
+                }
             
-            # Calculate metrics for this asset
-            metrics = self._calculate_asset_metrics(asset)
-            if not metrics or metrics.composite_score <= 0:
-                self.logger.debug(f"[DynamicPairs] Skipped {symbol}: insufficient metrics or score")
-                return
-            
-            # Apply diversification penalty based on current pairs
-            final_score = self._calculate_composite_score(metrics, self.selected_pairs)
-            
-            current_count = len(self.selected_pairs)
-            
-            # No max_pairs limit - add all assets that pass quality filters
-            self.selected_pairs.append(symbol)
-            self.selected_pairs_metadata[symbol] = {
-                'market_type': market_type,
-                'is_hip3': asset.get('is_hip3', False),
-                'dex': asset.get('dex', ''),
-                'open_interest': asset.get('openInterest', 0),
-                'volume_24h': asset.get('volume_24h', 0),
-                'max_leverage': asset.get('maxLeverage', 10),
-                'composite_score': final_score,
-            }
             self.logger.info(f"[DynamicPairs] Added {symbol} to trading pool (total: {current_count + 1}) | Score: {final_score:.3f}")
                     
         except Exception as e:
@@ -1518,7 +1531,8 @@ class DynamicPairSelector:
         Returns:
             Dict with market_type, is_hip3, dex, etc. or None if not found
         """
-        return self.selected_pairs_metadata.get(symbol)
+        with self._pairs_lock:
+            return self.selected_pairs_metadata.get(symbol)
     
     def get_pairs_by_type(self, market_type: str = None, is_hip3: bool = None) -> List[str]:
         """
@@ -1532,12 +1546,13 @@ class DynamicPairSelector:
             List of matching pair symbols
         """
         matching = []
-        for symbol, meta in self.selected_pairs_metadata.items():
-            if market_type is not None and meta.get('market_type') != market_type:
-                continue
-            if is_hip3 is not None and meta.get('is_hip3') != is_hip3:
-                continue
-            matching.append(symbol)
+        with self._pairs_lock:
+            for symbol, meta in self.selected_pairs_metadata.items():
+                if market_type is not None and meta.get('market_type') != market_type:
+                    continue
+                if is_hip3 is not None and meta.get('is_hip3') != is_hip3:
+                    continue
+                matching.append(symbol)
         return matching
     
     def get_perp_pairs(self, include_hip3: bool = True) -> List[str]:
