@@ -1,5 +1,8 @@
 """
-Statistical Arbitrage Strategy.
+Statistical Arbitrage Strategy with Cointegration and Kalman Filter.
+
+Enhanced version that uses cointegration testing (Engle-Granger) instead of
+simple correlation, and employs Kalman Filter for dynamic hedge ratio estimation.
 """
 
 import logging
@@ -11,24 +14,55 @@ from .base_strategy import BaseStrategy
 
 class StatisticalArbitrageStrategy(BaseStrategy):
     """
-    Statistical Arbitrage Strategy.
+    Statistical Arbitrage Strategy with Cointegration.
     
-    This strategy identifies pairs of assets that are historically correlated
-    and trades mean reversion on their spread/ratio.
+    This strategy identifies cointegrated pairs of assets and trades
+    mean reversion on their spread using proper hedge ratios.
+    
+    Improvements over correlation-based approach:
+    - Uses Engle-Granger cointegration test for pair selection
+    - Dynamic hedge ratio estimation via Kalman Filter
+    - Half-life filtering to ensure tradeable mean reversion speed
+    - Proper spread calculation: spread = price_A - hedge_ratio * price_B
     """
     
     def __init__(self, config: Dict[str, Any], market_api=None, correlation_manager=None):
         super().__init__(config)
         
-        # Strategy parameters
-        self.z_score_threshold = config['strategies'].get('stat_arb', {}).get('z_score_threshold', 2.0)
-        self.window_size = config['strategies'].get('stat_arb', {}).get('window_size', 100)
+        # Strategy parameters from config
+        stat_arb_config = config.get('strategies', {}).get('stat_arb', {})
+        coint_config = config.get('strategies', {}).get('cointegration', {})
+        
+        # Z-score thresholds
+        self.z_score_entry = coint_config.get('zscore_entry', stat_arb_config.get('z_score_threshold', 2.0))
+        self.z_score_exit = coint_config.get('zscore_exit', 0.5)
+        
+        # Window sizes
+        self.window_size = stat_arb_config.get('window_size', 100)
+        self.zscore_lookback = coint_config.get('lookback_period', 20)
+        
+        # Cointegration parameters
+        self.adf_pvalue_threshold = coint_config.get('adf_pvalue_threshold', 0.05)
+        self.half_life_max_hours = coint_config.get('half_life_max_hours', 48)
+        self.use_kalman_filter = coint_config.get('kalman_filter_enabled', True)
+        
+        # Kalman Filter parameters
+        self.kalman_Q = coint_config.get('kalman_Q', 0.001)  # Process noise
+        self.kalman_R = coint_config.get('kalman_R', 1.0)    # Measurement noise
         
         # Dependencies
         self.market_api = market_api
         self.correlation_manager = correlation_manager
         
-        self.logger.info(f"Initialized Stat Arb Strategy: z_threshold={self.z_score_threshold}, window={self.window_size}")
+        # Kalman filter states for each pair
+        self.kalman_states: Dict[str, Any] = {}
+        
+        # Track active spreads
+        self.active_spreads: Dict[str, Dict[str, Any]] = {}
+        
+        self.logger.info(f"Initialized Cointegration Stat Arb Strategy: "
+                        f"z_entry={self.z_score_entry}, z_exit={self.z_score_exit}, "
+                        f"kalman={self.use_kalman_filter}")
     
     def set_dependencies(self, market_api, correlation_manager):
         """Set external dependencies."""
@@ -121,16 +155,16 @@ class StatisticalArbitrageStrategy(BaseStrategy):
     def generate_pair_signal(self, symbol_a: str, ohlcv_a: pd.DataFrame, 
                            symbol_b: str, ohlcv_b: pd.DataFrame) -> Optional[Dict[str, Any]]:
         """
-        Generate signal for a pair of assets.
+        Generate signal for a pair of assets using cointegration.
         
         Args:
             symbol_a: Primary symbol
             ohlcv_a: OHLCV data for primary symbol
-            symbol_b: Correlated symbol
+            symbol_b: Correlated/cointegrated symbol
             ohlcv_b: OHLCV data for correlated symbol
             
         Returns:
-            Signal dictionary
+            Signal dictionary with hedge ratio and spread info
         """
         if len(ohlcv_a) != len(ohlcv_b):
             # Align data lengths
@@ -140,38 +174,204 @@ class StatisticalArbitrageStrategy(BaseStrategy):
             
         if len(ohlcv_a) < self.window_size:
             return None
-            
-        # Calculate Spread Ratio
-        # We use Close prices
-        ratio = ohlcv_a['close'] / ohlcv_b['close']
         
-        # Calculate Z-Score of the ratio
-        z_score = self.calculate_z_score(ratio.rolling(window=self.window_size).apply(lambda x: x[-1]))
+        prices_a = ohlcv_a['close']
+        prices_b = ohlcv_b['close']
+        current_price_a = prices_a.iloc[-1]
+        current_price_b = prices_b.iloc[-1]
         
-        current_price_a = ohlcv_a['close'].iloc[-1]
+        # Get or calculate hedge ratio
+        hedge_ratio = self._get_hedge_ratio(symbol_a, symbol_b, prices_a, prices_b)
+        
+        # Calculate spread: spread = price_A - hedge_ratio * price_B
+        spread = prices_a - hedge_ratio * prices_b
+        
+        # Calculate Z-score of the spread
+        z_score = self._calculate_spread_zscore(spread)
+        
+        # Check if we have an active position
+        pair_key = f"{symbol_a}/{symbol_b}"
+        has_position = pair_key in self.active_spreads
         
         signal = 'hold'
         reason = ''
         
-        # Mean Reversion Logic
-        # If Ratio is too high (Asset A is expensive relative to B), Short A
-        if z_score > self.z_score_threshold:
-            signal = 'sell'
-            reason = f'Stat Arb: {symbol_a}/{symbol_b} Ratio Z-Score {z_score:.2f} > {self.z_score_threshold} (Short {symbol_a})'
+        if has_position:
+            # Check for exit signal
+            position_side = self.active_spreads[pair_key].get('side')
             
-        # If Ratio is too low (Asset A is cheap relative to B), Long A
-        elif z_score < -self.z_score_threshold:
-            signal = 'buy'
-            reason = f'Stat Arb: {symbol_a}/{symbol_b} Ratio Z-Score {z_score:.2f} < -{self.z_score_threshold} (Long {symbol_a})'
-            
+            # Exit if Z-score crosses zero or hits exit threshold
+            if position_side == 'short' and z_score < self.z_score_exit:
+                signal = 'buy'  # Close short
+                reason = f'Stat Arb Exit: {pair_key} Z-Score {z_score:.2f} < {self.z_score_exit} (Close Short)'
+                del self.active_spreads[pair_key]
+            elif position_side == 'long' and z_score > -self.z_score_exit:
+                signal = 'sell'  # Close long
+                reason = f'Stat Arb Exit: {pair_key} Z-Score {z_score:.2f} > -{self.z_score_exit} (Close Long)'
+                del self.active_spreads[pair_key]
+        else:
+            # Check for entry signal
+            # Spread is too high (Asset A expensive relative to B) -> Short A
+            if z_score > self.z_score_entry:
+                signal = 'sell'
+                reason = f'Stat Arb Entry: {pair_key} Z-Score {z_score:.2f} > {self.z_score_entry} (Short {symbol_a})'
+                self.active_spreads[pair_key] = {
+                    'side': 'short',
+                    'entry_zscore': z_score,
+                    'hedge_ratio': hedge_ratio,
+                }
+            # Spread is too low (Asset A cheap relative to B) -> Long A
+            elif z_score < -self.z_score_entry:
+                signal = 'buy'
+                reason = f'Stat Arb Entry: {pair_key} Z-Score {z_score:.2f} < -{self.z_score_entry} (Long {symbol_a})'
+                self.active_spreads[pair_key] = {
+                    'side': 'long',
+                    'entry_zscore': z_score,
+                    'hedge_ratio': hedge_ratio,
+                }
+        
         if signal == 'hold':
             return None
-            
+        
         return {
             'signal': signal,
             'reason': reason,
             'price': current_price_a,
             'strategy': 'stat_arb',
             'pair_symbol': symbol_b,
-            'z_score': z_score
+            'z_score': z_score,
+            'hedge_ratio': hedge_ratio,
+            'spread': spread.iloc[-1],
+            'pair_price': current_price_b,
         }
+    
+    def _get_hedge_ratio(self, symbol_a: str, symbol_b: str, 
+                        prices_a: pd.Series, prices_b: pd.Series) -> float:
+        """
+        Get hedge ratio, using Kalman Filter if enabled.
+        
+        Args:
+            symbol_a: Primary symbol
+            symbol_b: Pair symbol
+            prices_a: Prices of asset A
+            prices_b: Prices of asset B
+            
+        Returns:
+            Hedge ratio (beta)
+        """
+        pair_key = f"{symbol_a}/{symbol_b}"
+        
+        # Try to get cointegration result from correlation manager
+        if self.correlation_manager and hasattr(self.correlation_manager, 'get_cointegration_result'):
+            coint_result = self.correlation_manager.get_cointegration_result(symbol_a)
+            if coint_result:
+                base_hedge_ratio = coint_result.hedge_ratio
+            else:
+                # Fall back to OLS estimation
+                base_hedge_ratio = self._estimate_hedge_ratio_ols(prices_a, prices_b)
+        else:
+            base_hedge_ratio = self._estimate_hedge_ratio_ols(prices_a, prices_b)
+        
+        # Apply Kalman Filter for dynamic adjustment if enabled
+        if self.use_kalman_filter:
+            if pair_key not in self.kalman_states:
+                # Initialize Kalman Filter state
+                if self.correlation_manager and hasattr(self.correlation_manager, 'create_kalman_filter'):
+                    self.kalman_states[pair_key] = self.correlation_manager.create_kalman_filter(
+                        initial_beta=base_hedge_ratio,
+                        Q=self.kalman_Q,
+                        R=self.kalman_R
+                    )
+                else:
+                    # Simple fallback without Kalman
+                    return base_hedge_ratio
+            
+            # Update Kalman Filter with latest observation
+            kf = self.kalman_states[pair_key]
+            y = prices_a.iloc[-1]
+            x = prices_b.iloc[-1]
+            dynamic_hedge_ratio = kf.update(y, x)
+            
+            return dynamic_hedge_ratio
+        
+        return base_hedge_ratio
+    
+    def _estimate_hedge_ratio_ols(self, prices_a: pd.Series, prices_b: pd.Series) -> float:
+        """
+        Estimate hedge ratio using OLS regression.
+        
+        Args:
+            prices_a: Dependent variable prices
+            prices_b: Independent variable prices
+            
+        Returns:
+            Hedge ratio (beta coefficient)
+        """
+        try:
+            # Simple OLS: y = beta * x + alpha
+            # We want beta = cov(y, x) / var(x)
+            cov = np.cov(prices_a.values, prices_b.values)[0, 1]
+            var = np.var(prices_b.values)
+            
+            if var == 0:
+                return 1.0
+            
+            return cov / var
+            
+        except Exception as e:
+            self.logger.error(f"Error estimating hedge ratio: {e}")
+            return 1.0
+    
+    def _calculate_spread_zscore(self, spread: pd.Series) -> float:
+        """
+        Calculate Z-score of the spread using rolling statistics.
+        
+        Args:
+            spread: Spread series
+            
+        Returns:
+            Current Z-score
+        """
+        if len(spread) < self.zscore_lookback:
+            return 0.0
+        
+        rolling_mean = spread.rolling(window=self.zscore_lookback).mean()
+        rolling_std = spread.rolling(window=self.zscore_lookback).std()
+        
+        current_mean = rolling_mean.iloc[-1]
+        current_std = rolling_std.iloc[-1]
+        current_spread = spread.iloc[-1]
+        
+        if current_std == 0 or np.isnan(current_std):
+            return 0.0
+        
+        return (current_spread - current_mean) / current_std
+    
+    def get_active_spreads_summary(self) -> Dict[str, Any]:
+        """Get summary of active spread positions."""
+        return {
+            'active_pairs': len(self.active_spreads),
+            'positions': self.active_spreads.copy(),
+        }
+    
+    def calculate_take_profit(self, entry_price: float, side: str, ohlcv: pd.DataFrame = None,
+                             signal_strength: float = 1.0, market_volatility: float = 1.0) -> float:
+        """
+        Calculate take profit for statistical arbitrage.
+        
+        For mean reversion, we expect the spread to return to zero,
+        so take profit is based on the expected move.
+        """
+        # Use a tighter take profit since we expect mean reversion
+        base_tp_pct = 0.03  # 3% base
+        
+        # Adjust for signal strength (higher Z-score = larger expected move)
+        adjusted_tp = base_tp_pct * signal_strength
+        
+        # Clamp to reasonable range
+        adjusted_tp = max(0.02, min(0.10, adjusted_tp))
+        
+        if side == 'buy':
+            return entry_price * (1 + adjusted_tp)
+        else:
+            return entry_price * (1 - adjusted_tp)

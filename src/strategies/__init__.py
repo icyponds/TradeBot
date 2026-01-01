@@ -9,6 +9,9 @@ from .bollinger_band_strategy import BollingerBandSqueezeStrategy
 from .supertrend_strategy import SupertrendStrategy
 from .vwap_strategy import VWAPStrategy
 from .statistical_arbitrage_strategy import StatisticalArbitrageStrategy
+from .funding_rate_arbitrage_strategy import FundingRateArbitrageStrategy
+from .ou_mean_reversion_strategy import OUMeanReversionStrategy
+from .momentum_factor_strategy import MomentumFactorStrategy
 
 __all__ = [
     'BaseStrategy',
@@ -20,4 +23,7 @@ __all__ = [
     'SupertrendStrategy',
     'VWAPStrategy',
     'StatisticalArbitrageStrategy',
+    'FundingRateArbitrageStrategy',
+    'OUMeanReversionStrategy',
+    'MomentumFactorStrategy',
 ]

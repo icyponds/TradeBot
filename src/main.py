@@ -39,11 +39,6 @@ def main():
         
         logger.info("Starting Hyperliquid Trading Bot...")
         logger.info("Configuration loaded successfully")
-        if not config:
-            logger.error("Failed to load configuration")
-            sys.exit(1)
-        
-        logger.info("Configuration loaded successfully")
         
         # Initialize strategy manager
         strategy_manager = StrategyManager(config)

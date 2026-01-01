@@ -12,20 +12,27 @@ from datetime import datetime, timedelta
 import pandas as pd
 import math
 
-from src.api.hyperliquid_websocket_api import HyperliquidWebSocketAPI as HyperliquidAPI
+from src.api import HyperliquidAPI
 from src.utils.pair_selector import DynamicPairSelector
 from src.utils.leverage_manager import LeverageManager
 from src.utils.portfolio_manager import PortfolioManager
 from src.utils.correlation_manager import CorrelationManager
 from src.utils.performance_tracker import PerformanceTracker
-from .moving_average_strategy import MovingAverageStrategy
-from .rsi_strategy import RSIStrategy
-from .bollinger_band_strategy import BollingerBandSqueezeStrategy
-from .supertrend_strategy import SupertrendStrategy
-from .vwap_strategy import VWAPStrategy
-from .statistical_arbitrage_strategy import StatisticalArbitrageStrategy
 from .strategy_selector import StrategySelector
 from src.models.trade import Trade, Position
+
+# Strategy imports - only used when enabled in config
+STRATEGY_CLASSES = {
+    'moving_average': ('moving_average_strategy', 'MovingAverageStrategy'),
+    'rsi': ('rsi_strategy', 'RSIStrategy'),
+    'bollinger_band': ('bollinger_band_strategy', 'BollingerBandSqueezeStrategy'),
+    'supertrend': ('supertrend_strategy', 'SupertrendStrategy'),
+    'vwap': ('vwap_strategy', 'VWAPStrategy'),
+    'stat_arb': ('statistical_arbitrage_strategy', 'StatisticalArbitrageStrategy'),
+    'funding_rate_arbitrage': ('funding_rate_arbitrage_strategy', 'FundingRateArbitrageStrategy'),
+    'ou_mean_reversion': ('ou_mean_reversion_strategy', 'OUMeanReversionStrategy'),
+    'momentum_factor': ('momentum_factor_strategy', 'MomentumFactorStrategy'),
+}
 
 
 class StrategyManager:
@@ -292,29 +299,48 @@ class StrategyManager:
     
     def _initialize_market_api(self):
         """Initialize the market API client."""
-        # Use hybrid API for real-time data + trading operations
-        try:
-            from src.api.hyperliquid_hybrid_api import HyperliquidHybridAPI
-            return HyperliquidHybridAPI(self.config)
-        except ImportError:
-            # Fallback to SDK API if hybrid not available
-            try:
-                from src.api.hyperliquid_sdk_api import HyperliquidSDKAPI
-                return HyperliquidSDKAPI(self.config)
-            except ImportError:
-                from src.api.hyperliquid_websocket_api import HyperliquidWebSocketAPI as HyperliquidAPI
-                return HyperliquidAPI(self.config)
+        # Use unified HyperliquidAPI with built-in WebSocket and REST support
+        return HyperliquidAPI(self.config)
     
     def _initialize_strategies(self):
-        """Initialize trading strategies."""
-        strategies = {
-            'moving_average': MovingAverageStrategy(self.config),
-            'rsi': RSIStrategy(self.config),
-            'bollinger_band': BollingerBandSqueezeStrategy(self.config),
-            'supertrend': SupertrendStrategy(self.config),
-            'vwap': VWAPStrategy(self.config),
-            'stat_arb': StatisticalArbitrageStrategy(self.config, self.market_api, self.correlation_manager),
-        }
+        """Initialize only enabled trading strategies."""
+        import importlib
+        
+        enabled_strategies = self.config['strategies']['enabled']
+        strategies = {}
+        
+        for strategy_name in enabled_strategies:
+            strategy_name = strategy_name.strip()
+            if strategy_name not in STRATEGY_CLASSES:
+                self.logger.warning(f"Unknown strategy: {strategy_name}")
+                continue
+            
+            module_name, class_name = STRATEGY_CLASSES[strategy_name]
+            
+            try:
+                # Dynamically import the strategy module
+                module = importlib.import_module(f'.{module_name}', package='src.strategies')
+                strategy_class = getattr(module, class_name)
+                
+                # Some strategies require additional arguments
+                if strategy_name == 'stat_arb':
+                    strategies[strategy_name] = strategy_class(
+                        self.config, self.market_api, self.correlation_manager
+                    )
+                elif strategy_name in ('funding_rate_arbitrage', 'momentum_factor'):
+                    # These strategies accept optional market_api
+                    strategies[strategy_name] = strategy_class(
+                        self.config, self.market_api
+                    )
+                else:
+                    # Standard strategies only take config
+                    strategies[strategy_name] = strategy_class(self.config)
+                
+                self.logger.info(f"Initialized strategy: {strategy_name}")
+                
+            except Exception as e:
+                self.logger.error(f"Failed to initialize strategy {strategy_name}: {e}")
+        
         return strategies
     
     def _initialize_strategy_selector(self):
@@ -519,8 +545,9 @@ class StrategyManager:
             for order in stale_orders:
                 try:
                     order_id = order.get('order_id')
-                    if order_id:
-                        success = self.market_api.cancel_order(order_id)
+                    symbol = order.get('symbol')
+                    if order_id and symbol:
+                        success = self.market_api.cancel_order(symbol, order_id)
                         if success:
                             self.logger.info(f"Cancelled stale order: {order['symbol']} (ID: {order_id})")
                         else:
@@ -1652,7 +1679,7 @@ class StrategyManager:
                     
                     self.logger.info(f"Cancelling open order: {symbol} {side} {size} @ {price}")
                     
-                    if self.market_api.cancel_order(order_id):
+                    if self.market_api.cancel_order(symbol, order_id):
                         self.logger.info(f"Successfully cancelled order {order_id}")
                     else:
                         self.logger.warning(f"Failed to cancel order {order_id}")

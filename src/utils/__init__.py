@@ -1,7 +1,7 @@
 # Utils package
 
 from .performance_tracker import PerformanceTracker, CompletedTrade, PerformanceMetrics
-from .logger import setup_logger, log_trade, log_performance
+from .trade_database import TradeDatabase
 from .leverage_manager import LeverageManager
 from .portfolio_manager import PortfolioManager
 from .pair_selector import DynamicPairSelector
@@ -11,9 +11,7 @@ __all__ = [
     'PerformanceTracker',
     'CompletedTrade',
     'PerformanceMetrics',
-    'setup_logger',
-    'log_trade',
-    'log_performance',
+    'TradeDatabase',
     'LeverageManager',
     'PortfolioManager',
     'DynamicPairSelector',

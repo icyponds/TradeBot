@@ -8,4 +8,9 @@ hyperliquid-python-sdk>=0.0.1
 eth-account>=0.8.0
 pytest>=7.0.0
 black>=22.0.0
-flake8>=4.0.0 
+flake8>=4.0.0
+
+# Quantitative strategy dependencies
+statsmodels>=0.14.0      # ADF test, cointegration, OLS regression
+scipy>=1.11.0            # MLE optimization, statistical functions
+filterpy>=1.4.5          # Kalman Filter implementation (optional) 

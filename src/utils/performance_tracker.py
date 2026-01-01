@@ -11,15 +11,18 @@ Tracks all standard trading metrics including:
 - Expectancy
 - Per-strategy performance
 - Time-based analytics
+
+Storage: SQLite database
 """
 
-import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
 from pathlib import Path
 import statistics
+
+from .trade_database import TradeDatabase
 
 
 @dataclass
@@ -218,6 +221,8 @@ class PerformanceTracker:
     
     Tracks all completed trades and calculates standard trading metrics
     both overall and per-strategy.
+    
+    Storage: SQLite database for efficient querying and persistence.
     """
     
     def __init__(self, config: Dict[str, Any], data_dir: str = 'data'):
@@ -233,28 +238,43 @@ class PerformanceTracker:
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(exist_ok=True)
         
-        # Trade history
+        # Initialize SQLite database
+        db_path = self.data_dir / 'trades.db'
+        self.db = TradeDatabase(str(db_path))
+        
+        # In-memory cache for current session
         self.completed_trades: List[CompletedTrade] = []
+        self._load_recent_trades_to_cache()
         
         # Equity tracking for drawdown calculation
         self.initial_equity: float = 0.0
         self.equity_curve: List[Dict[str, Any]] = []
         
-        # Per-strategy tracking
+        # Per-strategy tracking (loaded on demand from DB)
         self.strategy_trades: Dict[str, List[CompletedTrade]] = {}
         
-        # Per-symbol tracking
+        # Per-symbol tracking (loaded on demand from DB)
         self.symbol_trades: Dict[str, List[CompletedTrade]] = {}
         
-        # Daily/Weekly/Monthly PnL tracking
+        # Daily/Weekly/Monthly PnL tracking (now from DB)
         self.daily_pnl: Dict[str, float] = {}
         self.weekly_pnl: Dict[str, float] = {}
         self.monthly_pnl: Dict[str, float] = {}
         
-        # Load historical data
-        self._load_trade_history()
-        
-        self.logger.info(f"PerformanceTracker initialized with {len(self.completed_trades)} historical trades")
+        trade_count = self.db.get_trade_count()
+        self.logger.info(f"PerformanceTracker initialized with SQLite ({trade_count} trades in database)")
+    
+    def _load_recent_trades_to_cache(self, days: int = 30):
+        """Load recent trades into memory cache for fast access."""
+        try:
+            recent = self.db.get_recent_trades(days=days)
+            self.completed_trades = [
+                CompletedTrade.from_dict(t) for t in recent
+            ]
+            self.logger.debug(f"Loaded {len(self.completed_trades)} recent trades to cache")
+        except Exception as e:
+            self.logger.error(f"Error loading trades to cache: {e}")
+            self.completed_trades = []
     
     def set_initial_equity(self, equity: float):
         """Set the initial equity for tracking."""
@@ -273,38 +293,30 @@ class PerformanceTracker:
         Args:
             trade: The completed trade to record
         """
+        # Insert into SQLite database
+        trade_id = self.db.insert_trade(trade.to_dict())
+        
+        # Update in-memory cache
         self.completed_trades.append(trade)
         
-        # Update strategy-specific tracking
+        # Update strategy-specific tracking (in-memory)
         if trade.strategy not in self.strategy_trades:
             self.strategy_trades[trade.strategy] = []
         self.strategy_trades[trade.strategy].append(trade)
         
-        # Update symbol-specific tracking
+        # Update symbol-specific tracking (in-memory)
         if trade.symbol not in self.symbol_trades:
             self.symbol_trades[trade.symbol] = []
         self.symbol_trades[trade.symbol].append(trade)
         
-        # Update time-based PnL
-        trade_date = trade.exit_time.strftime('%Y-%m-%d')
-        trade_week = trade.exit_time.strftime('%Y-W%W')
-        trade_month = trade.exit_time.strftime('%Y-%m')
-        
-        self.daily_pnl[trade_date] = self.daily_pnl.get(trade_date, 0.0) + trade.pnl
-        self.weekly_pnl[trade_week] = self.weekly_pnl.get(trade_week, 0.0) + trade.pnl
-        self.monthly_pnl[trade_month] = self.monthly_pnl.get(trade_month, 0.0) + trade.pnl
-        
-        # Update equity curve
+        # Update equity curve in database
         current_equity = self.initial_equity + sum(t.pnl for t in self.completed_trades)
-        self.equity_curve.append({
-            'timestamp': trade.exit_time.isoformat(),
-            'equity': current_equity,
-            'pnl': trade.pnl,
-            'trade_symbol': trade.symbol,
-        })
-        
-        # Save to file
-        self._save_trade_history()
+        self.db.insert_equity_snapshot(
+            equity=current_equity,
+            pnl=trade.pnl,
+            trade_id=trade_id,
+            trade_symbol=trade.symbol
+        )
         
         self.logger.info(f"Recorded trade: {trade.symbol} {trade.side} PnL=${trade.pnl:.2f} ({trade.pnl_percentage:.2f}%)")
     
@@ -552,7 +564,9 @@ class PerformanceTracker:
     
     def get_overall_metrics(self) -> PerformanceMetrics:
         """Get overall performance metrics for all trades."""
-        return self.calculate_metrics(self.completed_trades)
+        # Use SQLite aggregation for efficiency
+        stats = self.db.get_strategy_stats()  # None = all strategies
+        return self._stats_to_metrics(stats)
     
     def get_strategy_metrics(self, strategy: str) -> PerformanceMetrics:
         """
@@ -564,20 +578,79 @@ class PerformanceTracker:
         Returns:
             PerformanceMetrics for that strategy
         """
-        trades = self.strategy_trades.get(strategy, [])
-        return self.calculate_metrics(trades)
+        # Use SQLite for efficiency
+        stats = self.db.get_strategy_stats(strategy)
+        metrics = self._stats_to_metrics(stats)
+        
+        # Add streak stats
+        streak_stats = self.db.get_streak_stats(strategy)
+        metrics.current_win_streak = streak_stats['current_win_streak']
+        metrics.current_lose_streak = streak_stats['current_lose_streak']
+        metrics.max_win_streak = streak_stats['max_win_streak']
+        metrics.max_lose_streak = streak_stats['max_lose_streak']
+        
+        return metrics
     
     def get_all_strategy_metrics(self) -> Dict[str, PerformanceMetrics]:
         """Get performance metrics for all strategies."""
+        strategies = self.db.get_strategies()
         return {
             strategy: self.get_strategy_metrics(strategy)
-            for strategy in self.strategy_trades.keys()
+            for strategy in strategies
         }
     
     def get_symbol_metrics(self, symbol: str) -> PerformanceMetrics:
         """Get performance metrics for a specific symbol."""
-        trades = self.symbol_trades.get(symbol, [])
-        return self.calculate_metrics(trades)
+        trades = self.db.get_trades_by_symbol(symbol)
+        trade_objects = [CompletedTrade.from_dict(t) for t in trades]
+        return self.calculate_metrics(trade_objects)
+    
+    def _stats_to_metrics(self, stats: Dict[str, Any]) -> PerformanceMetrics:
+        """Convert database stats dictionary to PerformanceMetrics object."""
+        metrics = PerformanceMetrics()
+        
+        if not stats or stats.get('total_trades', 0) == 0:
+            return metrics
+        
+        # Basic counts
+        metrics.total_trades = stats.get('total_trades', 0)
+        metrics.winning_trades = stats.get('winning_trades', 0)
+        metrics.losing_trades = stats.get('losing_trades', 0)
+        metrics.breakeven_trades = stats.get('breakeven_trades', 0)
+        
+        # PnL metrics
+        metrics.total_pnl = stats.get('total_pnl', 0) or 0
+        metrics.gross_profit = stats.get('gross_profit', 0) or 0
+        metrics.gross_loss = stats.get('gross_loss', 0) or 0
+        metrics.average_pnl = stats.get('avg_pnl', 0) or 0
+        metrics.average_win = stats.get('avg_win', 0) or 0
+        metrics.average_loss = stats.get('avg_loss', 0) or 0
+        metrics.largest_win = stats.get('largest_win', 0) or 0
+        metrics.largest_loss = stats.get('largest_loss', 0) or 0
+        
+        # Percentage metrics
+        metrics.win_rate = stats.get('win_rate', 0) or 0
+        metrics.loss_rate = stats.get('loss_rate', 0) or 0
+        metrics.average_pnl_percentage = stats.get('avg_pnl_pct', 0) or 0
+        metrics.average_win_percentage = stats.get('avg_win_pct', 0) or 0
+        metrics.average_loss_percentage = stats.get('avg_loss_pct', 0) or 0
+        
+        # Risk metrics
+        metrics.profit_factor = stats.get('profit_factor', 0) or 0
+        metrics.risk_reward_ratio = stats.get('risk_reward_ratio', 0) or 0
+        metrics.expectancy = stats.get('expectancy', 0) or 0
+        
+        # Time metrics
+        metrics.average_trade_duration_hours = stats.get('avg_duration_hours', 0) or 0
+        
+        # Get drawdown from DB
+        dd_stats = self.db.get_drawdown_stats()
+        metrics.max_drawdown = dd_stats.get('max_drawdown', 0)
+        metrics.max_drawdown_percentage = dd_stats.get('max_drawdown_pct', 0)
+        metrics.current_drawdown = dd_stats.get('current_drawdown', 0)
+        metrics.peak_equity = dd_stats.get('peak_equity', 0)
+        
+        return metrics
     
     def get_time_period_metrics(
         self,
@@ -599,17 +672,21 @@ class PerformanceTracker:
         if date is None:
             date = datetime.now().strftime('%Y-%m-%d')
         
-        # Filter trades for the day
-        daily_trades = [
-            t for t in self.completed_trades
-            if t.exit_time.strftime('%Y-%m-%d') == date
-        ]
+        # Get daily PnL from database
+        daily_pnl = self.db.get_daily_pnl(days=1)
+        pnl = daily_pnl.get(date, 0.0)
+        
+        # Get trades for detailed metrics
+        start = datetime.strptime(date, '%Y-%m-%d')
+        end = start + timedelta(days=1)
+        daily_trades_data = self.db.get_trades_in_range(start, end)
+        daily_trades = [CompletedTrade.from_dict(t) for t in daily_trades_data]
         
         metrics = self.calculate_metrics(daily_trades)
         
         return {
             'date': date,
-            'pnl': self.daily_pnl.get(date, 0.0),
+            'pnl': pnl,
             'trades': len(daily_trades),
             'metrics': metrics.to_dict(),
         }
@@ -619,17 +696,20 @@ class PerformanceTracker:
         if week is None:
             week = datetime.now().strftime('%Y-W%W')
         
-        # Filter trades for the week
-        weekly_trades = [
-            t for t in self.completed_trades
-            if t.exit_time.strftime('%Y-W%W') == week
-        ]
+        # Calculate week start/end
+        year, week_num = int(week[:4]), int(week.split('W')[1])
+        start = datetime.strptime(f'{year}-W{week_num}-1', '%Y-W%W-%w')
+        end = start + timedelta(days=7)
+        
+        weekly_trades_data = self.db.get_trades_in_range(start, end)
+        weekly_trades = [CompletedTrade.from_dict(t) for t in weekly_trades_data]
         
         metrics = self.calculate_metrics(weekly_trades)
+        pnl = sum(t.pnl for t in weekly_trades)
         
         return {
             'week': week,
-            'pnl': self.weekly_pnl.get(week, 0.0),
+            'pnl': pnl,
             'trades': len(weekly_trades),
             'metrics': metrics.to_dict(),
         }
@@ -639,17 +719,25 @@ class PerformanceTracker:
         if month is None:
             month = datetime.now().strftime('%Y-%m')
         
-        # Filter trades for the month
-        monthly_trades = [
-            t for t in self.completed_trades
-            if t.exit_time.strftime('%Y-%m') == month
-        ]
+        # Get monthly PnL from database
+        monthly_pnl = self.db.get_monthly_pnl(months=1)
+        pnl = monthly_pnl.get(month, 0.0)
+        
+        # Calculate month start/end
+        start = datetime.strptime(f'{month}-01', '%Y-%m-%d')
+        if start.month == 12:
+            end = start.replace(year=start.year + 1, month=1)
+        else:
+            end = start.replace(month=start.month + 1)
+        
+        monthly_trades_data = self.db.get_trades_in_range(start, end)
+        monthly_trades = [CompletedTrade.from_dict(t) for t in monthly_trades_data]
         
         metrics = self.calculate_metrics(monthly_trades)
         
         return {
             'month': month,
-            'pnl': self.monthly_pnl.get(month, 0.0),
+            'pnl': pnl,
             'trades': len(monthly_trades),
             'metrics': metrics.to_dict(),
         }
@@ -666,30 +754,41 @@ class PerformanceTracker:
         """
         overall = self.get_overall_metrics()
         
-        # Calculate recent performance (last 7 days)
-        week_ago = datetime.now() - timedelta(days=7)
-        recent_trades = [t for t in self.completed_trades if t.exit_time >= week_ago]
+        # Recent performance (last 7 days) from database
+        recent_trades_data = self.db.get_recent_trades(days=7)
+        recent_trades = [CompletedTrade.from_dict(t) for t in recent_trades_data]
         recent_metrics = self.calculate_metrics(recent_trades)
         
-        # Strategy breakdown
+        # Strategy breakdown from database
+        all_strategy_stats = self.db.get_all_strategy_stats()
         strategy_breakdown = {}
-        for strategy, trades in self.strategy_trades.items():
-            strategy_metrics = self.calculate_metrics(trades)
+        for strategy, stats in all_strategy_stats.items():
             strategy_breakdown[strategy] = {
-                'trades': len(trades),
-                'pnl': sum(t.pnl for t in trades),
-                'win_rate': strategy_metrics.win_rate,
-                'profit_factor': strategy_metrics.profit_factor,
-                'expectancy': strategy_metrics.expectancy,
+                'trades': stats.get('total_trades', 0),
+                'pnl': stats.get('total_pnl', 0) or 0,
+                'win_rate': stats.get('win_rate', 0) or 0,
+                'profit_factor': stats.get('profit_factor', 0) or 0,
+                'expectancy': stats.get('expectancy', 0) or 0,
             }
         
-        # Top performers (symbols)
-        symbol_pnl = {
-            symbol: sum(t.pnl for t in trades)
-            for symbol, trades in self.symbol_trades.items()
-        }
+        # Top/worst symbols from database
+        symbols = self.db.get_symbols()
+        symbol_pnl = {}
+        for symbol in symbols:
+            stats = self.db.get_symbol_stats(symbol)
+            symbol_pnl[symbol] = stats.get('total_pnl', 0) or 0
+        
         top_symbols = sorted(symbol_pnl.items(), key=lambda x: x[1], reverse=True)[:5]
         worst_symbols = sorted(symbol_pnl.items(), key=lambda x: x[1])[:5]
+        
+        # Daily and monthly PnL from database
+        daily_pnl = self.db.get_daily_pnl(days=7)
+        monthly_pnl = self.db.get_monthly_pnl(months=3)
+        
+        # Get total trade count and first trade date
+        total_trades = self.db.get_trade_count()
+        all_trades = self.db.get_all_trades(limit=1)
+        first_trade_date = all_trades[0]['entry_time'] if all_trades else None
         
         return {
             'overall': overall.to_dict(),
@@ -701,10 +800,10 @@ class PerformanceTracker:
             'strategy_breakdown': strategy_breakdown,
             'top_symbols': dict(top_symbols),
             'worst_symbols': dict(worst_symbols),
-            'daily_pnl': dict(sorted(self.daily_pnl.items())[-7:]),  # Last 7 days
-            'monthly_pnl': dict(sorted(self.monthly_pnl.items())[-3:]),  # Last 3 months
-            'total_completed_trades': len(self.completed_trades),
-            'tracking_since': self.completed_trades[0].entry_time.isoformat() if self.completed_trades else None,
+            'daily_pnl': daily_pnl,
+            'monthly_pnl': monthly_pnl,
+            'total_completed_trades': total_trades,
+            'tracking_since': first_trade_date,
         }
     
     def log_performance_report(self):
@@ -756,67 +855,9 @@ class PerformanceTracker:
         
         self.logger.info("=" * 70)
     
-    def _save_trade_history(self):
-        """Save trade history to file."""
-        try:
-            trades_file = self.data_dir / 'trade_history.json'
-            data = {
-                'trades': [t.to_dict() for t in self.completed_trades],
-                'initial_equity': self.initial_equity,
-                'equity_curve': self.equity_curve,
-                'daily_pnl': self.daily_pnl,
-                'weekly_pnl': self.weekly_pnl,
-                'monthly_pnl': self.monthly_pnl,
-                'last_updated': datetime.now().isoformat(),
-            }
-            
-            with open(trades_file, 'w') as f:
-                json.dump(data, f, indent=2, default=str)
-            
-            self.logger.debug(f"Saved {len(self.completed_trades)} trades to {trades_file}")
-            
-        except Exception as e:
-            self.logger.error(f"Error saving trade history: {e}")
-    
-    def _load_trade_history(self):
-        """Load trade history from file."""
-        try:
-            trades_file = self.data_dir / 'trade_history.json'
-            
-            if not trades_file.exists():
-                self.logger.info("No trade history file found, starting fresh")
-                return
-            
-            with open(trades_file, 'r') as f:
-                data = json.load(f)
-            
-            self.initial_equity = data.get('initial_equity', 0.0)
-            self.equity_curve = data.get('equity_curve', [])
-            self.daily_pnl = data.get('daily_pnl', {})
-            self.weekly_pnl = data.get('weekly_pnl', {})
-            self.monthly_pnl = data.get('monthly_pnl', {})
-            
-            # Load trades
-            for trade_data in data.get('trades', []):
-                trade = CompletedTrade.from_dict(trade_data)
-                self.completed_trades.append(trade)
-                
-                # Rebuild strategy and symbol tracking
-                if trade.strategy not in self.strategy_trades:
-                    self.strategy_trades[trade.strategy] = []
-                self.strategy_trades[trade.strategy].append(trade)
-                
-                if trade.symbol not in self.symbol_trades:
-                    self.symbol_trades[trade.symbol] = []
-                self.symbol_trades[trade.symbol].append(trade)
-            
-            self.logger.info(f"Loaded {len(self.completed_trades)} trades from history")
-            
-        except Exception as e:
-            self.logger.error(f"Error loading trade history: {e}")
-    
     def reset(self):
         """Reset all performance data."""
+        # Clear in-memory cache
         self.completed_trades = []
         self.strategy_trades = {}
         self.symbol_trades = {}
@@ -825,8 +866,17 @@ class PerformanceTracker:
         self.weekly_pnl = {}
         self.monthly_pnl = {}
         
-        # Save empty state
-        self._save_trade_history()
-        self.logger.info("Performance tracker reset")
+        # Clear database
+        self.db.delete_all_trades()
+        self.logger.info("Performance tracker reset - all data cleared from database")
+    
+    def get_database_stats(self) -> Dict[str, Any]:
+        """Get statistics about the database."""
+        return {
+            'total_trades': self.db.get_trade_count(),
+            'strategies': self.db.get_strategies(),
+            'symbols': self.db.get_symbols(),
+            'database_path': str(self.db.db_path),
+        }
 
 
