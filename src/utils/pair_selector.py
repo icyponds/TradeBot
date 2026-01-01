@@ -993,7 +993,7 @@ class DynamicPairSelector:
                     self.backfill_symbols_in_queue.add(sym)
                     queued += 1
             if queued > 0:
-                self.logger.info(f\"Queued {queued} assets for staged backfill\")
+                self.logger.info(f"Queued {queued} assets for staged backfill")
         
         # Build correlation matrix
         self._build_correlation_matrix()
