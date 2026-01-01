@@ -1198,18 +1198,115 @@ class HyperliquidAPI:
     _INITIAL_SLIPPAGE_BPS = 10  # 0.1% initial slippage tolerance
     _MAX_SLIPPAGE_BPS = 100  # 1% max slippage for aggressive fills
     
+    def _resolve_market_info(
+        self,
+        symbol: str,
+        market_type: str = "perp"
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Resolve market information for any market type.
+        
+        Args:
+            symbol: Trading symbol (e.g., "BTC" for perp, "BTC/USDC" for spot)
+            market_type: "perp", "hip3", or "spot"
+            
+        Returns:
+            Dict with 'symbol', 'price', 'sz_decimals', 'tick_size'
+        """
+        try:
+            if market_type == "spot":
+                # Parse spot pair (e.g., "BTC/USDC" or "BTC" defaults to /USDC)
+                if "/" in symbol:
+                    base_token, quote_token = symbol.split("/", 1)
+                else:
+                    base_token, quote_token = symbol, "USDC"
+                
+                # Get spot metadata
+                spot_meta = self.get_spot_meta()
+                if not spot_meta:
+                    return None
+                
+                # Find pair name and decimals
+                pair_name = None
+                sz_decimals = 6  # Default for spot
+                
+                for pair in spot_meta.get('universe', []):
+                    tokens = pair.get('tokens', [])
+                    if len(tokens) >= 2:
+                        token_list = spot_meta.get('tokens', [])
+                        if (tokens[0] < len(token_list) and tokens[1] < len(token_list)):
+                            if (token_list[tokens[0]].get('name') == base_token and
+                                token_list[tokens[1]].get('name') == quote_token):
+                                pair_name = pair.get('name')
+                                sz_decimals = token_list[tokens[0]].get('szDecimals', 6)
+                                break
+                
+                if not pair_name:
+                    self.logger.error(f"Spot pair {base_token}/{quote_token} not found")
+                    return None
+                
+                # Get price
+                price = self.get_spot_price(base_token, quote_token)
+                if not price:
+                    return None
+                
+                return {
+                    'symbol': pair_name,
+                    'display_symbol': f"{base_token}/{quote_token}",
+                    'price': price,
+                    'sz_decimals': sz_decimals,
+                    'tick_size': 0.0001,  # Default for spot
+                    'market_type': 'spot',
+                }
+            else:
+                # Perp or HIP-3 (both use same symbol format)
+                asset_info = self._get_asset_info_for_symbol(symbol)
+                price = self.get_current_price(symbol)
+                
+                if not price:
+                    return None
+                
+                return {
+                    'symbol': symbol,
+                    'display_symbol': symbol,
+                    'price': price,
+                    'sz_decimals': asset_info.get('szDecimals', 2) if asset_info else 2,
+                    'tick_size': self._get_tick_size(symbol),
+                    'market_type': market_type,
+                }
+                
+        except Exception as e:
+            self.logger.error(f"Error resolving market info for {symbol}: {e}")
+            return None
+    
+    def _get_fresh_price(
+        self,
+        symbol: str,
+        market_type: str = "perp"
+    ) -> Optional[float]:
+        """Get fresh price for any market type."""
+        if market_type == "spot":
+            if "/" in symbol:
+                base_token, quote_token = symbol.split("/", 1)
+            else:
+                base_token, quote_token = symbol, "USDC"
+            return self.get_spot_price(base_token, quote_token)
+        else:
+            return self.get_current_price(symbol)
+    
     def execute_order(
         self,
         symbol: str,
         side: str,
         size: float,
         reduce_only: bool = False,
-        urgency: str = "normal"
+        urgency: str = "normal",
+        market_type: str = "perp"
     ) -> Optional[Dict[str, Any]]:
         """
-        Smart order execution with automatic price management.
+        Unified smart order execution for all market types.
         
-        Automatically determines optimal execution strategy:
+        Works the same way for perps, HIP-3, and spot markets:
         - Starts with tight spread around mid-price
         - Walks the price if not immediately filled
         - Handles partial fills automatically
@@ -1217,10 +1314,13 @@ class HyperliquidAPI:
         
         Args:
             symbol: Trading symbol
+                   - For perp/hip3: "BTC", "ETH", etc.
+                   - For spot: "BTC/USDC" or "BTC" (defaults to /USDC)
             side: 'buy' or 'sell'
-            size: Order size
-            reduce_only: Only reduce existing position
+            size: Order size in base asset
+            reduce_only: Only reduce existing position (perp/hip3 only)
             urgency: 'low' (patient), 'normal', or 'high' (aggressive)
+            market_type: 'perp', 'hip3', or 'spot'
             
         Returns:
             Order result with fill details
@@ -1230,16 +1330,18 @@ class HyperliquidAPI:
             return None
         
         try:
-            # Get asset info and round size
-            asset_info = self._get_asset_info_for_symbol(symbol)
-            sz_decimals = asset_info.get('szDecimals', 2) if asset_info else 2
-            remaining_size = round(size, sz_decimals)
-            
-            # Get current market price
-            current_price = self.get_current_price(symbol)
-            if not current_price:
-                self.logger.error(f"Cannot execute order: no price for {symbol}")
+            # Resolve market information
+            market_info = self._resolve_market_info(symbol, market_type)
+            if not market_info:
+                self.logger.error(f"Cannot resolve market info for {symbol} ({market_type})")
                 return None
+            
+            trading_symbol = market_info['symbol']
+            display_symbol = market_info['display_symbol']
+            current_price = market_info['price']
+            sz_decimals = market_info['sz_decimals']
+            
+            remaining_size = round(size, sz_decimals)
             
             # Validate minimum order value ($10)
             order_value = remaining_size * current_price
@@ -1265,12 +1367,17 @@ class HyperliquidAPI:
             weighted_price_sum = 0.0
             all_fills = []
             
+            self.logger.info(
+                f"Executing {market_type} order: {side} {remaining_size} {display_symbol} "
+                f"@ ~{current_price:.6f} (urgency: {urgency})"
+            )
+            
             for attempt in range(max_attempts):
                 if remaining_size <= 0:
                     break
                 
                 # Refresh price on each attempt
-                fresh_price = self.get_current_price(symbol)
+                fresh_price = self._get_fresh_price(symbol, market_type)
                 if fresh_price:
                     current_price = fresh_price
                 
@@ -1286,27 +1393,44 @@ class HyperliquidAPI:
                 else:
                     exec_price = current_price * (1 - slippage_mult)
                 
-                exec_price = self._round_to_tick(exec_price, symbol)
+                # Round to tick size
+                if market_type == "spot":
+                    # For spot, use basic rounding
+                    exec_price = round(exec_price, 6)
+                else:
+                    exec_price = self._round_to_tick(exec_price, trading_symbol)
                 
                 self.logger.debug(
-                    f"Order attempt {attempt + 1}/{max_attempts}: {side} {remaining_size} {symbol} "
-                    f"@ {exec_price:.6f} (slippage: {slippage_bps}bps)"
+                    f"Order attempt {attempt + 1}/{max_attempts}: {side} {remaining_size} "
+                    f"{display_symbol} @ {exec_price:.6f} (slippage: {slippage_bps}bps)"
                 )
                 
                 # Place IOC order
-                response = self._rate_limited_call(
-                    self.exchange.order,
-                    symbol,
-                    is_buy,
-                    remaining_size,
-                    exec_price,
-                    {"limit": {"tif": "Ioc"}},
-                    reduce_only=reduce_only
-                )
+                if market_type == "spot":
+                    # Spot order
+                    response = self._rate_limited_call(
+                        self.exchange.order,
+                        trading_symbol,
+                        is_buy,
+                        remaining_size,
+                        exec_price,
+                        {"limit": {"tif": "Ioc"}}
+                    )
+                else:
+                    # Perp/HIP-3 order
+                    response = self._rate_limited_call(
+                        self.exchange.order,
+                        trading_symbol,
+                        is_buy,
+                        remaining_size,
+                        exec_price,
+                        {"limit": {"tif": "Ioc"}},
+                        reduce_only=reduce_only
+                    )
                 
                 # Parse response
                 fill_result = self._parse_order_response(
-                    response, symbol, side, remaining_size, exec_price
+                    response, trading_symbol, side, remaining_size, exec_price
                 )
                 
                 if fill_result:
@@ -1339,8 +1463,9 @@ class HyperliquidAPI:
                 status = 'filled' if remaining_size <= 0 else 'partial'
                 
                 result = {
-                    'order_id': f"smart_{symbol}_{int(time.time() * 1000)}",
-                    'symbol': symbol,
+                    'order_id': f"smart_{trading_symbol}_{int(time.time() * 1000)}",
+                    'symbol': trading_symbol,
+                    'display_symbol': display_symbol,
                     'side': side,
                     'size': size,
                     'filled_size': total_filled,
@@ -1348,34 +1473,40 @@ class HyperliquidAPI:
                     'avg_fill_price': avg_fill_price,
                     'status': status,
                     'fills': all_fills,
+                    'market_type': market_type,
                     'timestamp': datetime.now(),
                 }
                 
                 self.logger.info(
                     f"{'✓' if status == 'filled' else '⚠'} Order {status}: "
-                    f"{side} {total_filled:.6f}/{size:.6f} {symbol} @ {avg_fill_price:.6f}"
+                    f"{side} {total_filled:.6f}/{size:.6f} {display_symbol} @ {avg_fill_price:.6f}"
                 )
                 
                 # Invalidate caches
                 self.cache.invalidate("positions")
+                if market_type == "spot":
+                    self.cache.invalidate("spot_balances")
                 
                 return result
             else:
                 self.logger.warning(
-                    f"Order not filled after {max_attempts} attempts: {side} {size} {symbol}"
+                    f"Order not filled after {max_attempts} attempts: "
+                    f"{side} {size} {display_symbol}"
                 )
                 return {
                     'order_id': None,
-                    'symbol': symbol,
+                    'symbol': trading_symbol,
+                    'display_symbol': display_symbol,
                     'side': side,
                     'size': size,
                     'filled_size': 0,
                     'status': 'not_filled',
+                    'market_type': market_type,
                     'timestamp': datetime.now(),
                 }
                 
         except Exception as e:
-            self.logger.error(f"Smart order execution failed: {e}")
+            self.logger.error(f"Order execution failed for {symbol} ({market_type}): {e}")
             return None
     
     def place_order(
@@ -1704,66 +1835,65 @@ class HyperliquidAPI:
             self.logger.error(f"Error getting spot balances: {e}")
             return {}
     
-    def place_spot_order(
+    def execute_spot_order(
         self,
         base_token: str,
-        quote_token: str,
         side: str,
         size: float,
-        price: Optional[float] = None,
-        slippage: float = 0.05
+        quote_token: str = "USDC",
+        urgency: str = "normal"
     ) -> Optional[Dict[str, Any]]:
-        """Place a spot order."""
-        if not self.exchange:
-            self.logger.error("Exchange client not initialized")
-            return None
+        """
+        Execute a spot order using unified smart execution.
         
-        try:
-            spot_meta = self.get_spot_meta()
-            if not spot_meta:
-                return None
+        Args:
+            base_token: Base token (e.g., "BTC", "ETH")
+            side: 'buy' or 'sell'
+            size: Order size in base token
+            quote_token: Quote token (default: "USDC")
+            urgency: 'low', 'normal', or 'high'
             
-            # Find pair name
-            pair_name = None
-            for pair in spot_meta.get('universe', []):
-                tokens = pair.get('tokens', [])
-                if len(tokens) >= 2:
-                    token_list = spot_meta.get('tokens', [])
-                    if (tokens[0] < len(token_list) and tokens[1] < len(token_list)):
-                        if (token_list[tokens[0]].get('name') == base_token and
-                            token_list[tokens[1]].get('name') == quote_token):
-                            pair_name = pair.get('name')
-                            break
+        Returns:
+            Order result with fill details
+        """
+        symbol = f"{base_token}/{quote_token}"
+        return self.execute_order(
+            symbol=symbol,
+            side=side,
+            size=size,
+            urgency=urgency,
+            market_type="spot"
+        )
+    
+    def execute_hip3_order(
+        self,
+        symbol: str,
+        side: str,
+        size: float,
+        reduce_only: bool = False,
+        urgency: str = "normal"
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Execute a HIP-3 perp order using unified smart execution.
+        
+        Args:
+            symbol: HIP-3 perp symbol
+            side: 'buy' or 'sell'
+            size: Order size
+            reduce_only: Only reduce existing position
+            urgency: 'low', 'normal', or 'high'
             
-            if not pair_name:
-                self.logger.error(f"Spot pair {base_token}/{quote_token} not found")
-                return None
-            
-            is_buy = side.lower() == 'buy'
-            
-            if price is None:
-                response = self._rate_limited_call(
-                    self.exchange.market_open,
-                    pair_name,
-                    is_buy,
-                    size,
-                    slippage=slippage
-                )
-            else:
-                response = self._rate_limited_call(
-                    self.exchange.order,
-                    pair_name,
-                    is_buy,
-                    size,
-                    price,
-                    {"limit": {"tif": "Gtc"}}
-                )
-            
-            return self._parse_order_response(response, pair_name, side, size, price)
-            
-        except Exception as e:
-            self.logger.error(f"Spot order failed: {e}")
-            return None
+        Returns:
+            Order result with fill details
+        """
+        return self.execute_order(
+            symbol=symbol,
+            side=side,
+            size=size,
+            reduce_only=reduce_only,
+            urgency=urgency,
+            market_type="hip3"
+        )
     
     # =========================================================================
     # FUNDING RATES

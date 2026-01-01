@@ -299,23 +299,39 @@ class FundingRateArbitrageStrategy(BaseStrategy):
                 self.logger.error(f"Could not get prices for {symbol}")
                 return None
             
-            # Execute perpetual leg
+            # Execute perpetual leg using unified smart execution
             perp_order_side = 'sell' if perp_side == 'short' else 'buy'
-            perp_result = self.market_api.place_order(symbol, perp_order_side, size, None)
+            perp_result = self.market_api.execute_order(
+                symbol=symbol,
+                side=perp_order_side,
+                size=size,
+                market_type="perp"
+            )
             
-            if not perp_result:
-                self.logger.error(f"Failed to place perp order for {symbol}")
+            if not perp_result or perp_result.get('filled_size', 0) == 0:
+                self.logger.error(f"Failed to fill perp order for {symbol}")
                 return None
             
-            # Execute spot leg
+            # Execute spot leg using unified smart execution
             spot_order_side = 'buy' if spot_side == 'long' else 'sell'
-            spot_result = self.market_api.place_spot_order(symbol, "USDC", spot_order_side, size)
+            spot_result = self.market_api.execute_order(
+                symbol=f"{symbol}/USDC",
+                side=spot_order_side,
+                size=size,
+                market_type="spot"
+            )
             
-            if not spot_result:
-                self.logger.error(f"Failed to place spot order for {symbol} - unwinding perp")
-                # Unwind the perp position
+            if not spot_result or spot_result.get('filled_size', 0) == 0:
+                self.logger.error(f"Failed to fill spot order for {symbol} - unwinding perp")
+                # Unwind the perp position with high urgency
                 unwind_side = 'buy' if perp_side == 'short' else 'sell'
-                self.market_api.place_order(symbol, unwind_side, size, None)
+                self.market_api.execute_order(
+                    symbol=symbol,
+                    side=unwind_side,
+                    size=size,
+                    urgency="high",
+                    market_type="perp"
+                )
                 return None
             
             # Create position record
@@ -373,13 +389,26 @@ class FundingRateArbitrageStrategy(BaseStrategy):
                 self.logger.error(f"Could not get prices for {symbol}")
                 return None
             
-            # Close perpetual position
+            # Close perpetual position with high urgency (exits should be fast)
             perp_close_side = 'buy' if position.perp_side == 'short' else 'sell'
-            perp_result = self.market_api.place_order(symbol, perp_close_side, position.perp_size, None)
+            perp_result = self.market_api.execute_order(
+                symbol=symbol,
+                side=perp_close_side,
+                size=position.perp_size,
+                reduce_only=True,
+                urgency="high",
+                market_type="perp"
+            )
             
-            # Close spot position
+            # Close spot position with high urgency
             spot_close_side = 'sell' if position.spot_side == 'long' else 'buy'
-            spot_result = self.market_api.place_spot_order(symbol, "USDC", spot_close_side, position.spot_size)
+            spot_result = self.market_api.execute_order(
+                symbol=f"{symbol}/USDC",
+                side=spot_close_side,
+                size=position.spot_size,
+                urgency="high",
+                market_type="spot"
+            )
             
             # Calculate P&L
             perp_pnl = self._calculate_perp_pnl(position, perp_price)
