@@ -48,8 +48,8 @@ class FundingRateArbitrageStrategy(BaseStrategy):
         arb_config = config.get('strategies', {}).get('funding_rate_arbitrage', {})
         
         # Entry/exit thresholds (as decimals, e.g., 0.0003 = 0.03%)
-        self.entry_threshold = arb_config.get('entry_threshold', 0.0003)  # 0.03% per 8h ~= 41% APR
-        self.exit_threshold = arb_config.get('exit_threshold', 0.0001)    # 0.01% per 8h
+        self.entry_threshold = arb_config.get('entry_threshold', 0.000017)  # 0.0017% per hour ~= 15% APR
+        self.exit_threshold = arb_config.get('exit_threshold', 0.000006)   # 0.0006% per hour ~= 5% APR
         
         # Position management
         self.max_position_pct = arb_config.get('max_position_pct', 20)    # Max % of portfolio per arb

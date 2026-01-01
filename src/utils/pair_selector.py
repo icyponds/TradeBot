@@ -556,6 +556,55 @@ class DynamicPairSelector:
         
         return []
     
+    def _calculate_asset_metrics(self, asset: Dict[str, Any]) -> Optional[AssetMetrics]:
+        """
+        Calculate metrics for a single asset.
+        
+        Used by background fetcher to evaluate newly-loaded assets.
+        """
+        try:
+            symbol = asset.get('name', '')
+            market_type = asset.get('market_type', 'perp')
+            is_hip3 = asset.get('is_hip3', False)
+            
+            if not symbol:
+                return None
+            
+            # Create metrics object
+            metrics = AssetMetrics(
+                symbol=symbol,
+                market_type=market_type,
+                is_hip3=is_hip3,
+                open_interest=float(asset.get('openInterest', 0)),
+                volume_24h=float(asset.get('volume24h', asset.get('volume_24h', 0))),
+                mark_price=float(asset.get('markPrice', 0)),
+                bid=float(asset.get('bid', 0)),
+                ask=float(asset.get('ask', 0)),
+                funding_rate=float(asset.get('fundingRate', 0)),
+                max_leverage=float(asset.get('maxLeverage', 1)),
+                dex=asset.get('dex', ''),
+            )
+            
+            # Calculate individual scores
+            metrics.liquidity_score = self._calculate_liquidity_score(asset)
+            metrics.volatility_score, metrics.volatility = self._calculate_volatility_score(symbol, asset)
+            (metrics.strategy_fit_score, 
+             metrics.momentum_score, 
+             metrics.mean_reversion_score) = self._calculate_strategy_fit_score(symbol, asset, metrics.volatility)
+            metrics.historical_perf_score, metrics.sharpe_ratio = self._calculate_historical_performance_score(symbol)
+            
+            # Calculate composite score
+            metrics.composite_score = self._calculate_composite_score(metrics, [])
+            
+            # Store for later reference
+            self.asset_metrics[symbol] = metrics
+            
+            return metrics
+            
+        except Exception as e:
+            self.logger.debug(f"Error calculating metrics for {asset.get('name', '?')}: {e}")
+            return None
+    
     def _calculate_composite_score(self, metrics: AssetMetrics, 
                                     already_selected: List[str]) -> float:
         """
@@ -1003,7 +1052,7 @@ class DynamicPairSelector:
         RATE_LIMIT_DELAY = 1.5  # seconds between OHLCV fetches (~40/min)
         MAX_INITIAL_LOAD = 15   # Load top 15 assets initially (~25 seconds)
         
-        max_pairs = self._get_max_pairs_to_trade()
+        # Note: No max_pairs limit - all assets passing quality filters are traded
         loaded_symbols = set()  # Track what we've loaded
         assets_with_data = []   # Assets that have OHLCV data ready
         
@@ -1128,7 +1177,9 @@ class DynamicPairSelector:
         all_metrics.sort(key=lambda m: m.composite_score, reverse=True)
         
         # =====================================================================
-        # STEP 4: Select top pairs with diversification penalty
+        # STEP 4: Select ALL pairs that pass quality filters (no max limit)
+        # Quality filtering already happened in _filter_assets based on:
+        # - min_open_interest, min_volume_threshold, liquidity requirements
         # =====================================================================
         selected_pairs = []
         pairs_metadata = {}
@@ -1138,8 +1189,7 @@ class DynamicPairSelector:
         self.logger.info("=" * 60)
         
         for metrics in all_metrics:
-            if len(selected_pairs) >= max_pairs:
-                break
+            # No max_pairs limit - trade all assets that pass quality filters
             
             # Recalculate composite with diversification penalty
             final_score = self._calculate_composite_score(metrics, selected_pairs)
@@ -1297,6 +1347,9 @@ class DynamicPairSelector:
                     if hasattr(self.market_api, 'subscribe_symbol'):
                         self.market_api.subscribe_symbol(sym)
                     
+                    # Dynamically add to trading pairs if it qualifies
+                    self._try_add_to_trading_pairs(asset)
+                    
                     # Also load corresponding spot if this is a perp
                     # For direct-match tokens (HYPE perp -> HYPE spot), always try to load spot
                     if market_type == 'perp':
@@ -1356,6 +1409,56 @@ class DynamicPairSelector:
             'loaded_assets': loaded_count,
             'thread_alive': self._backfill_thread.is_alive() if self._backfill_thread else False
         }
+    
+    def _try_add_to_trading_pairs(self, asset: Dict[str, Any]):
+        """
+        Try to add a newly-loaded asset to the trading pairs pool.
+        
+        Called by background fetcher after loading an asset's data.
+        Adds the asset if it passes quality filters (no max_pairs limit).
+        Quality filters: min_open_interest, min_volume_threshold, liquidity.
+        """
+        try:
+            symbol = asset.get('name', '')
+            market_type = asset.get('market_type', 'perp')
+            
+            if not symbol:
+                return
+            
+            # Skip spot-only assets for trading (they're just for hedging)
+            if market_type == 'spot':
+                return
+            
+            # Already in selected pairs?
+            if symbol in self.selected_pairs:
+                return
+            
+            # Calculate metrics for this asset
+            metrics = self._calculate_asset_metrics(asset)
+            if not metrics or metrics.composite_score <= 0:
+                self.logger.debug(f"[DynamicPairs] Skipped {symbol}: insufficient metrics or score")
+                return
+            
+            # Apply diversification penalty based on current pairs
+            final_score = self._calculate_composite_score(metrics, self.selected_pairs)
+            
+            current_count = len(self.selected_pairs)
+            
+            # No max_pairs limit - add all assets that pass quality filters
+            self.selected_pairs.append(symbol)
+            self.selected_pairs_metadata[symbol] = {
+                'market_type': market_type,
+                'is_hip3': asset.get('is_hip3', False),
+                'dex': asset.get('dex', ''),
+                'open_interest': asset.get('openInterest', 0),
+                'volume_24h': asset.get('volume_24h', 0),
+                'max_leverage': asset.get('maxLeverage', 10),
+                'composite_score': final_score,
+            }
+            self.logger.info(f"[DynamicPairs] Added {symbol} to trading pool (total: {current_count + 1}) | Score: {final_score:.3f}")
+                    
+        except Exception as e:
+            self.logger.debug(f"[DynamicPairs] Error adding {asset.get('name', '?')}: {e}")
     
     def update_pair_performance(self, symbol: str, pnl: float):
         """

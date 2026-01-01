@@ -133,17 +133,19 @@ class StrategySelector:
     - Cooling-off period for strategies with losing streaks
     """
     
-    def __init__(self, performance_tracker, config: Dict[str, Any]):
+    def __init__(self, performance_tracker, config: Dict[str, Any], strategy_names: Optional[List[str]] = None):
         """
         Initialize the strategy selector.
         
         Args:
             performance_tracker: PerformanceTracker instance for getting metrics
             config: Configuration dictionary
+            strategy_names: List of strategy names to register (for default rankings)
         """
         self.performance_tracker = performance_tracker
         self.config = config
         self.logger = logging.getLogger(__name__)
+        self._registered_strategies: List[str] = strategy_names or []
         
         # Automatic selection - AUTO mode combines all methods intelligently
         self.selection_mode = SelectionMode.AUTO
@@ -159,11 +161,16 @@ class StrategySelector:
         
         # Cooling-off: disable strategies after consecutive losses
         self.enable_cooling_off = True
-        self.cooling_off_hours = 12        # 12 hour timeout
+        self.cooling_off_hours = 1         # 1 hour timeout (was 12)
         self.cooling_off_loss_streak = 4   # 4 consecutive losses triggers cooldown
         
+        # Track strategies on probation (recently exited cooling-off)
+        # These get capped at min_weight until they prove themselves
+        self.on_probation: Dict[str, datetime] = {}
+        self.probation_hours = 24          # 24 hours of reduced allocation after cooling-off
+        
         # Weight settings for signal strength adjustment
-        self.min_weight = 0.3
+        self.min_weight = 0.1  # Reduced from 0.3 - poor performers get 10% allocation
         self.max_weight = 1.0
         
         # Re-rank every 30 minutes
@@ -230,7 +237,46 @@ class StrategySelector:
         # Decay factor for recency weighting (higher = more weight on recent)
         self.recency_decay = 0.95
         
+        # Initialize default rankings for all registered strategies
+        self._initialize_default_rankings()
+        
         self.logger.info("StrategySelector initialized - AUTO mode (combines all methods intelligently)")
+    
+    def _initialize_default_rankings(self):
+        """
+        Initialize default rankings for all registered strategies.
+        
+        All strategies start enabled with equal weights until performance data
+        is available for smarter ranking.
+        """
+        if not self._registered_strategies:
+            self.logger.debug("No strategies registered for default rankings")
+            return
+        
+        self.logger.info(f"Initializing default rankings for {len(self._registered_strategies)} strategies")
+        
+        for rank, strategy_name in enumerate(self._registered_strategies, 1):
+            self.strategy_rankings[strategy_name] = StrategyRanking(
+                strategy_name=strategy_name,
+                rank=rank,
+                score=0.5,  # Neutral score
+                is_enabled=True,  # All strategies start enabled
+                weight=1.0,  # Full weight until we learn performance
+                kelly_fraction=0.0,
+                regime_affinity={},  # Empty dict until we have data
+                metrics={},  # Empty metrics until we have data
+            )
+            self.logger.info(f"  - {strategy_name}: enabled with default ranking")
+    
+    def register_strategies(self, strategy_names: List[str]):
+        """
+        Register strategy names after initialization.
+        
+        Args:
+            strategy_names: List of strategy names to register
+        """
+        self._registered_strategies = strategy_names
+        self._initialize_default_rankings()
     
     def update_rankings(self, force: bool = False) -> Dict[str, StrategyRanking]:
         """
@@ -293,7 +339,19 @@ class StrategySelector:
                     is_enabled = False
                     self.logger.info(f"Strategy {strategy_name} is in cooling-off until {self.cooling_off_until[strategy_name]}")
                 else:
+                    # Cooling-off expired - put on probation with 10% max allocation
                     del self.cooling_off_until[strategy_name]
+                    probation_until = now + timedelta(hours=self.probation_hours)
+                    self.on_probation[strategy_name] = probation_until
+                    self.logger.info(f"Strategy {strategy_name} exited cooling-off, now on probation (10% max) until {probation_until}")
+            
+            # Check probation period - cap weight at min_weight
+            if strategy_name in self.on_probation:
+                if now < self.on_probation[strategy_name]:
+                    weight = self.min_weight  # Cap at 10%
+                else:
+                    del self.on_probation[strategy_name]
+                    self.logger.info(f"Strategy {strategy_name} probation ended, full allocation restored")
             
             # Calculate Kelly fraction
             kelly = self._calculate_kelly_fraction(metrics_dict) if metrics_dict.get('total_trades', 0) >= self.min_trades_for_ranking else 0.0
@@ -502,22 +560,10 @@ class StrategySelector:
             return score >= 0.3 and regime_mult >= 0.5
         
         elif self.selection_mode == SelectionMode.AUTO:
-            # AUTO mode: Enable all strategies but with intelligent weighting
-            # Only disable if demonstrably losing (negative Kelly edge)
-            if metrics.get('total_trades', 0) < self.min_trades_for_ranking:
-                return True  # Keep enabled during learning period
-            
-            kelly = self._calculate_kelly_fraction(metrics)
-            
-            # Disable only if:
-            # 1. Kelly is negative (no edge)
-            # 2. AND score is very low
-            # 3. AND not performing well in current regime
-            if kelly <= 0 and score < 0.3:
-                regime_mult = self._get_regime_multiplier(strategy_name) if strategy_name else 1.0
-                if regime_mult < 0.7:
-                    return False
-            
+            # AUTO mode: NEVER fully disable strategies
+            # Poor performers get reduced weight (min 10%) but stay enabled
+            # This ensures we keep collecting data to re-evaluate performance
+            # Disabling creates a dead-end where strategy can never recover
             return True
         
         return True
@@ -825,6 +871,11 @@ class StrategySelector:
             timestamp, 
             self.current_regime
         )
+        
+        # End probation early if strategy gets a winning trade
+        if return_pct > 0 and strategy_name in self.on_probation:
+            del self.on_probation[strategy_name]
+            self.logger.info(f"Strategy {strategy_name} ended probation early with winning trade ({return_pct:.2%})")
     
     def update_strategy_correlation(self, strategy_a: str, strategy_b: str, correlation: float):
         """Update correlation between two strategies."""

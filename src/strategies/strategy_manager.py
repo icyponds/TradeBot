@@ -348,9 +348,12 @@ class StrategyManager:
     
     def _initialize_strategy_selector(self):
         """Initialize the strategy selector for automatic performance-based selection."""
+        # Pass strategy names so they can be enabled by default
+        strategy_names = list(self.strategies.keys())
         return StrategySelector(
             performance_tracker=self.performance_tracker,
             config=self.config,
+            strategy_names=strategy_names,
         )
     
     def _initialize_pair_selector(self):

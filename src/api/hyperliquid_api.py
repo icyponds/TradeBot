@@ -1146,13 +1146,21 @@ class HyperliquidAPI:
         api_symbol = symbol
         is_spot = False
         
-        # Check if this might be a spot token (not a perp symbol)
-        # Spot tokens typically have names like "UBTC", "HYPE", "PURR" without being perps
-        spot_api_name = self.get_spot_api_name(symbol)
-        if spot_api_name:
-            api_symbol = spot_api_name
-            is_spot = True
-            self.logger.debug(f"Spot token {symbol} -> API name {api_symbol}")
+        # Check if this is a valid perp symbol first
+        asset_info = self._get_asset_info_for_symbol(symbol)
+        is_valid_perp = asset_info is not None
+        
+        # If not a perp, check if it's a spot token
+        if not is_valid_perp:
+            spot_api_name = self.get_spot_api_name(symbol)
+            if spot_api_name:
+                api_symbol = spot_api_name
+                is_spot = True
+                self.logger.debug(f"Spot token {symbol} -> API name {api_symbol}")
+            else:
+                # Neither a valid perp nor a resolvable spot token
+                self.logger.debug(f"Symbol {symbol} is neither a valid perp nor a resolvable spot token")
+                return None
         
         # Otherwise fetch once, seed cache
         def _fetch():
@@ -1653,7 +1661,7 @@ class HyperliquidAPI:
                     'display_symbol': symbol,
                     'price': price,
                     'sz_decimals': asset_info.get('szDecimals', 2) if asset_info else 2,
-                    'tick_size': self._get_tick_size(symbol),
+                    'tick_size': self._get_tick_size(price),
                     'market_type': market_type,
                 }
                 
