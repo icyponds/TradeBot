@@ -252,9 +252,6 @@ def load_config() -> Dict[str, Any]:
         
         # Order Management Configuration
         "order_management": {
-            "walk_max_attempts": int(os.getenv("ORDER_WALK_MAX_ATTEMPTS", "5")),
-            "walk_price_step": float(os.getenv("ORDER_WALK_PRICE_STEP", "0.02")),
-            "walk_delay": float(os.getenv("ORDER_WALK_DELAY", "0.5")),
             "status_timeout": int(os.getenv("ORDER_STATUS_TIMEOUT", "30")),
         },
         

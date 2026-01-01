@@ -158,12 +158,12 @@ All runtime behavior is controlled through `.env` and loaded by `src/config/sett
 
 ### Strategy Controls
 - `ENABLED_STRATEGIES` (comma-separated)
-- Timeframe inputs: `STRATEGY_TIMEFRAME`, `OHLCV_LIMIT`
+- Timeframes are auto-selected per strategy (e.g., stat_arb=15m, funding_rate=1h)
 - Per-strategy knobs such as `MA_SHORT_PERIOD`, `RSI_PERIOD`, `BB_STD_DEV`, `SUPERTREND_MULTIPLIER`, `VWAP_STD_DEV_MULT`, `STAT_ARB_Z_SCORE_THRESHOLD`
 
 ### Leverage & Execution
 - `LEVERAGE_BASE`, `LEVERAGE_MIN`, `LEVERAGE_MAX`, and strategy-specific leverage multipliers
-- Order-walk behavior: `ORDER_WALK_MAX_ATTEMPTS`, `ORDER_WALK_PRICE_STEP`, `ORDER_WALK_DELAY`, `ORDER_STATUS_TIMEOUT`
+- Smart order execution with automatic price walking (no configuration needed)
 - Logging lifecycle: `LOG_LEVEL`, `LOG_FILE`, `PURGE_LOGS_ON_STARTUP`, `CLEAR_CURRENT_LOG_ON_STARTUP`, `MAX_LOG_FILES`, `MAX_LOG_FILE_SIZE_MB`
 
 ## Built-in Strategies

@@ -1191,6 +1191,193 @@ class HyperliquidAPI:
     # ORDER MANAGEMENT
     # =========================================================================
     
+    # Smart order execution parameters (not user-configurable)
+    _ORDER_WALK_MAX_ATTEMPTS = 5  # Max price improvement attempts
+    _ORDER_WALK_STEP_BPS = 20  # 0.2% price step per attempt (20 basis points)
+    _ORDER_WALK_DELAY = 0.3  # Seconds between attempts
+    _INITIAL_SLIPPAGE_BPS = 10  # 0.1% initial slippage tolerance
+    _MAX_SLIPPAGE_BPS = 100  # 1% max slippage for aggressive fills
+    
+    def execute_order(
+        self,
+        symbol: str,
+        side: str,
+        size: float,
+        reduce_only: bool = False,
+        urgency: str = "normal"
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Smart order execution with automatic price management.
+        
+        Automatically determines optimal execution strategy:
+        - Starts with tight spread around mid-price
+        - Walks the price if not immediately filled
+        - Handles partial fills automatically
+        - Returns aggregated fill information
+        
+        Args:
+            symbol: Trading symbol
+            side: 'buy' or 'sell'
+            size: Order size
+            reduce_only: Only reduce existing position
+            urgency: 'low' (patient), 'normal', or 'high' (aggressive)
+            
+        Returns:
+            Order result with fill details
+        """
+        if not self.exchange:
+            self.logger.error("Exchange client not initialized")
+            return None
+        
+        try:
+            # Get asset info and round size
+            asset_info = self._get_asset_info_for_symbol(symbol)
+            sz_decimals = asset_info.get('szDecimals', 2) if asset_info else 2
+            remaining_size = round(size, sz_decimals)
+            
+            # Get current market price
+            current_price = self.get_current_price(symbol)
+            if not current_price:
+                self.logger.error(f"Cannot execute order: no price for {symbol}")
+                return None
+            
+            # Validate minimum order value ($10)
+            order_value = remaining_size * current_price
+            if order_value < 10.0:
+                self.logger.error(f"Order value ${order_value:.2f} below minimum $10")
+                return None
+            
+            is_buy = side.lower() == 'buy'
+            
+            # Configure slippage based on urgency
+            if urgency == "low":
+                initial_slippage = self._INITIAL_SLIPPAGE_BPS / 2
+                max_attempts = self._ORDER_WALK_MAX_ATTEMPTS + 3
+            elif urgency == "high":
+                initial_slippage = self._INITIAL_SLIPPAGE_BPS * 3
+                max_attempts = 2
+            else:
+                initial_slippage = self._INITIAL_SLIPPAGE_BPS
+                max_attempts = self._ORDER_WALK_MAX_ATTEMPTS
+            
+            # Track aggregated fills
+            total_filled = 0.0
+            weighted_price_sum = 0.0
+            all_fills = []
+            
+            for attempt in range(max_attempts):
+                if remaining_size <= 0:
+                    break
+                
+                # Refresh price on each attempt
+                fresh_price = self.get_current_price(symbol)
+                if fresh_price:
+                    current_price = fresh_price
+                
+                # Calculate execution price with progressive slippage
+                slippage_bps = min(
+                    initial_slippage + (attempt * self._ORDER_WALK_STEP_BPS),
+                    self._MAX_SLIPPAGE_BPS
+                )
+                slippage_mult = slippage_bps / 10000
+                
+                if is_buy:
+                    exec_price = current_price * (1 + slippage_mult)
+                else:
+                    exec_price = current_price * (1 - slippage_mult)
+                
+                exec_price = self._round_to_tick(exec_price, symbol)
+                
+                self.logger.debug(
+                    f"Order attempt {attempt + 1}/{max_attempts}: {side} {remaining_size} {symbol} "
+                    f"@ {exec_price:.6f} (slippage: {slippage_bps}bps)"
+                )
+                
+                # Place IOC order
+                response = self._rate_limited_call(
+                    self.exchange.order,
+                    symbol,
+                    is_buy,
+                    remaining_size,
+                    exec_price,
+                    {"limit": {"tif": "Ioc"}},
+                    reduce_only=reduce_only
+                )
+                
+                # Parse response
+                fill_result = self._parse_order_response(
+                    response, symbol, side, remaining_size, exec_price
+                )
+                
+                if fill_result:
+                    filled = fill_result.get('filled_size', 0)
+                    avg_px = fill_result.get('avg_fill_price', exec_price)
+                    
+                    if filled > 0:
+                        total_filled += filled
+                        weighted_price_sum += filled * avg_px
+                        all_fills.append({
+                            'attempt': attempt + 1,
+                            'size': filled,
+                            'price': avg_px,
+                            'slippage_bps': slippage_bps,
+                        })
+                        remaining_size = round(remaining_size - filled, sz_decimals)
+                        
+                        self.logger.info(
+                            f"✓ Fill: {filled:.6f} @ {avg_px:.6f} "
+                            f"(total: {total_filled:.6f}/{size:.6f})"
+                        )
+                
+                # If not fully filled and more attempts remain, wait before next try
+                if remaining_size > 0 and attempt < max_attempts - 1:
+                    time.sleep(self._ORDER_WALK_DELAY)
+            
+            # Build final result
+            if total_filled > 0:
+                avg_fill_price = weighted_price_sum / total_filled
+                status = 'filled' if remaining_size <= 0 else 'partial'
+                
+                result = {
+                    'order_id': f"smart_{symbol}_{int(time.time() * 1000)}",
+                    'symbol': symbol,
+                    'side': side,
+                    'size': size,
+                    'filled_size': total_filled,
+                    'unfilled_size': remaining_size,
+                    'avg_fill_price': avg_fill_price,
+                    'status': status,
+                    'fills': all_fills,
+                    'timestamp': datetime.now(),
+                }
+                
+                self.logger.info(
+                    f"{'✓' if status == 'filled' else '⚠'} Order {status}: "
+                    f"{side} {total_filled:.6f}/{size:.6f} {symbol} @ {avg_fill_price:.6f}"
+                )
+                
+                # Invalidate caches
+                self.cache.invalidate("positions")
+                
+                return result
+            else:
+                self.logger.warning(
+                    f"Order not filled after {max_attempts} attempts: {side} {size} {symbol}"
+                )
+                return {
+                    'order_id': None,
+                    'symbol': symbol,
+                    'side': side,
+                    'size': size,
+                    'filled_size': 0,
+                    'status': 'not_filled',
+                    'timestamp': datetime.now(),
+                }
+                
+        except Exception as e:
+            self.logger.error(f"Smart order execution failed: {e}")
+            return None
+    
     def place_order(
         self,
         symbol: str,
@@ -1201,15 +1388,18 @@ class HyperliquidAPI:
         order_type: str = "limit"
     ) -> Optional[Dict[str, Any]]:
         """
-        Place an order with proper tracking.
+        Place a single order (low-level).
+        
+        For most use cases, prefer execute_order() which handles
+        price management automatically.
         
         Args:
             symbol: Trading symbol
             side: 'buy' or 'sell'
             size: Order size
-            price: Limit price (None for market)
+            price: Limit price (None uses smart pricing)
             reduce_only: Only reduce position
-            order_type: 'limit' or 'market'
+            order_type: 'limit' or 'market' (both use smart execution)
         """
         if not self.exchange:
             self.logger.error("Exchange client not initialized")
@@ -1221,52 +1411,49 @@ class HyperliquidAPI:
             sz_decimals = asset_info.get('szDecimals', 2) if asset_info else 2
             rounded_size = round(size, sz_decimals)
             
-            # Validate minimum order value ($10)
+            # Get current price
             current_price = self.get_current_price(symbol)
-            if current_price:
-                order_value = rounded_size * current_price
-                if order_value < 10.0:
-                    self.logger.error(f"Order value ${order_value:.2f} below minimum $10")
-                    return None
+            if not current_price:
+                self.logger.error(f"Cannot place order: no price for {symbol}")
+                return None
+            
+            # Validate minimum order value ($10)
+            order_value = rounded_size * current_price
+            if order_value < 10.0:
+                self.logger.error(f"Order value ${order_value:.2f} below minimum $10")
+                return None
             
             is_buy = side.lower() == 'buy'
             
-            # Execute order
+            # Determine execution price
             if price is None or order_type.lower() == 'market':
-                # Market order using aggressive IOC
-                if not current_price:
-                    self.logger.error("Cannot place market order without price")
-                    return None
-                
-                # Use aggressive price (5% slippage) and round to tick size
-                aggressive_price = current_price * 1.05 if is_buy else current_price * 0.95
-                rounded_price = self._round_to_tick(aggressive_price, symbol)
-                
-                response = self._rate_limited_call(
-                    self.exchange.order,
-                    symbol,
-                    is_buy,
-                    rounded_size,
-                    rounded_price,
-                    {"limit": {"tif": "Ioc"}},
-                    reduce_only=reduce_only
-                )
+                # Smart pricing: start with minimal slippage
+                slippage = self._INITIAL_SLIPPAGE_BPS / 10000
+                if is_buy:
+                    exec_price = current_price * (1 + slippage)
+                else:
+                    exec_price = current_price * (1 - slippage)
+                exec_price = self._round_to_tick(exec_price, symbol)
+                tif = "Ioc"  # Immediate or cancel for market orders
             else:
-                # Limit order - round price to tick size
-                rounded_price = self._round_to_tick(price, symbol)
-                
-                response = self._rate_limited_call(
-                    self.exchange.order,
-                    symbol,
-                    is_buy,
-                    rounded_size,
-                    rounded_price,
-                    {"limit": {"tif": "Gtc"}},
-                    reduce_only=reduce_only
-                )
+                # Explicit limit price
+                exec_price = self._round_to_tick(price, symbol)
+                tif = "Gtc"  # Good til cancel for limit orders
+            
+            response = self._rate_limited_call(
+                self.exchange.order,
+                symbol,
+                is_buy,
+                rounded_size,
+                exec_price,
+                {"limit": {"tif": tif}},
+                reduce_only=reduce_only
+            )
             
             # Parse response and track order
-            order_result = self._parse_order_response(response, symbol, side, rounded_size, price)
+            order_result = self._parse_order_response(
+                response, symbol, side, rounded_size, exec_price
+            )
             
             if order_result and order_result.get('order_id'):
                 # Track the order
@@ -1275,7 +1462,7 @@ class HyperliquidAPI:
                     symbol=symbol,
                     side=side,
                     size=rounded_size,
-                    price=price,
+                    price=exec_price,
                     status=order_result['status'],
                     created_at=datetime.now(),
                     updated_at=datetime.now(),

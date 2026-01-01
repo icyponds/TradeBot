@@ -954,111 +954,78 @@ class StrategyManager:
                 stop_loss = min(stop_loss, stop_loss_capital_based)  # Lower price = more conservative
                 take_profit = max(take_profit, take_profit_capital_based)  # Higher price = more conservative
             
-            # Place order with current price to ensure proper order ID
-            current_price = self.market_api.get_current_price(symbol)
-            if not current_price:
-                self.logger.error(f"Could not get current price for {symbol}")
-                return
-                
-            order_result = self.market_api.place_order(symbol, side, position_size, current_price)
+            # Execute order with smart price management
+            order_result = self.market_api.execute_order(
+                symbol=symbol,
+                side=side,
+                size=position_size,
+                reduce_only=False,
+                urgency="normal"
+            )
             
-            if order_result and order_result.get('status') == 'pending':
+            # Check if order was filled
+            if order_result and order_result.get('filled_size', 0) > 0:
+                fill_size = order_result['filled_size']
+                fill_price = order_result['avg_fill_price']
                 order_id = order_result.get('order_id')
-                self.logger.info(f"Placed {side} order for {symbol}: {position_size} @ {current_price} (Order ID: {order_id})")
                 
-                # Check if order was immediately filled by examining the response
-                order_response = order_result.get('order_response', {})
-                is_filled = False
-                fill_price = current_price
-                fill_size = position_size
-                
-                # Check the order response structure for fill status
-                if order_response and 'response' in order_response:
-                    response_data = order_response['response']
-                    if 'data' in response_data and 'statuses' in response_data['data']:
-                        statuses = response_data['data']['statuses']
-                        if statuses and len(statuses) > 0:
-                            status = statuses[0]
-                            if 'filled' in status:
-                                is_filled = True
-                                fill_data = status['filled']
-                                fill_size = float(fill_data.get('totalSz', position_size))
-                                fill_price = float(fill_data.get('avgPx', current_price))
-                                self.logger.info(f"✅ Order filled immediately: {symbol} {fill_size} @ {fill_price}")
-                            elif 'resting' in status:
-                                self.logger.info(f"⏳ Order resting on books: {symbol}")
-                            elif 'error' in status:
-                                self.logger.error(f"❌ Order error: {status['error']}")
-                                return
-                
-                # If not immediately filled, wait and check exchange positions
-                if not is_filled:
-                    # Wait a moment for order to potentially fill
-                    time.sleep(2)
-                    
-                    # Check if position actually exists on exchange
-                    exchange_positions = self.market_api.get_positions()
-                    actual_position = next((pos for pos in exchange_positions if pos['symbol'] == symbol), None)
-                    
-                    if actual_position:
-                        # Position exists on exchange - use actual fill data
-                        fill_price = actual_position['entry_price']
-                        fill_size = abs(actual_position['size'])
-                        is_filled = True
-                        self.logger.info(f"✅ Order filled: {symbol} {fill_size} @ {fill_price}")
-                    else:
-                        # Position doesn't exist - order didn't fill
-                        self.logger.warning(f"❌ Order for {symbol} did not fill - not recording position")
-                        return
-                
-                # Only proceed if order was filled
-                if is_filled:
-                    # Create trade record with order data
-                    trade = Trade(
-                        symbol=symbol,
-                        side=side,
-                        size=fill_size,
-                        price=fill_price,
-                        timestamp=datetime.now(),
-                        strategy=strategy_name,
-                        order_id=order_id,
+                # Warn if partial fill
+                if order_result.get('status') == 'partial':
+                    self.logger.warning(
+                        f"⚠ Partial fill for {symbol}: {fill_size}/{position_size}"
                     )
-                    
-                    # Update position with actual fill data
-                    position = Position(
-                        symbol=symbol,
-                        side=position_side,
-                        size=fill_size,
-                        entry_price=fill_price,
-                        entry_time=datetime.now(),
-                        strategy=strategy_name,
-                        stop_loss=stop_loss,
-                        take_profit=take_profit,
-                        capital_at_risk=margin_required,  # Set the actual capital at risk
-                    )
-                    
-                    # Record position in leverage manager
-                    self.leverage_manager.record_position(
-                        symbol, position_side, fill_size, fill_price, leverage, margin_required
-                    )
-                    
-                    self.positions[symbol] = position
-                    self.trades.append(trade)
-                    self.total_trades += 1
-                    
-                    # Save positions to file for kill switch access
-                    self.save_positions_to_file()
-                    
-                    self.logger.info(f"✅ Executed {side} trade for {symbol}: {fill_size} @ {fill_price} with {leverage:.1f}x leverage")
-                    self.logger.info(f"Signal strength: {signal_strength:.2f}, Volatility: {market_volatility:.2f}")
-                    self.logger.info(f"Stop loss: {stop_loss:.2f}, Take profit: {take_profit:.2f}")
-                    
-                    # Verify position was recorded correctly
-                    exchange_positions = self.market_api.get_positions()
-                    self.logger.info(f"📊 Position recorded: {len(self.positions)} local positions, {len(exchange_positions)} exchange positions")
                 
+                # Create trade record
+                trade = Trade(
+                    symbol=symbol,
+                    side=side,
+                    size=fill_size,
+                    price=fill_price,
+                    timestamp=datetime.now(),
+                    strategy=strategy_name,
+                    order_id=order_id,
+                )
+                
+                # Create position record
+                position = Position(
+                    symbol=symbol,
+                    side=position_side,
+                    size=fill_size,
+                    entry_price=fill_price,
+                    entry_time=datetime.now(),
+                    strategy=strategy_name,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
+                    capital_at_risk=margin_required,
+                )
+                
+                # Record position in leverage manager
+                self.leverage_manager.record_position(
+                    symbol, position_side, fill_size, fill_price, leverage, margin_required
+                )
+                
+                self.positions[symbol] = position
+                self.trades.append(trade)
+                self.total_trades += 1
+                
+                # Save positions to file for kill switch access
+                self.save_positions_to_file()
+                
+                self.logger.info(
+                    f"✅ Executed {side} trade for {symbol}: {fill_size} @ {fill_price:.6f} "
+                    f"with {leverage:.1f}x leverage"
+                )
+                self.logger.info(f"Signal strength: {signal_strength:.2f}, Volatility: {market_volatility:.2f}")
+                self.logger.info(f"Stop loss: {stop_loss:.2f}, Take profit: {take_profit:.2f}")
+                
+                # Verify position was recorded correctly
+                exchange_positions = self.market_api.get_positions()
+                self.logger.info(
+                    f"📊 Position recorded: {len(self.positions)} local positions, "
+                    f"{len(exchange_positions)} exchange positions"
+                )
             else:
-                self.logger.error(f"Failed to place order for {symbol}")
+                self.logger.error(f"Failed to fill order for {symbol}")
                 
         except Exception as e:
             self.logger.error(f"Error executing trade for {symbol}: {e}")
@@ -1080,29 +1047,34 @@ class StrategyManager:
         
         try:
             position = self.positions[symbol]
-            current_price = self.market_api.get_current_price(symbol)
-            
-            if not current_price:
-                self.logger.error(f"Could not get current price for {symbol}")
-                return False
             
             # Determine close side
             close_side = 'sell' if position.side == 'long' else 'buy'
             
-            # Place close order
-            # Use market order (price=None) to ensure immediate fill/close
-            # This uses the SDK's aggressive IOC + price walking logic
-            order_result = self.market_api.place_order(symbol, close_side, position.size, None)
+            # Determine urgency based on close reason
+            urgency = "high" if reason in ['stop_loss', 'liquidation_risk', 'emergency'] else "normal"
             
-            if order_result and order_result.get('status') in ['success', 'pending']:
-                # For kill switch, we'll assume the order was successful
-                # In a production environment, you'd want to wait for confirmation
-                order_id = order_result.get('order_id')
-                if order_id:
-                    self.logger.info(f"Close order placed for {symbol}: {order_id}")
+            # Execute close order with smart price management
+            order_result = self.market_api.execute_order(
+                symbol=symbol,
+                side=close_side,
+                size=position.size,
+                reduce_only=True,
+                urgency=urgency
+            )
+            
+            if order_result and order_result.get('filled_size', 0) > 0:
+                exit_price = order_result['avg_fill_price']
+                filled_size = order_result['filled_size']
+                
+                # Warn if partial fill on close
+                if order_result.get('status') == 'partial':
+                    self.logger.warning(
+                        f"⚠ Partial close for {symbol}: {filled_size}/{position.size}"
+                    )
                 
                 # Close position in leverage manager
-                result = self.leverage_manager.close_position(symbol, current_price)
+                result = self.leverage_manager.close_position(symbol, exit_price)
                 
                 if result:
                     # Record completed trade in performance tracker
@@ -1111,8 +1083,8 @@ class StrategyManager:
                         strategy=position.strategy,
                         side=position.side,
                         entry_price=position.entry_price,
-                        exit_price=current_price,
-                        size=position.size,
+                        exit_price=exit_price,
+                        size=filled_size,
                         entry_time=position.entry_time,
                         exit_time=datetime.now(),
                         capital_at_risk=position.capital_at_risk or result.get('margin_used', position.size * position.entry_price),
@@ -1142,7 +1114,10 @@ class StrategyManager:
                     # Save positions to file for kill switch access
                     self.save_positions_to_file()
                     
-                    self.logger.info(f"✅ Closed position for {symbol} ({reason}): ${trade_pnl:.2f} ({result['pnl_percentage']:.2f}%)")
+                    self.logger.info(
+                        f"✅ Closed position for {symbol} ({reason}): "
+                        f"${trade_pnl:.2f} ({result['pnl_percentage']:.2f}%)"
+                    )
                     return True
                 
             else:
