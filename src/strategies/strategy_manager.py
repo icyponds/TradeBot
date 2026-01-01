@@ -632,6 +632,9 @@ class StrategyManager:
                     self.sync_positions_with_exchange()
                     last_position_sync = current_time
                 
+                # Check liquidation risks for multi-leg positions
+                self._check_liquidation_risks()
+                
                 # Continuous position monitoring and auto-closure
                 if current_time - last_position_monitoring >= position_monitoring_interval:
                     self.logger.debug(f"Running position monitoring check ({len(self.positions)} positions)")
@@ -964,8 +967,55 @@ class StrategyManager:
             
             self.logger.info(f"Executing multi-leg entry for {symbol}: {len(signal['legs'])} legs, notional=${notional_value:.2f}")
             
-            # Execute legs atomically
+            # =========================================================================
+            # FUND ALLOCATION: Ensure funds are in the correct accounts
+            # Hyperliquid has separate spot and perp accounts that require transfers
+            # =========================================================================
             legs = signal.get('legs', [])
+            
+            # Calculate required funds for each account type
+            perp_required = 0.0
+            spot_required = 0.0
+            
+            for leg_spec in legs:
+                leg_market_type = leg_spec['market_type']
+                leg_symbol = leg_spec['symbol']
+                leg_price = self._get_leg_price(leg_symbol, leg_market_type)
+                
+                if not leg_price or leg_price <= 0:
+                    self.logger.error(f"Cannot get price for leg {leg_symbol} ({leg_market_type}) during fund allocation")
+                    return
+                
+                leg_notional = notional_value  # Each leg gets full notional for delta-neutral
+                
+                if leg_market_type in ('perp', 'hip3'):
+                    # Perp requires margin (notional / leverage)
+                    perp_required += margin_required / len([l for l in legs if l['market_type'] in ('perp', 'hip3')])
+                elif leg_market_type == 'spot':
+                    # Spot requires full notional (buying the asset)
+                    spot_required += leg_notional
+            
+            # Add buffer for slippage and fees (2%)
+            perp_required *= 1.02
+            spot_required *= 1.02
+            
+            self.logger.info(f"Fund allocation: perp=${perp_required:.2f}, spot=${spot_required:.2f}")
+            
+            # Ensure perp account has funds
+            if perp_required > 0:
+                if not self.market_api.ensure_perp_funds(perp_required):
+                    self.logger.error(f"Cannot allocate ${perp_required:.2f} to perp account")
+                    return
+            
+            # Ensure spot account has funds
+            if spot_required > 0:
+                if not self.market_api.ensure_spot_funds(spot_required):
+                    self.logger.error(f"Cannot allocate ${spot_required:.2f} to spot account")
+                    return
+            
+            self.logger.info("Fund allocation complete, executing legs...")
+            
+            # Execute legs atomically
             executed_legs: List[PositionLeg] = []
             is_atomic = signal.get('atomic', True)
             
@@ -1202,6 +1252,152 @@ class StrategyManager:
                     
             except Exception as e:
                 self.logger.error(f"    ✗ Error unwinding leg: {e}")
+    
+    # =========================================================================
+    # LIQUIDATION RISK MONITORING
+    # =========================================================================
+    
+    def _check_liquidation_risks(self):
+        """
+        Check all multi-leg positions for liquidation risk.
+        
+        For funding rate arbitrage and similar strategies, if the perp position
+        approaches liquidation, we need to either:
+        1. Add more collateral to the perp
+        2. Reduce position size on both legs (maintain delta-neutral)
+        3. Emergency close the entire position
+        """
+        if not self.multi_leg_positions:
+            return
+        
+        # Get liquidation risk threshold from config
+        liquidation_threshold = self.config['risk_management'].get('liquidation_risk_threshold', 80)
+        # Convert to percentage distance (e.g., 80% -> 20% distance warning)
+        distance_threshold = 100 - liquidation_threshold
+        
+        for position_id, position in list(self.multi_leg_positions.items()):
+            try:
+                # Find perp legs to check liquidation
+                for leg in position.legs:
+                    if leg.market_type in ('perp', 'hip3'):
+                        risk_info = self.market_api.check_liquidation_risk(
+                            leg.symbol, 
+                            threshold_pct=distance_threshold
+                        )
+                        
+                        if risk_info.get('at_risk'):
+                            self._handle_liquidation_risk(position, leg, risk_info)
+                            
+            except Exception as e:
+                self.logger.error(f"Error checking liquidation risk for {position_id}: {e}")
+    
+    def _handle_liquidation_risk(
+        self, 
+        position: MultiLegPosition, 
+        at_risk_leg: PositionLeg,
+        risk_info: Dict[str, Any]
+    ):
+        """
+        Handle a position at liquidation risk.
+        
+        Strategy:
+        1. First, try to add margin from withdrawable perp balance
+        2. If insufficient, try to transfer from spot to perp
+        3. If still insufficient, reduce position size proportionally on all legs
+        4. If still critical, emergency close the entire position
+        """
+        symbol = at_risk_leg.symbol
+        distance_pct = risk_info.get('distance_to_liquidation_pct', 0)
+        margin_info = risk_info.get('margin_info', {})
+        
+        self.logger.warning(f"⚠️ LIQUIDATION RISK: {symbol} is {distance_pct:.1f}% from liquidation!")
+        self.logger.warning(f"   Position: {at_risk_leg.side} {at_risk_leg.size} @ {at_risk_leg.entry_price:.4f}")
+        self.logger.warning(f"   Current: ${risk_info.get('current_price', 0):.4f}, Liquidation: ${risk_info.get('liquidation_price', 0):.4f}")
+        
+        # Calculate how much margin we need to add to be safe (aim for 30% distance)
+        target_distance_pct = 30.0
+        if distance_pct >= target_distance_pct:
+            # We're actually safe enough
+            return
+        
+        # Strategy 1: Try to add margin from perp account
+        perp_balance = self.market_api.get_perp_balance()
+        withdrawable = perp_balance.get('withdrawable', 0)
+        
+        # Estimate margin needed (rough calculation)
+        position_value = abs(at_risk_leg.size * risk_info.get('current_price', at_risk_leg.entry_price))
+        current_margin = margin_info.get('margin_used', 0)
+        
+        # Add 50% more margin as a buffer
+        margin_to_add = current_margin * 0.5
+        
+        if withdrawable >= margin_to_add and margin_to_add > 0:
+            self.logger.info(f"   Adding ${margin_to_add:.2f} margin from perp withdrawable")
+            if self.market_api.add_position_margin(symbol, margin_to_add):
+                self.logger.info(f"   ✓ Margin added successfully")
+                return
+        
+        # Strategy 2: Transfer from spot if we have USDC there
+        spot_usdc = self.market_api.get_spot_balance('USDC')
+        if spot_usdc >= margin_to_add and margin_to_add > 0:
+            self.logger.info(f"   Transferring ${margin_to_add:.2f} from spot to perp")
+            if self.market_api.transfer_usd_to_perp(margin_to_add):
+                # Now add it to the position
+                if self.market_api.add_position_margin(symbol, margin_to_add):
+                    self.logger.info(f"   ✓ Transferred and added margin successfully")
+                    return
+        
+        # Strategy 3: Reduce position size if we can't add margin
+        # Note: This requires selling spot and reducing perp proportionally
+        if distance_pct < 10.0:  # Critical - less than 10% to liquidation
+            self.logger.warning(f"   CRITICAL: Only {distance_pct:.1f}% to liquidation!")
+            
+            # Calculate 50% reduction
+            reduction_factor = 0.5
+            self.logger.warning(f"   Reducing position by {reduction_factor*100:.0f}%")
+            
+            for leg in position.legs:
+                reduce_size = leg.size * reduction_factor
+                order_side = 'sell' if leg.side == 'long' else 'buy'
+                
+                self.logger.info(f"   Reducing {leg.symbol}: {order_side} {reduce_size:.6f}")
+                
+                result = self.market_api.execute_order(
+                    symbol=leg.symbol,
+                    side=order_side,
+                    size=reduce_size,
+                    reduce_only=leg.market_type == 'perp',
+                    urgency="high",
+                    market_type=leg.market_type,
+                )
+                
+                if result and result.get('filled_size', 0) > 0:
+                    # Update leg size
+                    leg.size -= result['filled_size']
+                    self.logger.info(f"     ✓ Reduced to {leg.size:.6f}")
+                else:
+                    self.logger.error(f"     ✗ Failed to reduce {leg.symbol}")
+            
+            # Save updated positions
+            self.save_positions_to_file()
+            return
+        
+        # Strategy 4: Emergency close if extremely close to liquidation
+        if distance_pct < 5.0:  # Emergency - less than 5% to liquidation
+            self.logger.error(f"   EMERGENCY: Closing entire position to avoid liquidation")
+            
+            # Create exit signal
+            exit_signal = {
+                'signal': 'exit_arb',
+                'signal_type': 'multi_leg',
+                'action': 'exit',
+                'symbol': position.primary_symbol,
+                'reason': 'liquidation_emergency',
+                'urgency': 'high',
+                'legs': []
+            }
+            
+            self._execute_multi_leg_exit(position.primary_symbol, exit_signal, position.strategy)
     
     def _should_execute_signal(self, symbol: str, signal: Dict[str, Any], current_price: float, 
                               ohlcv: pd.DataFrame, strategy_name: str) -> bool:

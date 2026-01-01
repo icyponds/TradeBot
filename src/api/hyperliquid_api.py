@@ -1188,6 +1188,276 @@ class HyperliquidAPI:
         return self._rate_limited_call(_fetch)
     
     # =========================================================================
+    # FUND TRANSFERS & COLLATERAL MANAGEMENT
+    # =========================================================================
+    
+    def get_spot_balance(self, token: str = "USDC") -> float:
+        """Get balance of a specific token in spot account."""
+        try:
+            spot_state = self.info.spot_user_state(self.public_account_address)
+            for balance in spot_state.get('balances', []):
+                if balance.get('coin') == token:
+                    return float(balance.get('total', 0))
+            return 0.0
+        except Exception as e:
+            self.logger.error(f"Error getting spot balance for {token}: {e}")
+            return 0.0
+    
+    def get_perp_balance(self) -> Dict[str, float]:
+        """Get perp account balance and margin info."""
+        try:
+            user_state = self.info.user_state(self.public_account_address)
+            margin_summary = user_state.get('marginSummary', {})
+            
+            return {
+                'account_value': float(margin_summary.get('accountValue', 0)),
+                'total_margin_used': float(margin_summary.get('totalMarginUsed', 0)),
+                'withdrawable': float(margin_summary.get('withdrawable', 0)),
+                'total_ntl_pos': float(margin_summary.get('totalNtlPos', 0)),
+                'unrealized_pnl': float(margin_summary.get('totalUnrealizedPnl', 0)),
+            }
+        except Exception as e:
+            self.logger.error(f"Error getting perp balance: {e}")
+            return {'account_value': 0, 'total_margin_used': 0, 'withdrawable': 0}
+    
+    def transfer_usd_to_perp(self, amount: float) -> bool:
+        """
+        Transfer USDC from spot account to perp account.
+        
+        Required before opening perp positions if insufficient perp balance.
+        
+        Args:
+            amount: USDC amount to transfer
+            
+        Returns:
+            True if successful
+        """
+        if not self.exchange:
+            self.logger.error("Exchange client not initialized")
+            return False
+        
+        try:
+            self.logger.info(f"Transferring ${amount:.2f} USDC from spot to perp")
+            result = self.exchange.usd_class_transfer(amount, to_perp=True)
+            
+            if result.get('status') == 'ok':
+                self.logger.info(f"Successfully transferred ${amount:.2f} to perp account")
+                # Invalidate cache
+                self.cache.delete("account_balance")
+                return True
+            else:
+                self.logger.error(f"Transfer failed: {result}")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Error transferring to perp: {e}")
+            return False
+    
+    def transfer_usd_to_spot(self, amount: float) -> bool:
+        """
+        Transfer USDC from perp account to spot account.
+        
+        Required before buying spot tokens if insufficient spot balance.
+        
+        Args:
+            amount: USDC amount to transfer
+            
+        Returns:
+            True if successful
+        """
+        if not self.exchange:
+            self.logger.error("Exchange client not initialized")
+            return False
+        
+        try:
+            self.logger.info(f"Transferring ${amount:.2f} USDC from perp to spot")
+            result = self.exchange.usd_class_transfer(amount, to_perp=False)
+            
+            if result.get('status') == 'ok':
+                self.logger.info(f"Successfully transferred ${amount:.2f} to spot account")
+                # Invalidate cache
+                self.cache.delete("account_balance")
+                return True
+            else:
+                self.logger.error(f"Transfer failed: {result}")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Error transferring to spot: {e}")
+            return False
+    
+    def add_position_margin(self, symbol: str, amount: float) -> bool:
+        """
+        Add margin to an isolated position to reduce liquidation risk.
+        
+        Args:
+            symbol: Position symbol
+            amount: USDC amount to add (positive) or remove (negative)
+            
+        Returns:
+            True if successful
+        """
+        if not self.exchange:
+            self.logger.error("Exchange client not initialized")
+            return False
+        
+        try:
+            self.logger.info(f"Adding ${amount:.2f} margin to {symbol} position")
+            result = self.exchange.update_isolated_margin(amount, symbol)
+            
+            if result.get('status') == 'ok':
+                self.logger.info(f"Successfully updated margin for {symbol}")
+                self.cache.delete("positions")
+                return True
+            else:
+                self.logger.error(f"Margin update failed: {result}")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Error updating margin for {symbol}: {e}")
+            return False
+    
+    def get_position_margin_info(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """
+        Get detailed margin information for a specific position.
+        
+        Returns liquidation price, margin ratio, etc.
+        """
+        try:
+            user_state = self.info.user_state(self.public_account_address)
+            
+            for pos in user_state.get('assetPositions', []):
+                position_data = pos.get('position', {})
+                if position_data.get('coin') == symbol:
+                    size = float(position_data.get('szi', 0))
+                    if size == 0:
+                        return None
+                    
+                    leverage_info = position_data.get('leverage', {})
+                    
+                    return {
+                        'symbol': symbol,
+                        'size': size,
+                        'entry_price': float(position_data.get('entryPx', 0)),
+                        'liquidation_price': float(position_data.get('liquidationPx', 0)) if position_data.get('liquidationPx') else None,
+                        'margin_used': float(position_data.get('marginUsed', 0)),
+                        'unrealized_pnl': float(position_data.get('unrealizedPnl', 0)),
+                        'leverage_type': leverage_info.get('type', 'cross'),
+                        'leverage_value': int(leverage_info.get('value', 1)),
+                        'position_value': float(position_data.get('positionValue', 0)),
+                    }
+            
+            return None
+            
+        except Exception as e:
+            self.logger.error(f"Error getting margin info for {symbol}: {e}")
+            return None
+    
+    def check_liquidation_risk(self, symbol: str, threshold_pct: float = 10.0) -> Dict[str, Any]:
+        """
+        Check if a position is at risk of liquidation.
+        
+        Args:
+            symbol: Position symbol
+            threshold_pct: Percentage distance from liquidation to trigger warning
+            
+        Returns:
+            Dict with risk assessment
+        """
+        try:
+            margin_info = self.get_position_margin_info(symbol)
+            if not margin_info:
+                return {'has_position': False}
+            
+            current_price = self.get_current_price(symbol)
+            liq_price = margin_info.get('liquidation_price')
+            
+            if not current_price or not liq_price or liq_price == 0:
+                return {
+                    'has_position': True,
+                    'can_calculate': False,
+                    'margin_info': margin_info,
+                }
+            
+            # Calculate distance to liquidation
+            size = margin_info['size']
+            if size > 0:  # Long position
+                distance_pct = ((current_price - liq_price) / current_price) * 100
+            else:  # Short position
+                distance_pct = ((liq_price - current_price) / current_price) * 100
+            
+            at_risk = distance_pct <= threshold_pct
+            
+            return {
+                'has_position': True,
+                'can_calculate': True,
+                'symbol': symbol,
+                'current_price': current_price,
+                'liquidation_price': liq_price,
+                'distance_to_liquidation_pct': distance_pct,
+                'at_risk': at_risk,
+                'margin_info': margin_info,
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Error checking liquidation risk for {symbol}: {e}")
+            return {'has_position': False, 'error': str(e)}
+    
+    def ensure_perp_funds(self, required_amount: float) -> bool:
+        """
+        Ensure perp account has sufficient funds, transferring from spot if needed.
+        
+        Args:
+            required_amount: Required USDC in perp account
+            
+        Returns:
+            True if funds are available (or transferred successfully)
+        """
+        perp_balance = self.get_perp_balance()
+        available = perp_balance.get('withdrawable', 0)
+        
+        if available >= required_amount:
+            return True
+        
+        # Need to transfer from spot
+        shortfall = required_amount - available
+        spot_balance = self.get_spot_balance('USDC')
+        
+        if spot_balance < shortfall:
+            self.logger.error(f"Insufficient funds: need ${required_amount:.2f} in perp, "
+                            f"have ${available:.2f} perp + ${spot_balance:.2f} spot")
+            return False
+        
+        return self.transfer_usd_to_perp(shortfall)
+    
+    def ensure_spot_funds(self, required_amount: float) -> bool:
+        """
+        Ensure spot account has sufficient USDC, transferring from perp if needed.
+        
+        Args:
+            required_amount: Required USDC in spot account
+            
+        Returns:
+            True if funds are available (or transferred successfully)
+        """
+        spot_balance = self.get_spot_balance('USDC')
+        
+        if spot_balance >= required_amount:
+            return True
+        
+        # Need to transfer from perp
+        shortfall = required_amount - spot_balance
+        perp_balance = self.get_perp_balance()
+        withdrawable = perp_balance.get('withdrawable', 0)
+        
+        if withdrawable < shortfall:
+            self.logger.error(f"Insufficient funds: need ${required_amount:.2f} in spot, "
+                            f"have ${spot_balance:.2f} spot + ${withdrawable:.2f} perp withdrawable")
+            return False
+        
+        return self.transfer_usd_to_spot(shortfall)
+    
+    # =========================================================================
     # ORDER MANAGEMENT
     # =========================================================================
     
