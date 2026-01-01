@@ -1226,8 +1226,8 @@ class StrategyManager:
             'current_lose_streak': overall_metrics['current_lose_streak'],
             
             # Time metrics
-            'average_trade_duration_hours': overall_metrics['average_trade_duration_hours'],
-            'exit_reasons': overall_metrics['exit_reasons'],
+            'average_trade_duration_hours': overall_metrics.get('average_trade_duration_hours', 0),
+            'exit_reasons': overall_metrics.get('exit_reasons', {}),
             
             # Strategy breakdown
             'strategy_breakdown': tracker_summary['strategy_breakdown'],

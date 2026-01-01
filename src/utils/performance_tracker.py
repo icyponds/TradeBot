@@ -847,10 +847,11 @@ class PerformanceTracker:
         for strategy, data in summary['strategy_breakdown'].items():
             self.logger.info(f"  {strategy}: {data['trades']} trades, ${data['pnl']:.2f} PnL, {data['win_rate']:.1f}% win rate, PF: {data['profit_factor']:.2f}")
         
-        if summary['exit_reasons']:
+        exit_reasons = overall.get('exit_reasons', {})
+        if exit_reasons:
             self.logger.info("-" * 70)
             self.logger.info("EXIT REASONS")
-            for reason, count in overall['exit_reasons'].items():
+            for reason, count in exit_reasons.items():
                 self.logger.info(f"  {reason}: {count}")
         
         self.logger.info("=" * 70)
