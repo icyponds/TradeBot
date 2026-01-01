@@ -1,0 +1,868 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TradeBot Dashboard</title>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #0a0a0f;
+            --bg-secondary: #12121a;
+            --bg-card: #16161f;
+            --bg-hover: #1e1e2a;
+            --border: #2a2a3a;
+            --text-primary: #e8e8ed;
+            --text-secondary: #8888a0;
+            --text-muted: #5a5a70;
+            --accent: #6366f1;
+            --accent-glow: rgba(99, 102, 241, 0.3);
+            --green: #22c55e;
+            --green-bg: rgba(34, 197, 94, 0.1);
+            --red: #ef4444;
+            --red-bg: rgba(239, 68, 68, 0.1);
+            --yellow: #eab308;
+            --yellow-bg: rgba(234, 179, 8, 0.1);
+            --blue: #3b82f6;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Space Grotesk', sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        /* Animated background grid */
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-image: 
+                linear-gradient(rgba(99, 102, 241, 0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(99, 102, 241, 0.03) 1px, transparent 1px);
+            background-size: 50px 50px;
+            pointer-events: none;
+            z-index: -1;
+        }
+
+        .container {
+            max-width: 1600px;
+            margin: 0 auto;
+            padding: 24px;
+        }
+
+        /* Header */
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 32px;
+            padding-bottom: 24px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .logo-icon {
+            width: 40px;
+            height: 40px;
+            background: linear-gradient(135deg, var(--accent), #818cf8);
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+        }
+
+        .logo h1 {
+            font-size: 24px;
+            font-weight: 700;
+            background: linear-gradient(135deg, var(--text-primary), var(--accent));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .status-badge {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 16px;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            font-size: 13px;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+
+        .status-dot.connected { background: var(--green); }
+        .status-dot.disconnected { background: var(--red); }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        /* Summary Cards */
+        .summary-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-bottom: 32px;
+        }
+
+        .summary-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 20px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .summary-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+            background: linear-gradient(90deg, var(--accent), transparent);
+        }
+
+        .summary-label {
+            font-size: 12px;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 8px;
+        }
+
+        .summary-value {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 24px;
+            font-weight: 600;
+        }
+
+        .summary-value.positive { color: var(--green); }
+        .summary-value.negative { color: var(--red); }
+
+        .summary-change {
+            font-size: 12px;
+            margin-top: 4px;
+        }
+
+        /* Section */
+        .section {
+            margin-bottom: 32px;
+        }
+
+        .section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+
+        .section-title {
+            font-size: 18px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .section-title .count {
+            background: var(--bg-hover);
+            padding: 2px 10px;
+            border-radius: 12px;
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+
+        /* Positions Table */
+        .table-container {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            overflow: hidden;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th {
+            background: var(--bg-secondary);
+            padding: 14px 16px;
+            text-align: left;
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        td {
+            padding: 16px;
+            border-bottom: 1px solid var(--border);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 13px;
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        tr:hover {
+            background: var(--bg-hover);
+        }
+
+        .symbol {
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .side-long {
+            color: var(--green);
+            background: var(--green-bg);
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+
+        .side-short {
+            color: var(--red);
+            background: var(--red-bg);
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+
+        .strategy-tag {
+            background: var(--bg-hover);
+            color: var(--text-secondary);
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 11px;
+        }
+
+        .pnl-positive {
+            color: var(--green);
+        }
+
+        .pnl-negative {
+            color: var(--red);
+        }
+
+        .text-muted {
+            color: var(--text-muted);
+        }
+
+        /* Strategy Cards */
+        .strategy-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 16px;
+        }
+
+        .strategy-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 20px;
+        }
+
+        .strategy-card.disabled {
+            opacity: 0.6;
+        }
+
+        .strategy-card.probation {
+            border-color: var(--yellow);
+        }
+
+        .strategy-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 16px;
+        }
+
+        .strategy-name {
+            font-weight: 600;
+            font-size: 15px;
+        }
+
+        .strategy-status {
+            font-size: 11px;
+            padding: 4px 10px;
+            border-radius: 4px;
+        }
+
+        .strategy-status.enabled {
+            background: var(--green-bg);
+            color: var(--green);
+        }
+
+        .strategy-status.disabled {
+            background: var(--red-bg);
+            color: var(--red);
+        }
+
+        .strategy-status.probation {
+            background: var(--yellow-bg);
+            color: var(--yellow);
+        }
+
+        .strategy-metrics {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 12px;
+        }
+
+        .strategy-metric {
+            font-size: 12px;
+        }
+
+        .strategy-metric-label {
+            color: var(--text-muted);
+            margin-bottom: 4px;
+        }
+
+        .strategy-metric-value {
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 500;
+        }
+
+        /* Multi-leg positions */
+        .multi-leg-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 12px;
+        }
+
+        .multi-leg-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+
+        .multi-leg-title {
+            font-weight: 600;
+        }
+
+        .legs-container {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-bottom: 16px;
+        }
+
+        .leg-badge {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 8px 12px;
+            background: var(--bg-hover);
+            border-radius: 6px;
+            font-size: 12px;
+        }
+
+        .leg-badge .side {
+            font-weight: 600;
+        }
+
+        .leg-badge .side.long { color: var(--green); }
+        .leg-badge .side.short { color: var(--red); }
+
+        .multi-leg-metrics {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+            gap: 16px;
+        }
+
+        /* Empty state */
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: var(--text-muted);
+        }
+
+        .empty-state-icon {
+            font-size: 48px;
+            margin-bottom: 16px;
+            opacity: 0.5;
+        }
+
+        /* Loading */
+        .loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 40px;
+        }
+
+        .spinner {
+            width: 32px;
+            height: 32px;
+            border: 3px solid var(--border);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* Refresh indicator */
+        .refresh-indicator {
+            font-size: 12px;
+            color: var(--text-muted);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .refresh-dot {
+            width: 6px;
+            height: 6px;
+            background: var(--accent);
+            border-radius: 50%;
+            animation: blink 1s infinite;
+        }
+
+        @keyframes blink {
+            0%, 100% { opacity: 0.3; }
+            50% { opacity: 1; }
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .container {
+                padding: 16px;
+            }
+            
+            .header {
+                flex-direction: column;
+                gap: 16px;
+                align-items: flex-start;
+            }
+            
+            th, td {
+                padding: 12px 8px;
+                font-size: 11px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">
+                <div class="logo-icon">⚡</div>
+                <h1>TradeBot Dashboard</h1>
+            </div>
+            <div style="display: flex; align-items: center; gap: 16px;">
+                <div class="refresh-indicator">
+                    <span class="refresh-dot"></span>
+                    <span>Auto-refresh: <span id="countdown">5</span>s</span>
+                </div>
+                <div class="status-badge">
+                    <span class="status-dot" id="status-dot"></span>
+                    <span id="status-text">Connecting...</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Summary Cards -->
+        <div class="summary-grid" id="summary-cards">
+            <div class="summary-card">
+                <div class="summary-label">Total Equity</div>
+                <div class="summary-value" id="total-equity">--</div>
+            </div>
+            <div class="summary-card">
+                <div class="summary-label">Unrealized PnL</div>
+                <div class="summary-value" id="total-pnl">--</div>
+            </div>
+            <div class="summary-card">
+                <div class="summary-label">Open Positions</div>
+                <div class="summary-value" id="position-count">--</div>
+            </div>
+            <div class="summary-card">
+                <div class="summary-label">Total Notional</div>
+                <div class="summary-value" id="total-notional">--</div>
+            </div>
+            <div class="summary-card">
+                <div class="summary-label">Win Rate</div>
+                <div class="summary-value" id="win-rate">--</div>
+            </div>
+            <div class="summary-card">
+                <div class="summary-label">Selected Pairs</div>
+                <div class="summary-value" id="selected-pairs">--</div>
+            </div>
+        </div>
+
+        <!-- Single-Leg Positions -->
+        <section class="section">
+            <div class="section-header">
+                <h2 class="section-title">
+                    Positions
+                    <span class="count" id="single-leg-count">0</span>
+                </h2>
+            </div>
+            <div class="table-container" id="positions-table-container">
+                <div class="loading">
+                    <div class="spinner"></div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Multi-Leg Positions -->
+        <section class="section" id="multi-leg-section" style="display: none;">
+            <div class="section-header">
+                <h2 class="section-title">
+                    Multi-Leg Positions
+                    <span class="count" id="multi-leg-count">0</span>
+                </h2>
+            </div>
+            <div id="multi-leg-container"></div>
+        </section>
+
+        <!-- Strategies -->
+        <section class="section">
+            <div class="section-header">
+                <h2 class="section-title">Strategies</h2>
+            </div>
+            <div class="strategy-grid" id="strategies-container">
+                <div class="loading">
+                    <div class="spinner"></div>
+                </div>
+            </div>
+        </section>
+    </div>
+
+    <script>
+        // Format currency
+        function formatCurrency(value, decimals = 2) {
+            if (value === null || value === undefined) return '--';
+            return '$' + Number(value).toLocaleString('en-US', {
+                minimumFractionDigits: decimals,
+                maximumFractionDigits: decimals
+            });
+        }
+
+        // Format percentage
+        function formatPct(value, decimals = 2) {
+            if (value === null || value === undefined) return '--';
+            return Number(value).toFixed(decimals) + '%';
+        }
+
+        // Format price
+        function formatPrice(value) {
+            if (value === null || value === undefined) return '--';
+            if (value >= 1000) return formatCurrency(value, 2);
+            if (value >= 1) return formatCurrency(value, 4);
+            return formatCurrency(value, 6);
+        }
+
+        // Format size
+        function formatSize(value) {
+            if (value === null || value === undefined) return '--';
+            if (value >= 1000) return Number(value).toFixed(2);
+            if (value >= 1) return Number(value).toFixed(4);
+            return Number(value).toFixed(6);
+        }
+
+        // Get PnL class
+        function getPnlClass(value) {
+            if (value === null || value === undefined) return '';
+            return value >= 0 ? 'pnl-positive' : 'pnl-negative';
+        }
+
+        // Render positions table
+        function renderPositionsTable(positions) {
+            const container = document.getElementById('positions-table-container');
+            document.getElementById('single-leg-count').textContent = positions.length;
+
+            if (positions.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-state-icon">📊</div>
+                        <p>No open positions</p>
+                    </div>
+                `;
+                return;
+            }
+
+            let html = `
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Symbol</th>
+                            <th>Side</th>
+                            <th>Size</th>
+                            <th>Entry Price</th>
+                            <th>Current Price</th>
+                            <th>Notional</th>
+                            <th>PnL</th>
+                            <th>PnL %</th>
+                            <th>Hold Time</th>
+                            <th>Strategy</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            `;
+
+            for (const pos of positions) {
+                const sideClass = pos.side === 'long' ? 'side-long' : 'side-short';
+                const pnlClass = getPnlClass(pos.unrealized_pnl);
+                
+                html += `
+                    <tr>
+                        <td class="symbol">${pos.symbol}</td>
+                        <td><span class="${sideClass}">${pos.side.toUpperCase()}</span></td>
+                        <td>${formatSize(pos.size)}</td>
+                        <td>${formatPrice(pos.entry_price)}</td>
+                        <td>${formatPrice(pos.current_price)}</td>
+                        <td>${formatCurrency(pos.notional)}</td>
+                        <td class="${pnlClass}">${formatCurrency(pos.unrealized_pnl)}</td>
+                        <td class="${pnlClass}">${formatPct(pos.unrealized_pnl_pct)}</td>
+                        <td class="text-muted">${pos.holding_time || '--'}</td>
+                        <td><span class="strategy-tag">${pos.strategy || 'unknown'}</span></td>
+                    </tr>
+                `;
+            }
+
+            html += '</tbody></table>';
+            container.innerHTML = html;
+        }
+
+        // Render multi-leg positions
+        function renderMultiLegPositions(positions) {
+            const section = document.getElementById('multi-leg-section');
+            const container = document.getElementById('multi-leg-container');
+            document.getElementById('multi-leg-count').textContent = positions.length;
+
+            if (positions.length === 0) {
+                section.style.display = 'none';
+                return;
+            }
+
+            section.style.display = 'block';
+            let html = '';
+
+            for (const pos of positions) {
+                const pnlClass = getPnlClass(pos.unrealized_pnl);
+                
+                let legsHtml = '';
+                for (const leg of (pos.legs || [])) {
+                    const sideClass = leg.side === 'long' ? 'long' : 'short';
+                    legsHtml += `
+                        <div class="leg-badge">
+                            <span class="side ${sideClass}">${leg.side.toUpperCase()}</span>
+                            <span>${leg.symbol}</span>
+                            <span class="text-muted">${formatSize(leg.size)} @ ${formatPrice(leg.entry_price)}</span>
+                        </div>
+                    `;
+                }
+
+                html += `
+                    <div class="multi-leg-card">
+                        <div class="multi-leg-header">
+                            <div>
+                                <div class="multi-leg-title">${pos.primary_symbol} Arbitrage</div>
+                                <span class="strategy-tag">${pos.strategy}</span>
+                            </div>
+                            <div class="text-muted">${pos.holding_time}</div>
+                        </div>
+                        <div class="legs-container">${legsHtml}</div>
+                        <div class="multi-leg-metrics">
+                            <div class="strategy-metric">
+                                <div class="strategy-metric-label">Capital at Risk</div>
+                                <div class="strategy-metric-value">${formatCurrency(pos.capital_at_risk)}</div>
+                            </div>
+                            <div class="strategy-metric">
+                                <div class="strategy-metric-label">Unrealized PnL</div>
+                                <div class="strategy-metric-value ${pnlClass}">${formatCurrency(pos.unrealized_pnl)}</div>
+                            </div>
+                            <div class="strategy-metric">
+                                <div class="strategy-metric-label">Funding Collected</div>
+                                <div class="strategy-metric-value pnl-positive">${formatCurrency(pos.funding_collected)}</div>
+                            </div>
+                            <div class="strategy-metric">
+                                <div class="strategy-metric-label">Entry Funding Rate</div>
+                                <div class="strategy-metric-value">${pos.entry_funding_rate ? formatPct(pos.entry_funding_rate * 100, 4) : '--'}</div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            container.innerHTML = html;
+        }
+
+        // Render strategies
+        function renderStrategies(strategies) {
+            const container = document.getElementById('strategies-container');
+
+            if (strategies.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-state-icon">🎯</div>
+                        <p>No strategies configured</p>
+                    </div>
+                `;
+                return;
+            }
+
+            let html = '';
+            for (const strat of strategies) {
+                const statusClass = strat.on_probation ? 'probation' : (strat.enabled ? 'enabled' : 'disabled');
+                const statusText = strat.on_probation ? 'PROBATION' : (strat.enabled ? 'ACTIVE' : 'DISABLED');
+                const cardClass = strat.on_probation ? 'probation' : (strat.enabled ? '' : 'disabled');
+                const pnlClass = getPnlClass(strat.recent_pnl);
+
+                html += `
+                    <div class="strategy-card ${cardClass}">
+                        <div class="strategy-header">
+                            <div class="strategy-name">${strat.name}</div>
+                            <span class="strategy-status ${statusClass}">${statusText}</span>
+                        </div>
+                        <div class="strategy-metrics">
+                            <div class="strategy-metric">
+                                <div class="strategy-metric-label">Weight</div>
+                                <div class="strategy-metric-value">${formatPct(strat.weight * 100, 0)}</div>
+                            </div>
+                            <div class="strategy-metric">
+                                <div class="strategy-metric-label">Recent PnL</div>
+                                <div class="strategy-metric-value ${pnlClass}">${formatCurrency(strat.recent_pnl)}</div>
+                            </div>
+                            <div class="strategy-metric">
+                                <div class="strategy-metric-label">Win Rate</div>
+                                <div class="strategy-metric-value">${formatPct(strat.win_rate)}</div>
+                            </div>
+                            <div class="strategy-metric">
+                                <div class="strategy-metric-label">Trades</div>
+                                <div class="strategy-metric-value">${strat.trade_count || 0}</div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            container.innerHTML = html;
+        }
+
+        // Update summary
+        function updateSummary(summary, positionTotals) {
+            const account = summary.account || {};
+            const performance = summary.performance || {};
+            const botStatus = summary.bot_status || {};
+
+            document.getElementById('total-equity').textContent = formatCurrency(account.total_equity);
+            
+            const pnl = positionTotals.total_unrealized_pnl;
+            const pnlEl = document.getElementById('total-pnl');
+            pnlEl.textContent = formatCurrency(pnl);
+            pnlEl.className = 'summary-value ' + (pnl >= 0 ? 'positive' : 'negative');
+
+            document.getElementById('position-count').textContent = positionTotals.position_count || 0;
+            document.getElementById('total-notional').textContent = formatCurrency(positionTotals.total_notional);
+            document.getElementById('win-rate').textContent = formatPct(performance.win_rate);
+            document.getElementById('selected-pairs').textContent = botStatus.selected_pairs || 0;
+
+            // Update status
+            const statusDot = document.getElementById('status-dot');
+            const statusText = document.getElementById('status-text');
+            if (botStatus.is_running) {
+                statusDot.className = 'status-dot connected';
+                statusText.textContent = 'Bot Running';
+            } else {
+                statusDot.className = 'status-dot disconnected';
+                statusText.textContent = 'Bot Stopped';
+            }
+        }
+
+        // Fetch all data
+        async function fetchData() {
+            try {
+                const [positionsRes, summaryRes, strategiesRes] = await Promise.all([
+                    fetch('/api/positions'),
+                    fetch('/api/summary'),
+                    fetch('/api/strategies')
+                ]);
+
+                const positions = await positionsRes.json();
+                const summary = await summaryRes.json();
+                const strategies = await strategiesRes.json();
+
+                if (positions.success) {
+                    renderPositionsTable(positions.data.single_leg || []);
+                    renderMultiLegPositions(positions.data.multi_leg || []);
+                    
+                    if (summary.success) {
+                        updateSummary(summary.data, positions.data.totals || {});
+                    }
+                }
+
+                if (strategies.success) {
+                    renderStrategies(strategies.data || []);
+                }
+
+                // Update status on success
+                document.getElementById('status-dot').className = 'status-dot connected';
+
+            } catch (error) {
+                console.error('Failed to fetch data:', error);
+                document.getElementById('status-dot').className = 'status-dot disconnected';
+                document.getElementById('status-text').textContent = 'Connection Error';
+            }
+        }
+
+        // Countdown timer
+        let countdown = 5;
+        function updateCountdown() {
+            countdown--;
+            document.getElementById('countdown').textContent = countdown;
+            if (countdown <= 0) {
+                countdown = 5;
+                fetchData();
+            }
+        }
+
+        // Initial fetch and start refresh
+        fetchData();
+        setInterval(updateCountdown, 1000);
+    </script>
+</body>
+</html>
+

@@ -1,0 +1,436 @@
+"""
+Trading Bot Dashboard
+
+A real-time web dashboard for monitoring positions, strategies, and performance.
+
+Usage:
+    # Standalone (reads from positions.json and exchange):
+    python -m src.dashboard.app
+    
+    # Or integrated with the bot (shares live data):
+    from src.dashboard import run_dashboard
+    run_dashboard(strategy_manager, port=5050)
+"""
+
+import os
+import sys
+import json
+import logging
+from datetime import datetime
+from typing import Optional, Dict, Any, List
+from threading import Thread
+
+from flask import Flask, render_template, jsonify
+
+# Add project root to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+logger = logging.getLogger(__name__)
+
+# Global reference to strategy manager (set when integrated with bot)
+_strategy_manager = None
+_market_api = None
+
+
+def create_dashboard_app() -> Flask:
+    """Create and configure the Flask dashboard app."""
+    
+    template_dir = os.path.join(os.path.dirname(__file__), 'templates')
+    static_dir = os.path.join(os.path.dirname(__file__), 'static')
+    
+    app = Flask(__name__, 
+                template_folder=template_dir,
+                static_folder=static_dir)
+    
+    app.config['SECRET_KEY'] = os.urandom(24)
+    
+    @app.route('/')
+    def index():
+        """Main dashboard page."""
+        return render_template('dashboard.html')
+    
+    @app.route('/api/positions')
+    def get_positions():
+        """Get all open positions with current metrics."""
+        try:
+            positions_data = _get_positions_data()
+            return jsonify({
+                'success': True,
+                'timestamp': datetime.now().isoformat(),
+                'data': positions_data
+            })
+        except Exception as e:
+            logger.error(f"Error getting positions: {e}")
+            return jsonify({
+                'success': False,
+                'error': str(e)
+            }), 500
+    
+    @app.route('/api/summary')
+    def get_summary():
+        """Get account and performance summary."""
+        try:
+            summary = _get_summary_data()
+            return jsonify({
+                'success': True,
+                'timestamp': datetime.now().isoformat(),
+                'data': summary
+            })
+        except Exception as e:
+            logger.error(f"Error getting summary: {e}")
+            return jsonify({
+                'success': False,
+                'error': str(e)
+            }), 500
+    
+    @app.route('/api/strategies')
+    def get_strategies():
+        """Get strategy status and allocation."""
+        try:
+            strategies = _get_strategies_data()
+            return jsonify({
+                'success': True,
+                'timestamp': datetime.now().isoformat(),
+                'data': strategies
+            })
+        except Exception as e:
+            logger.error(f"Error getting strategies: {e}")
+            return jsonify({
+                'success': False,
+                'error': str(e)
+            }), 500
+    
+    @app.route('/api/health')
+    def health_check():
+        """Health check endpoint."""
+        return jsonify({
+            'status': 'healthy',
+            'timestamp': datetime.now().isoformat(),
+            'bot_connected': _strategy_manager is not None
+        })
+    
+    return app
+
+
+def _get_positions_data() -> Dict[str, Any]:
+    """Get position data from strategy manager or file."""
+    single_leg = []
+    multi_leg = []
+    
+    if _strategy_manager is not None:
+        # Live data from strategy manager
+        _strategy_manager.update_position_prices()
+        
+        # Single-leg positions
+        for symbol, position in _strategy_manager.positions.items():
+            pos_data = _format_position(position)
+            single_leg.append(pos_data)
+        
+        # Multi-leg positions (funding arb, etc.)
+        for pos_id, multi_pos in _strategy_manager.multi_leg_positions.items():
+            multi_data = _format_multi_leg_position(multi_pos)
+            multi_leg.append(multi_data)
+    else:
+        # Read from positions.json file
+        positions_file = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+            'positions.json'
+        )
+        if os.path.exists(positions_file):
+            with open(positions_file, 'r') as f:
+                data = json.load(f)
+                
+            # Get current prices if API available
+            prices = _get_current_prices([p['symbol'] for p in data.get('single_leg', [])])
+            
+            for pos in data.get('single_leg', []):
+                pos['current_price'] = prices.get(pos['symbol'], pos.get('current_price'))
+                pos['unrealized_pnl'] = _calculate_pnl(pos)
+                pos['unrealized_pnl_pct'] = _calculate_pnl_pct(pos)
+                pos['holding_time'] = _calculate_holding_time(pos.get('entry_time'))
+                single_leg.append(pos)
+            
+            for pos in data.get('multi_leg', []):
+                pos['holding_time'] = _calculate_holding_time(pos.get('entry_time'))
+                multi_leg.append(pos)
+    
+    # Calculate totals
+    total_pnl = sum(p.get('unrealized_pnl', 0) or 0 for p in single_leg)
+    total_pnl += sum(p.get('unrealized_pnl', 0) or 0 for p in multi_leg)
+    
+    total_notional = sum(
+        (p.get('current_price', 0) or p.get('entry_price', 0)) * p.get('size', 0)
+        for p in single_leg
+    )
+    
+    return {
+        'single_leg': single_leg,
+        'multi_leg': multi_leg,
+        'totals': {
+            'position_count': len(single_leg) + len(multi_leg),
+            'single_leg_count': len(single_leg),
+            'multi_leg_count': len(multi_leg),
+            'total_unrealized_pnl': total_pnl,
+            'total_notional': total_notional,
+        }
+    }
+
+
+def _format_position(position) -> Dict[str, Any]:
+    """Format a Position object for the dashboard."""
+    entry_time = position.entry_time
+    if isinstance(entry_time, str):
+        entry_time = datetime.fromisoformat(entry_time)
+    
+    holding_time = datetime.now() - entry_time
+    hours = holding_time.total_seconds() / 3600
+    
+    notional = (position.current_price or position.entry_price) * position.size
+    
+    return {
+        'symbol': position.symbol,
+        'side': position.side,
+        'size': position.size,
+        'entry_price': position.entry_price,
+        'current_price': position.current_price,
+        'stop_loss': position.stop_loss,
+        'take_profit': position.take_profit,
+        'strategy': position.strategy,
+        'entry_time': entry_time.isoformat(),
+        'holding_time': f"{hours:.1f}h",
+        'holding_hours': hours,
+        'notional': notional,
+        'capital_at_risk': position.capital_at_risk,
+        'unrealized_pnl': position.unrealized_pnl,
+        'unrealized_pnl_pct': position.unrealized_pnl_percentage,
+        'capital_pnl_pct': position.capital_at_risk_pnl_percentage,
+    }
+
+
+def _format_multi_leg_position(multi_pos) -> Dict[str, Any]:
+    """Format a MultiLegPosition for the dashboard."""
+    entry_time = multi_pos.entry_time
+    if isinstance(entry_time, str):
+        entry_time = datetime.fromisoformat(entry_time)
+    
+    holding_time = datetime.now() - entry_time
+    hours = holding_time.total_seconds() / 3600
+    
+    legs_data = []
+    for leg in multi_pos.legs:
+        legs_data.append({
+            'symbol': leg.symbol,
+            'market_type': leg.market_type,
+            'side': leg.side,
+            'size': leg.size,
+            'entry_price': leg.entry_price,
+        })
+    
+    # Get metadata (funding rate info, etc.)
+    metadata = multi_pos.metadata or {}
+    
+    return {
+        'position_id': multi_pos.position_id,
+        'strategy': multi_pos.strategy,
+        'primary_symbol': multi_pos.primary_symbol,
+        'entry_time': entry_time.isoformat(),
+        'holding_time': f"{hours:.1f}h",
+        'holding_hours': hours,
+        'legs': legs_data,
+        'leg_count': len(legs_data),
+        'net_delta': multi_pos.net_delta,
+        'capital_at_risk': multi_pos.capital_at_risk,
+        'unrealized_pnl': metadata.get('unrealized_pnl'),
+        'funding_collected': metadata.get('funding_collected', 0),
+        'entry_funding_rate': metadata.get('entry_funding_rate'),
+        'current_funding_rate': metadata.get('current_funding_rate'),
+    }
+
+
+def _get_summary_data() -> Dict[str, Any]:
+    """Get account summary data."""
+    if _strategy_manager is not None:
+        portfolio = _strategy_manager.portfolio_manager
+        summary = portfolio.get_portfolio_summary()
+        
+        return {
+            'account': {
+                'total_equity': summary.get('total_equity', 0),
+                'available_margin': summary.get('available_margin', 0),
+                'used_margin': summary.get('used_margin', 0),
+                'margin_usage_pct': summary.get('margin_usage_percentage', 0),
+                'available_capital': summary.get('available_capital', 0),
+            },
+            'performance': {
+                'total_trades': _strategy_manager.trade_database.get_trade_count() if hasattr(_strategy_manager, 'trade_database') else 0,
+                'win_rate': _get_win_rate(),
+                'total_pnl': _get_total_realized_pnl(),
+            },
+            'bot_status': {
+                'is_running': _strategy_manager.is_running,
+                'selected_pairs': len(_strategy_manager.pair_selector.selected_pairs) if _strategy_manager.pair_selector else 0,
+                'active_strategies': len([s for s in _strategy_manager.strategies.keys()]),
+            }
+        }
+    else:
+        return {
+            'account': {},
+            'performance': {},
+            'bot_status': {'is_running': False}
+        }
+
+
+def _get_strategies_data() -> List[Dict[str, Any]]:
+    """Get strategy status and allocations."""
+    strategies = []
+    
+    if _strategy_manager is not None:
+        selector = _strategy_manager.strategy_selector
+        
+        for name, strategy in _strategy_manager.strategies.items():
+            ranking = selector.strategy_rankings.get(name) if selector else None
+            metrics = ranking.metrics if ranking else {}
+            
+            strategies.append({
+                'name': name,
+                'enabled': selector.is_strategy_enabled(name) if selector else True,
+                'weight': ranking.weight if ranking else 1.0,
+                'recent_pnl': metrics.get('total_pnl', 0),
+                'sharpe_ratio': metrics.get('sharpe_ratio', 0),
+                'win_rate': metrics.get('win_rate', 0) * 100,  # Convert to percentage
+                'trade_count': metrics.get('trade_count', 0),
+                'on_probation': selector.on_probation.get(name, False) if selector and hasattr(selector, 'on_probation') else False,
+                'in_cooling_off': name in selector.cooling_off_until if selector else False,
+            })
+    
+    return strategies
+
+
+def _get_current_prices(symbols: List[str]) -> Dict[str, float]:
+    """Get current prices for symbols."""
+    prices = {}
+    if _market_api is not None:
+        for symbol in symbols:
+            try:
+                price = _market_api.get_current_price(symbol)
+                if price:
+                    prices[symbol] = price
+            except:
+                pass
+    return prices
+
+
+def _calculate_pnl(pos: Dict) -> Optional[float]:
+    """Calculate unrealized PnL."""
+    current = pos.get('current_price')
+    entry = pos.get('entry_price')
+    size = pos.get('size', 0)
+    side = pos.get('side', 'long')
+    
+    if not current or not entry:
+        return None
+    
+    if side == 'long':
+        return (current - entry) * size
+    else:
+        return (entry - current) * size
+
+
+def _calculate_pnl_pct(pos: Dict) -> Optional[float]:
+    """Calculate unrealized PnL percentage."""
+    current = pos.get('current_price')
+    entry = pos.get('entry_price')
+    side = pos.get('side', 'long')
+    
+    if not current or not entry:
+        return None
+    
+    if side == 'long':
+        return ((current - entry) / entry) * 100
+    else:
+        return ((entry - current) / entry) * 100
+
+
+def _calculate_holding_time(entry_time_str: Optional[str]) -> str:
+    """Calculate holding time from entry time string."""
+    if not entry_time_str:
+        return "?"
+    
+    try:
+        entry_time = datetime.fromisoformat(entry_time_str)
+        holding = datetime.now() - entry_time
+        hours = holding.total_seconds() / 3600
+        return f"{hours:.1f}h"
+    except:
+        return "?"
+
+
+def _get_win_rate() -> float:
+    """Get overall win rate from trade database."""
+    if _strategy_manager is not None and hasattr(_strategy_manager, 'trade_database'):
+        try:
+            trades = _strategy_manager.trade_database.get_recent_trades(100)
+            if trades:
+                wins = sum(1 for t in trades if t.get('realized_pnl', 0) > 0)
+                return (wins / len(trades)) * 100
+        except:
+            pass
+    return 0
+
+
+def _get_total_realized_pnl() -> float:
+    """Get total realized PnL from trade database."""
+    if _strategy_manager is not None and hasattr(_strategy_manager, 'trade_database'):
+        try:
+            trades = _strategy_manager.trade_database.get_recent_trades(1000)
+            return sum(t.get('realized_pnl', 0) for t in trades)
+        except:
+            pass
+    return 0
+
+
+def run_dashboard(strategy_manager=None, market_api=None, port: int = 5050, debug: bool = False):
+    """
+    Run the dashboard server.
+    
+    Args:
+        strategy_manager: Optional StrategyManager instance for live data
+        market_api: Optional HyperliquidAPI instance for price data
+        port: Port to run on (default 5050)
+        debug: Enable Flask debug mode
+    """
+    global _strategy_manager, _market_api
+    _strategy_manager = strategy_manager
+    _market_api = market_api or (strategy_manager.market_api if strategy_manager else None)
+    
+    app = create_dashboard_app()
+    
+    # Run in a separate thread if integrated with bot
+    if strategy_manager is not None:
+        thread = Thread(target=lambda: app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False))
+        thread.daemon = True
+        thread.start()
+        logger.info(f"Dashboard started at http://localhost:{port}")
+        return thread
+    else:
+        # Standalone mode
+        print(f"\n{'='*60}")
+        print(f"TradeBot Dashboard")
+        print(f"{'='*60}")
+        print(f"Open in browser: http://localhost:{port}")
+        print(f"Press Ctrl+C to stop")
+        print(f"{'='*60}\n")
+        app.run(host='0.0.0.0', port=port, debug=debug)
+
+
+if __name__ == '__main__':
+    # Standalone mode - read from files
+    from src.config.settings import load_config
+    from src.api.hyperliquid_api import HyperliquidAPI
+    
+    config = load_config()
+    if config:
+        _market_api = HyperliquidAPI(config)
+    
+    run_dashboard(port=5050, debug=True)
+

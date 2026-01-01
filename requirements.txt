@@ -13,4 +13,7 @@ flake8>=4.0.0
 # Quantitative strategy dependencies
 statsmodels>=0.14.0      # ADF test, cointegration, OLS regression
 scipy>=1.11.0            # MLE optimization, statistical functions
-filterpy>=1.4.5          # Kalman Filter implementation (optional) 
+filterpy>=1.4.5          # Kalman Filter implementation (optional)
+
+# Dashboard
+flask>=3.0.0             # Web dashboard server 

@@ -360,13 +360,33 @@ class StrategyManager:
         """Initialize the pair selector."""
         return DynamicPairSelector(self.config, self.market_api, self)
     
-    def start(self):
-        """Start the strategy manager."""
+    def start(self, enable_dashboard: bool = True, dashboard_port: int = 5050):
+        """
+        Start the strategy manager.
+        
+        Args:
+            enable_dashboard: Whether to start the web dashboard (default: True)
+            dashboard_port: Port for the dashboard server (default: 5050)
+        """
         if self.is_running:
             self.logger.warning("Strategy manager is already running")
             return
         
         self.logger.info("Starting strategy manager...")
+        
+        # Start dashboard if enabled
+        if enable_dashboard:
+            try:
+                from src.dashboard import run_dashboard
+                self._dashboard_thread = run_dashboard(
+                    strategy_manager=self,
+                    port=dashboard_port
+                )
+                self.logger.info(f"Dashboard available at http://localhost:{dashboard_port}")
+            except ImportError as e:
+                self.logger.warning(f"Dashboard not available (run 'pip install flask'): {e}")
+            except Exception as e:
+                self.logger.warning(f"Failed to start dashboard: {e}")
         
         # Start market API (only if it has a start method)
         if hasattr(self.market_api, 'start'):
@@ -1610,14 +1630,16 @@ class StrategyManager:
             market_volatility = signal['market_volatility']
             
             # Calculate stop loss and take profit with leverage
+            # Note: leverage_manager uses 'long'/'short', strategies use 'buy'/'sell'
             stop_loss = self.leverage_manager.calculate_stop_loss_with_leverage(
                 current_price, position_side, leverage
             )
             
             # Calculate strategy-specific take profit
+            # Strategies expect 'buy'/'sell' for the side parameter, not 'long'/'short'
             strategy = self.strategies[strategy_name]
             strategy_take_profit = strategy.calculate_take_profit(
-                current_price, position_side, ohlcv, signal_strength, market_volatility
+                current_price, side, ohlcv, signal_strength, market_volatility  # Use 'buy'/'sell'
             )
             
             take_profit = self.leverage_manager.calculate_take_profit_with_leverage(
