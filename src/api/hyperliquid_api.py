@@ -410,7 +410,7 @@ class ConnectionHealthMonitor:
         # Threading
         self._running = False
         self._thread: Optional[threading.Thread] = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()  # Reentrant lock to allow nested acquisitions
         self._api = None  # Set when attached to API
         
         # Callbacks
@@ -716,12 +716,14 @@ class HyperliquidAPI:
             if self.hip3_enabled and self.perp_dexs is None:
                 self.perp_dexs = self._discover_perp_dexs()
             
-            # Initialize Info client with WebSocket enabled
+            # Initialize Info client WITHOUT WebSocket first (fast, non-blocking)
+            # WebSocket will be enabled when start() is called
             self.info = Info(
                 self.base_url,
-                skip_ws=False,  # Enable WebSocket
+                skip_ws=True,  # Start without WebSocket for fast init
                 perp_dexs=self.perp_dexs if self.hip3_enabled else None
             )
+            self._ws_enabled = False
             
             # Initialize Exchange client if credentials provided
             self.exchange = None
@@ -737,12 +739,49 @@ class HyperliquidAPI:
                 except Exception as e:
                     self.logger.warning(f"Exchange client init failed: {e}")
             
-            # Setup WebSocket subscriptions
-            self._setup_websocket_subscriptions()
-            
         except Exception as e:
             self.logger.error(f"SDK initialization failed: {e}")
             raise
+    
+    def _enable_websocket(self, timeout: float = 10.0):
+        """Enable WebSocket connection (called from start())."""
+        if self._ws_enabled:
+            return
+        
+        self.logger.info("Enabling WebSocket connection...")
+        
+        # Initialize WebSocket in background thread to avoid blocking
+        ws_info = [None]  # Use list to allow modification in thread
+        ws_error = [None]
+        
+        def init_ws():
+            try:
+                ws_info[0] = Info(
+                    self.base_url,
+                    skip_ws=False,
+                    perp_dexs=self.perp_dexs if self.hip3_enabled else None
+                )
+            except Exception as e:
+                ws_error[0] = e
+        
+        ws_thread = threading.Thread(target=init_ws)
+        ws_thread.daemon = True
+        ws_thread.start()
+        ws_thread.join(timeout=timeout)
+        
+        if ws_thread.is_alive():
+            self.logger.warning(f"WebSocket initialization timed out after {timeout}s. Continuing with REST-only mode.")
+            return
+        
+        if ws_error[0]:
+            self.logger.warning(f"WebSocket initialization failed: {ws_error[0]}. Continuing with REST-only mode.")
+            return
+        
+        if ws_info[0]:
+            self.info = ws_info[0]
+            self._ws_enabled = True
+            self._setup_websocket_subscriptions()
+            self.logger.info("WebSocket enabled successfully")
     
     def _discover_perp_dexs(self) -> List[str]:
         """Discover available perp dexes."""
@@ -835,12 +874,15 @@ class HyperliquidAPI:
     # =========================================================================
     
     def start(self) -> bool:
-        """Start the API and health monitoring."""
+        """Start the API, enable WebSocket, and start health monitoring."""
         self.logger.info("Starting HyperliquidAPI...")
         
-        # Test connection first
+        # Test connection first (uses REST, fast)
         if not self.test_connection():
             return False
+        
+        # Enable WebSocket for real-time data
+        self._enable_websocket()
         
         # Start health monitoring
         self.health_monitor.start()
