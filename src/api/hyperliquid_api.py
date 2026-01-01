@@ -1221,38 +1221,52 @@ class HyperliquidAPI:
                 else:
                     base_token, quote_token = symbol, "USDC"
                 
+                # Use static mapping to get the actual spot token name
+                # This prevents dangerous heuristic-based matching
+                actual_base_token = self.get_spot_token_for_perp(base_token)
+                if not actual_base_token:
+                    self.logger.error(f"No spot mapping found for {base_token} - check PERP_TO_SPOT_MAPPING")
+                    return None
+                
                 # Get spot metadata
                 spot_meta = self.get_spot_meta()
                 if not spot_meta:
                     return None
                 
-                # Find pair name and decimals
+                token_list = spot_meta.get('tokens', [])
+                
+                # Find the pair info
                 pair_name = None
                 sz_decimals = 6  # Default for spot
                 
                 for pair in spot_meta.get('universe', []):
                     tokens = pair.get('tokens', [])
                     if len(tokens) >= 2:
-                        token_list = spot_meta.get('tokens', [])
                         if (tokens[0] < len(token_list) and tokens[1] < len(token_list)):
-                            if (token_list[tokens[0]].get('name') == base_token and
-                                token_list[tokens[1]].get('name') == quote_token):
+                            pair_base = token_list[tokens[0]].get('name', '')
+                            pair_quote = token_list[tokens[1]].get('name', '')
+                            if pair_base == actual_base_token and pair_quote == quote_token:
                                 pair_name = pair.get('name')
                                 sz_decimals = token_list[tokens[0]].get('szDecimals', 6)
                                 break
                 
                 if not pair_name:
-                    self.logger.error(f"Spot pair {base_token}/{quote_token} not found")
+                    self.logger.error(f"Spot pair {actual_base_token}/{quote_token} not found on exchange")
                     return None
                 
                 # Get price
-                price = self.get_spot_price(base_token, quote_token)
+                price = self.get_spot_price(actual_base_token, quote_token)
                 if not price:
                     return None
                 
+                # Log the mapping used
+                if actual_base_token != base_token:
+                    self.logger.debug(f"Using mapping: {base_token}/{quote_token} -> {actual_base_token}/{quote_token}")
+                
                 return {
                     'symbol': pair_name,
-                    'display_symbol': f"{base_token}/{quote_token}",
+                    'display_symbol': f"{actual_base_token}/{quote_token}",
+                    'original_symbol': f"{base_token}/{quote_token}",
                     'price': price,
                     'sz_decimals': sz_decimals,
                     'tick_size': 0.0001,  # Default for spot
@@ -2014,6 +2028,153 @@ class HyperliquidAPI:
             all_positions.append(pos)
         
         return all_positions
+    
+    # =========================================================================
+    # FUNDING RATE ARBITRAGE HELPERS
+    # =========================================================================
+    
+    # ==========================================================================
+    # PERP-TO-SPOT TOKEN MAPPING (MANUALLY MAINTAINED)
+    # ==========================================================================
+    # This mapping connects perpetual symbols to their corresponding spot tokens.
+    # Hyperliquid has NO canonical API for this mapping, so it must be maintained
+    # manually to ensure safe delta-neutral trading.
+    #
+    # IMPORTANT:
+    # - NO HEURISTICS are used - only tokens in this mapping can be traded
+    # - Periodically check for new spot markets and update this table
+    # - Run get_funding_arb_eligible_symbols() to verify which mappings are active
+    # - Last verified: January 2026
+    #
+    # Naming conventions observed:
+    # - U-prefix: Major tokens use wrapped versions (BTC->UBTC, ETH->UETH, etc.)
+    # - Direct: Some tokens have same name for perp and spot (PURR, HYPE, etc.)
+    #
+    # To find new mappings, query the spot API and look for tokens that match
+    # existing perp symbols (with or without U-prefix).
+    # ==========================================================================
+    PERP_TO_SPOT_MAPPING = {
+        # Major tokens with U-prefix wrapped versions
+        'BTC': 'UBTC',
+        'ETH': 'UETH',
+        'SOL': 'USOL',
+        'BONK': 'UBONK',
+        'DOGE': 'UDOGE',
+        'MOG': 'UMOG',
+        'WLD': 'UWLD',
+        'ENA': 'UENA',
+        'XPL': 'UXPL',
+        # NOTE: MON perp ($0.02) does NOT match UMON spot ($145) - different assets
+        # MON spot exists but prices don't align with perp - needs investigation
+        'PUMP': 'UPUMP',
+        'FARTCOIN': 'UFART',
+        'MEGA': 'UMEGA',
+        # Direct matches (token name is the same for perp and spot)
+        'PURR': 'PURR',
+        'HYPE': 'HYPE',
+        'TRUMP': 'TRUMP',
+        'STABLE': 'STABLE',
+        'BERA': 'BERA',
+    }
+    
+    def get_spot_token_for_perp(self, perp_symbol: str) -> Optional[str]:
+        """
+        Get the spot token name that corresponds to a perp symbol.
+        
+        ONLY uses the static PERP_TO_SPOT_MAPPING table - no heuristics.
+        This prevents dangerous false matches between unrelated assets.
+        
+        The mapping table should be manually reviewed and updated periodically
+        when new spot markets are added to Hyperliquid.
+        
+        Args:
+            perp_symbol: The perpetual symbol (e.g., 'BTC', 'ETH', 'PURR')
+            
+        Returns:
+            The corresponding spot base token name, or None if not in mapping
+        """
+        # Only use static mapping - no heuristics to avoid false matches
+        if perp_symbol not in self.PERP_TO_SPOT_MAPPING:
+            return None
+        
+        mapped_spot = self.PERP_TO_SPOT_MAPPING[perp_symbol]
+        
+        # Verify the spot token actually exists on the exchange
+        try:
+            spot_meta = self.get_spot_meta()
+            if not spot_meta:
+                return None
+            
+            token_list = spot_meta.get('tokens', [])
+            
+            # Check if the mapped spot token exists in a USDC pair
+            for pair in spot_meta.get('universe', []):
+                tokens = pair.get('tokens', [])
+                if len(tokens) >= 2:
+                    base_idx, quote_idx = tokens[0], tokens[1]
+                    if base_idx < len(token_list) and quote_idx < len(token_list):
+                        base_name = token_list[base_idx].get('name', '')
+                        quote_name = token_list[quote_idx].get('name', '')
+                        if base_name == mapped_spot and quote_name == 'USDC':
+                            return mapped_spot
+            
+            self.logger.warning(f"Mapped spot token {mapped_spot} for {perp_symbol} not found on exchange - please update PERP_TO_SPOT_MAPPING")
+            return None
+            
+        except Exception as e:
+            self.logger.error(f"Error verifying spot token for {perp_symbol}: {e}")
+            return None
+    
+    def get_funding_arb_eligible_symbols(self) -> List[str]:
+        """
+        Get perp symbols that have corresponding spot markets.
+        
+        These are the only symbols that can be used for delta-neutral
+        funding rate arbitrage (perp + spot hedge).
+        
+        Handles both direct matches (PURR) and U-prefixed matches (BTC->UBTC).
+        
+        Returns:
+            List of perp symbols that have spot market equivalents
+        """
+        try:
+            # Get all perp symbols (exclude spot market symbols like @1, @109)
+            perp_symbols = set()
+            all_perps = self.get_all_perp_assets(include_hip3=self.hip3_enabled)
+            for asset in all_perps:
+                name = asset.get('name', '')
+                # Skip spot market references (internal @N names)
+                if name and not name.startswith('@'):
+                    perp_symbols.add(name)
+            
+            # Find perps that have corresponding spot markets
+            eligible = []
+            spot_mapping = {}
+            
+            for perp_symbol in perp_symbols:
+                spot_token = self.get_spot_token_for_perp(perp_symbol)
+                if spot_token:
+                    eligible.append(perp_symbol)
+                    spot_mapping[perp_symbol] = spot_token
+            
+            # Log the mapping for visibility
+            self.logger.info(f"Found {len(eligible)} symbols eligible for funding rate arbitrage:")
+            for perp in sorted(eligible):
+                spot = spot_mapping.get(perp)
+                if perp == spot:
+                    self.logger.info(f"  {perp} (direct match)")
+                else:
+                    self.logger.info(f"  {perp} -> {spot}/USDC (U-prefixed)")
+            
+            return sorted(eligible)
+            
+        except Exception as e:
+            self.logger.error(f"Error getting funding arb eligible symbols: {e}")
+            return []
+    
+    def has_spot_market(self, symbol: str) -> bool:
+        """Check if a perp symbol has a spot market available."""
+        return self.get_spot_token_for_perp(symbol) is not None
     
     # =========================================================================
     # CALLBACKS & SUBSCRIPTIONS

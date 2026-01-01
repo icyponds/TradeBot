@@ -732,8 +732,12 @@ class DynamicPairSelector:
                 if volume_24h < self.spot_min_volume:
                     continue
                 
+                # Use base token name for spot pairs to enable correlation with perps
+                # e.g., "BTC" instead of "@1" - the API can resolve "BTC/USDC" to "@1" for orders
                 assets.append({
-                    'name': pair.get('name', f"{base_name}/{quote_name}"),
+                    'name': base_name,  # Human-readable name (matches perp naming)
+                    'display_name': f"{base_name}/{quote_name}",  # Full pair display
+                    'api_name': pair.get('name', ''),  # Internal API name (@1, @109, etc.)
                     'base': base_name,
                     'quote': quote_name,
                     'market_type': 'spot',

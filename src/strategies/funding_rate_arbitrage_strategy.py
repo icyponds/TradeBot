@@ -66,6 +66,11 @@ class FundingRateArbitrageStrategy(BaseStrategy):
         # Funding rate cache
         self.funding_rate_cache: Dict[str, List[Tuple[datetime, float]]] = {}
         
+        # Cache for eligible symbols (those with both perp and spot markets)
+        self._eligible_symbols_cache: Optional[set] = None
+        self._eligible_symbols_last_update: Optional[datetime] = None
+        self._eligible_symbols_ttl = timedelta(hours=1)  # Refresh every hour
+        
         # Hyperliquid funding interval (8 hours)
         self.funding_interval_hours = 8
         
@@ -76,6 +81,39 @@ class FundingRateArbitrageStrategy(BaseStrategy):
     def set_market_api(self, market_api):
         """Set the market API for data access."""
         self.market_api = market_api
+        # Invalidate cache when API changes
+        self._eligible_symbols_cache = None
+    
+    def get_eligible_symbols(self) -> set:
+        """
+        Get symbols eligible for funding rate arbitrage.
+        
+        Returns cached result if available and fresh.
+        Only symbols with BOTH perp AND spot markets can be used.
+        """
+        now = datetime.now()
+        
+        # Return cached result if fresh
+        if (self._eligible_symbols_cache is not None and 
+            self._eligible_symbols_last_update is not None and
+            now - self._eligible_symbols_last_update < self._eligible_symbols_ttl):
+            return self._eligible_symbols_cache
+        
+        # Fetch fresh list
+        if self.market_api and hasattr(self.market_api, 'get_funding_arb_eligible_symbols'):
+            eligible_list = self.market_api.get_funding_arb_eligible_symbols()
+            self._eligible_symbols_cache = set(eligible_list)
+            self._eligible_symbols_last_update = now
+            self.logger.info(f"Refreshed eligible symbols: {sorted(self._eligible_symbols_cache)}")
+        else:
+            self._eligible_symbols_cache = set()
+            self.logger.warning("Cannot get eligible symbols - market_api not available")
+        
+        return self._eligible_symbols_cache
+    
+    def is_symbol_eligible(self, symbol: str) -> bool:
+        """Check if a symbol can be used for funding rate arbitrage."""
+        return symbol in self.get_eligible_symbols()
     
     def generate_signal(self, ohlcv: pd.DataFrame) -> Optional[Dict[str, Any]]:
         """
@@ -133,6 +171,13 @@ class FundingRateArbitrageStrategy(BaseStrategy):
         funding_history: List[float] = None
     ) -> Optional[Dict[str, Any]]:
         """Check if we should enter a new arbitrage position."""
+        
+        # CRITICAL: Check if symbol has a spot market for delta-neutral hedging
+        # Only a few tokens on Hyperliquid have both perp and spot markets
+        # (e.g., BERA, HYPE, MON, PUMP, PURR, STABLE, TRUMP as of early 2026)
+        if not self.is_symbol_eligible(symbol):
+            self.logger.debug(f"{symbol}: No spot market available - cannot create delta-neutral position")
+            return None
         
         abs_funding = abs(funding_rate)
         
