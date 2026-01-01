@@ -460,10 +460,11 @@ class OUMeanReversionStrategy(BaseStrategy):
             # Use 5% as default
             sl_pct = 0.05
         else:
-            # Get the entry Z-score and OU sigma
-            z_score = abs(signal_context.get('z_score', 2.0))
-            sigma = signal_context.get('sigma', 0.02)
-            mu = signal_context.get('mu', entry_price)
+            # Get the entry Z-score and OU sigma (handle None values explicitly)
+            z_score = signal_context.get('z_score')
+            z_score = abs(z_score) if z_score is not None else 2.0
+            sigma = signal_context.get('sigma') or 0.02
+            mu = signal_context.get('mu') or entry_price
             
             # Stop loss if Z-score moves to 1.5x entry (e.g., entered at 2, stop at 3)
             stop_z = z_score * 1.5

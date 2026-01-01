@@ -825,18 +825,160 @@ class StrategyManager:
             
             current_price = market_data['current_price']
             
-            # Run each strategy with its preferred timeframe
+            # Collect all signals from all strategies for this symbol
+            collected_signals = []
+            
             for strategy_name, strategy in self.strategies.items():
+                # Handle special strategies that don't participate in conflict resolution
+                if strategy_name == 'funding_rate_arbitrage':
+                    # Funding rate arb is multi-leg and doesn't conflict with single-leg strategies
+                    ohlcv = self.market_api.get_ohlcv(symbol, strategy.timeframe, self.ohlcv_limit)
+                    if ohlcv is not None:
+                        self._execute_strategy(symbol, strategy_name, strategy, ohlcv, current_price)
+                    continue
+                
+                if strategy_name == 'momentum_factor':
+                    # Momentum is handled separately in _run_portfolio_strategies
+                    continue
+                
                 # Get OHLCV data for this strategy's timeframe
                 ohlcv = self.market_api.get_ohlcv(symbol, strategy.timeframe, self.ohlcv_limit)
                 if ohlcv is None or len(ohlcv) < 20:  # Need at least 20 candles for analysis
                     self.logger.debug(f"Insufficient {strategy.timeframe} OHLCV data for {symbol}/{strategy_name}")
                     continue
                 
-                self._execute_strategy(symbol, strategy_name, strategy, ohlcv, current_price)
+                # Generate signal without executing
+                signal = self._generate_signal_for_strategy(symbol, strategy_name, strategy, ohlcv, current_price)
+                if signal:
+                    collected_signals.append({
+                        'strategy_name': strategy_name,
+                        'strategy': strategy,
+                        'signal': signal,
+                        'ohlcv': ohlcv,
+                        'current_price': current_price
+                    })
+            
+            # Resolve conflicts and execute the winning signal
+            if collected_signals:
+                winning_signal = self._resolve_signal_conflicts(symbol, collected_signals)
+                if winning_signal:
+                    self._execute_resolved_signal(symbol, winning_signal)
                 
         except Exception as e:
             self.logger.error(f"Error analyzing {symbol}: {e}")
+    
+    def _generate_signal_for_strategy(self, symbol: str, strategy_name: str, strategy, ohlcv: pd.DataFrame, current_price: float) -> Optional[Dict[str, Any]]:
+        """Generate a signal from a strategy without executing it."""
+        try:
+            # Check if strategy is enabled by the strategy selector
+            if not self.strategy_selector.is_strategy_enabled(strategy_name):
+                self.logger.debug(f"Strategy {strategy_name} is disabled by selector, skipping")
+                return None
+            
+            # Skip strategies that handle their own signal generation differently
+            if strategy_name in ['funding_rate_arbitrage', 'momentum_factor']:
+                return None
+            
+            # Generate the signal based on strategy type
+            if strategy_name == 'ou_mean_reversion':
+                signal = strategy.generate_signal_for_symbol(symbol, ohlcv)
+            else:
+                signal = strategy.generate_signal(ohlcv)
+            
+            if signal:
+                # Get strategy weight
+                strategy_weight = self.strategy_selector.get_strategy_weight(strategy_name)
+                signal['_strategy_weight'] = strategy_weight
+                signal['_weighted_strength'] = signal.get('signal_strength', 0.5) * strategy_weight
+                
+            return signal
+            
+        except Exception as e:
+            self.logger.error(f"Error generating signal for {strategy_name}/{symbol}: {e}")
+            return None
+    
+    def _resolve_signal_conflicts(self, symbol: str, collected_signals: List[Dict]) -> Optional[Dict]:
+        """
+        Resolve conflicts when multiple strategies generate opposite signals for the same symbol.
+        
+        Uses the signal with the highest weighted strength.
+        """
+        if not collected_signals:
+            return None
+        
+        if len(collected_signals) == 1:
+            return collected_signals[0]
+        
+        # Group signals by direction (buy vs sell)
+        buy_signals = [s for s in collected_signals if s['signal'].get('signal') == 'buy']
+        sell_signals = [s for s in collected_signals if s['signal'].get('signal') == 'sell']
+        
+        # Check for conflict (both buy and sell signals exist)
+        if buy_signals and sell_signals:
+            # Get best signal from each direction
+            best_buy = max(buy_signals, key=lambda s: s['signal'].get('_weighted_strength', 0))
+            best_sell = max(sell_signals, key=lambda s: s['signal'].get('_weighted_strength', 0))
+            
+            buy_strength = best_buy['signal'].get('_weighted_strength', 0)
+            sell_strength = best_sell['signal'].get('_weighted_strength', 0)
+            
+            self.logger.warning(
+                f"⚠️ Signal conflict for {symbol}: "
+                f"BUY ({best_buy['strategy_name']}, strength={buy_strength:.3f}) vs "
+                f"SELL ({best_sell['strategy_name']}, strength={sell_strength:.3f})"
+            )
+            
+            # Use the stronger signal
+            if buy_strength > sell_strength:
+                winner = best_buy
+                loser_strategies = [s['strategy_name'] for s in sell_signals]
+                self.logger.info(f"✓ Resolved: Using BUY from {winner['strategy_name']} (ignoring SELL from {loser_strategies})")
+            elif sell_strength > buy_strength:
+                winner = best_sell
+                loser_strategies = [s['strategy_name'] for s in buy_signals]
+                self.logger.info(f"✓ Resolved: Using SELL from {winner['strategy_name']} (ignoring BUY from {loser_strategies})")
+            else:
+                # Equal strength - skip the trade entirely
+                self.logger.info(f"✗ Skipping {symbol}: Equal strength conflicting signals, no trade taken")
+                return None
+            
+            return winner
+        
+        # No conflict - return the strongest signal
+        best_signal = max(collected_signals, key=lambda s: s['signal'].get('_weighted_strength', 0))
+        return best_signal
+    
+    def _execute_resolved_signal(self, symbol: str, signal_data: Dict):
+        """Execute a resolved signal after conflict resolution."""
+        strategy_name = signal_data['strategy_name']
+        strategy = signal_data['strategy']
+        signal = signal_data['signal']
+        ohlcv = signal_data['ohlcv']
+        current_price = signal_data['current_price']
+        
+        self.logger.info(f"{strategy_name} signal for {symbol}: {signal['signal']} at {current_price}")
+        
+        # Check if this is a multi-leg signal
+        if signal.get('signal_type') == 'multi_leg':
+            self._handle_multi_leg_signal(symbol, signal, current_price, strategy_name, ohlcv)
+            return
+        
+        # Get strategy weight from selector
+        strategy_weight = self.strategy_selector.get_strategy_weight(strategy_name)
+        
+        # Check if we should act on the signal
+        should_execute = self._should_execute_signal(symbol, signal, current_price, ohlcv, strategy_name)
+        self.logger.info(f"Should execute {strategy_name} signal for {symbol}: {should_execute}")
+        
+        if should_execute:
+            # Apply strategy weight to the signal strength for position sizing
+            if 'signal_strength' in signal:
+                signal['signal_strength'] *= strategy_weight
+            
+            self.logger.info(f"Executing {strategy_name} trade for {symbol} (weight: {strategy_weight:.2f})")
+            self._execute_trade(symbol, signal, current_price, strategy_name, ohlcv)
+        else:
+            self.logger.info(f"Skipping {strategy_name} signal for {symbol} - conditions not met")
     
     def _run_portfolio_strategies(self, trading_pairs: List[str]):
         """

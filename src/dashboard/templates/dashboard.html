@@ -271,6 +271,28 @@
             font-size: 11px;
         }
 
+        .exit-reason-tag {
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 500;
+        }
+
+        .exit-reason-tag.reason-profit {
+            background: var(--green-bg);
+            color: var(--green);
+        }
+
+        .exit-reason-tag.reason-loss {
+            background: var(--red-bg);
+            color: var(--red);
+        }
+
+        .exit-reason-tag.reason-neutral {
+            background: var(--bg-hover);
+            color: var(--text-secondary);
+        }
+
         .pnl-positive {
             color: var(--green);
         }
@@ -510,8 +532,12 @@
                 <div class="summary-value" id="total-equity">--</div>
             </div>
             <div class="summary-card">
+                <div class="summary-label">Realized PnL</div>
+                <div class="summary-value" id="realized-pnl">--</div>
+            </div>
+            <div class="summary-card">
                 <div class="summary-label">Unrealized PnL</div>
-                <div class="summary-value" id="total-pnl">--</div>
+                <div class="summary-value" id="unrealized-pnl">--</div>
             </div>
             <div class="summary-card">
                 <div class="summary-label">Open Positions</div>
@@ -524,6 +550,7 @@
             <div class="summary-card">
                 <div class="summary-label">Win Rate</div>
                 <div class="summary-value" id="win-rate">--</div>
+                <div class="summary-change text-muted" id="trade-stats"></div>
             </div>
             <div class="summary-card">
                 <div class="summary-label">Selected Pairs</div>
@@ -563,6 +590,21 @@
                 <h2 class="section-title">Strategies</h2>
             </div>
             <div class="strategy-grid" id="strategies-container">
+                <div class="loading">
+                    <div class="spinner"></div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Trade History -->
+        <section class="section">
+            <div class="section-header">
+                <h2 class="section-title">
+                    Trade History
+                    <span class="count" id="trade-count">0</span>
+                </h2>
+            </div>
+            <div class="table-container" id="trades-table-container">
                 <div class="loading">
                     <div class="spinner"></div>
                 </div>
@@ -633,6 +675,7 @@
                             <th>Entry Price</th>
                             <th>Current Price</th>
                             <th>Notional</th>
+                            <th>Leverage</th>
                             <th>PnL</th>
                             <th>PnL %</th>
                             <th>Hold Time</th>
@@ -645,6 +688,7 @@
             for (const pos of positions) {
                 const sideClass = pos.side === 'long' ? 'side-long' : 'side-short';
                 const pnlClass = getPnlClass(pos.unrealized_pnl);
+                const leverage = pos.leverage ? pos.leverage.toFixed(1) + 'x' : '--';
                 
                 html += `
                     <tr>
@@ -654,6 +698,7 @@
                         <td>${formatPrice(pos.entry_price)}</td>
                         <td>${formatPrice(pos.current_price)}</td>
                         <td>${formatCurrency(pos.notional)}</td>
+                        <td>${leverage}</td>
                         <td class="${pnlClass}">${formatCurrency(pos.unrealized_pnl)}</td>
                         <td class="${pnlClass}">${formatPct(pos.unrealized_pnl_pct)}</td>
                         <td class="text-muted">${pos.holding_time || '--'}</td>
@@ -782,6 +827,108 @@
             container.innerHTML = html;
         }
 
+        // Render trade history table
+        function renderTradesTable(trades) {
+            const container = document.getElementById('trades-table-container');
+            document.getElementById('trade-count').textContent = trades.length;
+
+            if (trades.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-state-icon">📜</div>
+                        <p>No trade history yet</p>
+                    </div>
+                `;
+                return;
+            }
+
+            let html = `
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Symbol</th>
+                            <th>Side</th>
+                            <th>Entry</th>
+                            <th>Exit</th>
+                            <th>Size</th>
+                            <th>PnL</th>
+                            <th>PnL %</th>
+                            <th>Duration</th>
+                            <th>Exit Reason</th>
+                            <th>Strategy</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            `;
+
+            for (const trade of trades) {
+                const sideClass = trade.side === 'long' ? 'side-long' : 'side-short';
+                const pnlClass = getPnlClass(trade.realized_pnl);
+                const exitTime = trade.exit_time ? formatTime(trade.exit_time) : '--';
+                const exitReason = formatExitReason(trade.exit_reason);
+                
+                html += `
+                    <tr>
+                        <td class="text-muted">${exitTime}</td>
+                        <td class="symbol">${trade.symbol}</td>
+                        <td><span class="${sideClass}">${(trade.side || 'unknown').toUpperCase()}</span></td>
+                        <td>${formatPrice(trade.entry_price)}</td>
+                        <td>${formatPrice(trade.exit_price)}</td>
+                        <td>${formatSize(trade.size)}</td>
+                        <td class="${pnlClass}">${formatCurrency(trade.realized_pnl)}</td>
+                        <td class="${pnlClass}">${formatPct(trade.realized_pnl_pct)}</td>
+                        <td class="text-muted">${trade.holding_time || '--'}</td>
+                        <td><span class="exit-reason-tag ${getExitReasonClass(trade.exit_reason)}">${exitReason}</span></td>
+                        <td><span class="strategy-tag">${trade.strategy || 'unknown'}</span></td>
+                    </tr>
+                `;
+            }
+
+            html += '</tbody></table>';
+            container.innerHTML = html;
+        }
+
+        // Format exit time
+        function formatTime(timeStr) {
+            if (!timeStr) return '--';
+            try {
+                const date = new Date(timeStr);
+                return date.toLocaleString('en-US', { 
+                    month: 'short', 
+                    day: 'numeric',
+                    hour: '2-digit', 
+                    minute: '2-digit'
+                });
+            } catch {
+                return '--';
+            }
+        }
+
+        // Format exit reason
+        function formatExitReason(reason) {
+            if (!reason) return 'Unknown';
+            const reasonMap = {
+                'take_profit': 'Take Profit',
+                'stop_loss': 'Stop Loss',
+                'trailing_stop': 'Trail Stop',
+                'strategy_exit': 'Strategy',
+                'position_limit': 'Pos. Limit',
+                'manual': 'Manual',
+                'timeout': 'Timeout',
+                'unknown': 'Unknown'
+            };
+            return reasonMap[reason] || reason.replace(/_/g, ' ');
+        }
+
+        // Get exit reason class for styling
+        function getExitReasonClass(reason) {
+            if (!reason) return '';
+            if (reason === 'take_profit') return 'reason-profit';
+            if (reason === 'stop_loss' || reason === 'trailing_stop') return 'reason-loss';
+            return 'reason-neutral';
+        }
+
         // Update summary
         function updateSummary(summary, positionTotals) {
             const account = summary.account || {};
@@ -790,14 +937,28 @@
 
             document.getElementById('total-equity').textContent = formatCurrency(account.total_equity);
             
-            const pnl = positionTotals.total_unrealized_pnl;
-            const pnlEl = document.getElementById('total-pnl');
-            pnlEl.textContent = formatCurrency(pnl);
-            pnlEl.className = 'summary-value ' + (pnl >= 0 ? 'positive' : 'negative');
+            // Realized PnL
+            const realizedPnl = performance.total_realized_pnl || 0;
+            const realizedPnlEl = document.getElementById('realized-pnl');
+            realizedPnlEl.textContent = formatCurrency(realizedPnl);
+            realizedPnlEl.className = 'summary-value ' + (realizedPnl >= 0 ? 'positive' : 'negative');
+            
+            // Unrealized PnL
+            const unrealizedPnl = positionTotals.total_unrealized_pnl || 0;
+            const unrealizedPnlEl = document.getElementById('unrealized-pnl');
+            unrealizedPnlEl.textContent = formatCurrency(unrealizedPnl);
+            unrealizedPnlEl.className = 'summary-value ' + (unrealizedPnl >= 0 ? 'positive' : 'negative');
 
             document.getElementById('position-count').textContent = positionTotals.position_count || 0;
             document.getElementById('total-notional').textContent = formatCurrency(positionTotals.total_notional);
             document.getElementById('win-rate').textContent = formatPct(performance.win_rate);
+            
+            // Trade statistics
+            const wins = performance.winning_trades || 0;
+            const losses = performance.losing_trades || 0;
+            const total = performance.total_trades || 0;
+            document.getElementById('trade-stats').textContent = `${wins}W / ${losses}L (${total} total)`;
+            
             document.getElementById('selected-pairs').textContent = botStatus.selected_pairs || 0;
 
             // Update status
@@ -815,15 +976,17 @@
         // Fetch all data
         async function fetchData() {
             try {
-                const [positionsRes, summaryRes, strategiesRes] = await Promise.all([
+                const [positionsRes, summaryRes, strategiesRes, tradesRes] = await Promise.all([
                     fetch('/api/positions'),
                     fetch('/api/summary'),
-                    fetch('/api/strategies')
+                    fetch('/api/strategies'),
+                    fetch('/api/trades')
                 ]);
 
                 const positions = await positionsRes.json();
                 const summary = await summaryRes.json();
                 const strategies = await strategiesRes.json();
+                const trades = await tradesRes.json();
 
                 if (positions.success) {
                     renderPositionsTable(positions.data.single_leg || []);
@@ -836,6 +999,10 @@
 
                 if (strategies.success) {
                     renderStrategies(strategies.data || []);
+                }
+
+                if (trades.success) {
+                    renderTradesTable(trades.data || []);
                 }
 
                 // Update status on success

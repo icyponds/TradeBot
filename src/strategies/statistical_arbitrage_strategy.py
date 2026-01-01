@@ -393,8 +393,9 @@ class StatisticalArbitrageStrategy(BaseStrategy):
         base_sl_pct = 0.05  # 5% base
         
         if signal_context:
-            # Adjust based on entry Z-score
-            z_score = abs(signal_context.get('z_score', 2.0))
+            # Adjust based on entry Z-score (handle None values explicitly)
+            z_score = signal_context.get('z_score')
+            z_score = abs(z_score) if z_score is not None else 2.0
             # Stop if Z-score moves to 1.5x entry
             stop_z = z_score * 1.5
             # Rough conversion: 1 Z-score ≈ 2-3% price move

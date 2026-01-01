@@ -100,6 +100,23 @@ def create_dashboard_app() -> Flask:
                 'error': str(e)
             }), 500
     
+    @app.route('/api/trades')
+    def get_trades():
+        """Get recent trade history."""
+        try:
+            trades = _get_trades_data()
+            return jsonify({
+                'success': True,
+                'timestamp': datetime.now().isoformat(),
+                'data': trades
+            })
+        except Exception as e:
+            logger.error(f"Error getting trades: {e}")
+            return jsonify({
+                'success': False,
+                'error': str(e)
+            }), 500
+    
     @app.route('/api/health')
     def health_check():
         """Health check endpoint."""
@@ -187,6 +204,17 @@ def _format_position(position) -> Dict[str, Any]:
     
     notional = (position.current_price or position.entry_price) * position.size
     
+    # Calculate leverage from notional / margin
+    leverage = 1.0
+    if position.capital_at_risk and position.capital_at_risk > 0:
+        leverage = notional / position.capital_at_risk
+    
+    # Get trailing stop info
+    trailing_active = getattr(position, 'trailing_stop_active', False)
+    trailing_enabled = getattr(position, 'trailing_stop_enabled', False)
+    highest_price = getattr(position, 'highest_price', None)
+    lowest_price = getattr(position, 'lowest_price', None)
+    
     return {
         'symbol': position.symbol,
         'side': position.side,
@@ -200,10 +228,15 @@ def _format_position(position) -> Dict[str, Any]:
         'holding_time': f"{hours:.1f}h",
         'holding_hours': hours,
         'notional': notional,
+        'leverage': round(leverage, 2),
         'capital_at_risk': position.capital_at_risk,
         'unrealized_pnl': position.unrealized_pnl,
         'unrealized_pnl_pct': position.unrealized_pnl_percentage,
         'capital_pnl_pct': position.capital_at_risk_pnl_percentage,
+        'trailing_stop_enabled': trailing_enabled,
+        'trailing_stop_active': trailing_active,
+        'highest_price': highest_price,
+        'lowest_price': lowest_price,
     }
 
 
@@ -253,6 +286,13 @@ def _get_summary_data() -> Dict[str, Any]:
         portfolio = _strategy_manager.portfolio_manager
         summary = portfolio.get_portfolio_summary()
         
+        # Get realized and unrealized PnL
+        total_realized_pnl = _get_total_realized_pnl()
+        total_unrealized_pnl = _get_total_unrealized_pnl()
+        
+        # Get trade stats
+        trade_stats = _get_trade_stats()
+        
         return {
             'account': {
                 'total_equity': summary.get('total_equity', 0),
@@ -262,13 +302,17 @@ def _get_summary_data() -> Dict[str, Any]:
                 'available_capital': summary.get('available_capital', 0),
             },
             'performance': {
-                'total_trades': _strategy_manager.trade_database.get_trade_count() if hasattr(_strategy_manager, 'trade_database') else 0,
-                'win_rate': _get_win_rate(),
-                'total_pnl': _get_total_realized_pnl(),
+                'total_trades': trade_stats.get('total_trades', 0),
+                'winning_trades': trade_stats.get('winning_trades', 0),
+                'losing_trades': trade_stats.get('losing_trades', 0),
+                'win_rate': trade_stats.get('win_rate', 0),
+                'total_realized_pnl': total_realized_pnl,
+                'total_unrealized_pnl': total_unrealized_pnl,
+                'total_pnl': total_realized_pnl + total_unrealized_pnl,
             },
             'bot_status': {
                 'is_running': _strategy_manager.is_running,
-                'selected_pairs': len(_strategy_manager.pair_selector.selected_pairs) if _strategy_manager.pair_selector else 0,
+                'selected_pairs': len(_strategy_manager.pair_selector.get_current_pairs()) if _strategy_manager.pair_selector else 0,
                 'active_strategies': len([s for s in _strategy_manager.strategies.keys()]),
             }
         }
@@ -367,11 +411,11 @@ def _calculate_holding_time(entry_time_str: Optional[str]) -> str:
 
 def _get_win_rate() -> float:
     """Get overall win rate from trade database."""
-    if _strategy_manager is not None and hasattr(_strategy_manager, 'trade_database'):
+    if _strategy_manager is not None and hasattr(_strategy_manager, 'performance_tracker'):
         try:
-            trades = _strategy_manager.trade_database.get_recent_trades(100)
+            trades = _strategy_manager.performance_tracker.db.get_recent_trades(100)
             if trades:
-                wins = sum(1 for t in trades if t.get('realized_pnl', 0) > 0)
+                wins = sum(1 for t in trades if t.get('pnl', 0) > 0)
                 return (wins / len(trades)) * 100
         except:
             pass
@@ -380,13 +424,106 @@ def _get_win_rate() -> float:
 
 def _get_total_realized_pnl() -> float:
     """Get total realized PnL from trade database."""
-    if _strategy_manager is not None and hasattr(_strategy_manager, 'trade_database'):
+    if _strategy_manager is not None and hasattr(_strategy_manager, 'performance_tracker'):
         try:
-            trades = _strategy_manager.trade_database.get_recent_trades(1000)
-            return sum(t.get('realized_pnl', 0) for t in trades)
+            trades = _strategy_manager.performance_tracker.db.get_recent_trades(1000)
+            return sum(t.get('pnl', 0) or 0 for t in trades)
         except:
             pass
     return 0
+
+
+def _get_total_unrealized_pnl() -> float:
+    """Get total unrealized PnL from open positions."""
+    total = 0.0
+    if _strategy_manager is not None:
+        # Single-leg positions
+        for symbol, position in _strategy_manager.positions.items():
+            if position.unrealized_pnl is not None:
+                total += position.unrealized_pnl
+        
+        # Multi-leg positions
+        for pos_id, multi_pos in _strategy_manager.multi_leg_positions.items():
+            if multi_pos.metadata and multi_pos.metadata.get('unrealized_pnl'):
+                total += multi_pos.metadata['unrealized_pnl']
+    return total
+
+
+def _get_trade_stats() -> Dict[str, Any]:
+    """Get comprehensive trade statistics."""
+    stats = {
+        'total_trades': 0,
+        'winning_trades': 0,
+        'losing_trades': 0,
+        'win_rate': 0.0,
+    }
+    
+    if _strategy_manager is not None and hasattr(_strategy_manager, 'performance_tracker'):
+        try:
+            trades = _strategy_manager.performance_tracker.db.get_recent_trades(1000)
+            if trades:
+                stats['total_trades'] = len(trades)
+                stats['winning_trades'] = sum(1 for t in trades if (t.get('pnl') or 0) > 0)
+                stats['losing_trades'] = sum(1 for t in trades if (t.get('pnl') or 0) < 0)
+                if stats['total_trades'] > 0:
+                    stats['win_rate'] = (stats['winning_trades'] / stats['total_trades']) * 100
+        except:
+            pass
+    
+    return stats
+
+
+def _get_trades_data(limit: int = 50) -> List[Dict[str, Any]]:
+    """Get recent trade history."""
+    trades = []
+    
+    if _strategy_manager is not None and hasattr(_strategy_manager, 'performance_tracker'):
+        try:
+            raw_trades = _strategy_manager.performance_tracker.db.get_recent_trades(limit)
+            for trade in raw_trades:
+                # Format trade data for display
+                exit_time = trade.get('exit_time') or trade.get('timestamp')
+                entry_time = trade.get('entry_time')
+                
+                # Calculate holding time if both times are available
+                holding_time = None
+                if entry_time and exit_time:
+                    try:
+                        if isinstance(entry_time, str):
+                            entry_dt = datetime.fromisoformat(entry_time.replace('Z', '+00:00'))
+                        else:
+                            entry_dt = entry_time
+                        if isinstance(exit_time, str):
+                            exit_dt = datetime.fromisoformat(exit_time.replace('Z', '+00:00'))
+                        else:
+                            exit_dt = exit_time
+                        holding_seconds = (exit_dt - entry_dt).total_seconds()
+                        holding_hours = holding_seconds / 3600
+                        holding_time = f"{holding_hours:.1f}h"
+                    except:
+                        pass
+                
+                trades.append({
+                    'symbol': trade.get('symbol', 'Unknown'),
+                    'side': trade.get('side', 'unknown'),
+                    'strategy': trade.get('strategy', 'unknown'),
+                    'entry_price': trade.get('entry_price'),
+                    'exit_price': trade.get('exit_price'),
+                    'size': trade.get('size'),
+                    'realized_pnl': trade.get('pnl', 0),  # DB uses 'pnl' not 'realized_pnl'
+                    'realized_pnl_pct': trade.get('pnl_percentage'),
+                    'exit_reason': trade.get('exit_reason', 'unknown'),
+                    'entry_time': entry_time,
+                    'exit_time': exit_time,
+                    'holding_time': holding_time,
+                })
+        except Exception as e:
+            logger.error(f"Error fetching trades: {e}")
+    
+    # Sort by exit time (most recent first)
+    trades.sort(key=lambda x: x.get('exit_time') or '', reverse=True)
+    
+    return trades
 
 
 def run_dashboard(strategy_manager=None, market_api=None, port: int = 5050, debug: bool = False):

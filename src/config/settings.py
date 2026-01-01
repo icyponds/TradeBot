@@ -97,8 +97,8 @@ def load_config() -> Dict[str, Any]:
             # Portfolio-based position sizing
             "use_portfolio_based_sizing": os.getenv("USE_PORTFOLIO_BASED_SIZING", "true").lower() == "true",
             "max_position_size_usd": float(os.getenv("MAX_POSITION_SIZE_USD", "100")),  # Fallback max USD per position
-            "max_position_size_percentage": float(os.getenv("MAX_POSITION_SIZE_PERCENTAGE", "10.0")),  # Max % of portfolio per position
-            "max_positions_percentage": float(os.getenv("MAX_POSITIONS_PERCENTAGE", "33.33")),  # Max % of portfolio in all positions
+            "max_position_size_percentage": float(os.getenv("MAX_POSITION_SIZE_PERCENTAGE", "20.0")),  # Max % of portfolio per position
+            "max_positions_percentage": float(os.getenv("MAX_POSITIONS_PERCENTAGE", "80.0")),  # Max % of portfolio in all positions
             "risk_percentage": float(os.getenv("RISK_PERCENTAGE", "10.0")),
             "stop_loss_percentage": float(os.getenv("STOP_LOSS_PERCENTAGE", "5.0")),
             
@@ -127,11 +127,11 @@ def load_config() -> Dict[str, Any]:
         
         # Leverage Management Configuration
         "leverage_management": {
-            "base_leverage": float(os.getenv("LEVERAGE_BASE", "2.0")),
+            "base_leverage": float(os.getenv("LEVERAGE_BASE", "3.0")),  # Increased from 2.0
             "signal_adjustment_max": float(os.getenv("LEVERAGE_SIGNAL_ADJUSTMENT_MAX", "0.5")),
             "volatility_min": float(os.getenv("LEVERAGE_VOLATILITY_MIN", "0.1")),
-            "min_leverage": float(os.getenv("LEVERAGE_MIN", "1.0")),
-            "max_leverage": float(os.getenv("LEVERAGE_MAX", "10.0")),
+            "min_leverage": float(os.getenv("LEVERAGE_MIN", "1.5")),  # Increased from 1.0
+            "max_leverage": float(os.getenv("LEVERAGE_MAX", "5.0")),  # Reduced from 10.0 for safety
             "ma_strategy_adjustment": float(os.getenv("LEVERAGE_MA_STRATEGY_ADJUSTMENT", "1.1")),
             "rsi_strategy_adjustment": float(os.getenv("LEVERAGE_RSI_STRATEGY_ADJUSTMENT", "0.9")),
         },
