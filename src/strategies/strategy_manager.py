@@ -1298,106 +1298,184 @@ class StrategyManager:
         risk_info: Dict[str, Any]
     ):
         """
-        Handle a position at liquidation risk.
+        Handle a delta-neutral position at liquidation risk.
+        
+        For funding rate arbitrage and similar delta-neutral strategies:
+        - DO NOT close the position (defeats the purpose of the arb)
+        - Instead: Sell spot → Transfer USDC to perp → Add as collateral
+        - This maintains delta-neutrality while securing the perp position
         
         Strategy:
-        1. First, try to add margin from withdrawable perp balance
-        2. If insufficient, try to transfer from spot to perp
-        3. If still insufficient, reduce position size proportionally on all legs
-        4. If still critical, emergency close the entire position
+        1. Try to add margin from existing perp withdrawable balance
+        2. If insufficient, transfer USDC from spot account to perp
+        3. If still insufficient, SELL some spot, transfer proceeds to perp as collateral
+           (This reduces position size proportionally on both legs, maintaining delta-neutral)
+        4. Keep repeating step 3 until position is safe (never fully close the arb)
         """
         symbol = at_risk_leg.symbol
         distance_pct = risk_info.get('distance_to_liquidation_pct', 0)
         margin_info = risk_info.get('margin_info', {})
+        current_price = risk_info.get('current_price', at_risk_leg.entry_price)
         
         self.logger.warning(f"⚠️ LIQUIDATION RISK: {symbol} is {distance_pct:.1f}% from liquidation!")
         self.logger.warning(f"   Position: {at_risk_leg.side} {at_risk_leg.size} @ {at_risk_leg.entry_price:.4f}")
-        self.logger.warning(f"   Current: ${risk_info.get('current_price', 0):.4f}, Liquidation: ${risk_info.get('liquidation_price', 0):.4f}")
+        self.logger.warning(f"   Current: ${current_price:.4f}, Liquidation: ${risk_info.get('liquidation_price', 0):.4f}")
         
         # Calculate how much margin we need to add to be safe (aim for 30% distance)
         target_distance_pct = 30.0
         if distance_pct >= target_distance_pct:
-            # We're actually safe enough
             return
         
-        # Strategy 1: Try to add margin from perp account
+        # Estimate margin needed to reach target distance
+        # Rough formula: margin_needed ≈ position_value * (target_distance - current_distance) / leverage
+        position_value = abs(at_risk_leg.size * current_price)
+        current_margin = margin_info.get('margin_used', 0)
+        leverage = margin_info.get('leverage_value', 1)
+        
+        # Calculate margin shortfall
+        margin_ratio_needed = target_distance_pct / 100
+        margin_to_add = max(current_margin * 0.5, position_value * 0.1)  # At least 10% of position value
+        
+        self.logger.info(f"   Need to add ~${margin_to_add:.2f} margin to reach {target_distance_pct}% buffer")
+        
+        # Strategy 1: Try to add margin from existing perp withdrawable balance
         perp_balance = self.market_api.get_perp_balance()
         withdrawable = perp_balance.get('withdrawable', 0)
         
-        # Estimate margin needed (rough calculation)
-        position_value = abs(at_risk_leg.size * risk_info.get('current_price', at_risk_leg.entry_price))
-        current_margin = margin_info.get('margin_used', 0)
-        
-        # Add 50% more margin as a buffer
-        margin_to_add = current_margin * 0.5
-        
-        if withdrawable >= margin_to_add and margin_to_add > 0:
-            self.logger.info(f"   Adding ${margin_to_add:.2f} margin from perp withdrawable")
+        if withdrawable >= margin_to_add:
+            self.logger.info(f"   Adding ${margin_to_add:.2f} margin from perp withdrawable (${withdrawable:.2f} available)")
             if self.market_api.add_position_margin(symbol, margin_to_add):
                 self.logger.info(f"   ✓ Margin added successfully")
                 return
+        elif withdrawable > 0:
+            # Add what we can from withdrawable
+            self.logger.info(f"   Adding available ${withdrawable:.2f} from perp withdrawable")
+            if self.market_api.add_position_margin(symbol, withdrawable):
+                margin_to_add -= withdrawable
+                self.logger.info(f"   ✓ Added ${withdrawable:.2f}, still need ${margin_to_add:.2f}")
         
-        # Strategy 2: Transfer from spot if we have USDC there
+        # Strategy 2: Transfer existing USDC from spot account to perp
         spot_usdc = self.market_api.get_spot_balance('USDC')
-        if spot_usdc >= margin_to_add and margin_to_add > 0:
-            self.logger.info(f"   Transferring ${margin_to_add:.2f} from spot to perp")
+        
+        if spot_usdc >= margin_to_add:
+            self.logger.info(f"   Transferring ${margin_to_add:.2f} USDC from spot to perp")
             if self.market_api.transfer_usd_to_perp(margin_to_add):
-                # Now add it to the position
                 if self.market_api.add_position_margin(symbol, margin_to_add):
                     self.logger.info(f"   ✓ Transferred and added margin successfully")
                     return
+        elif spot_usdc > 10:  # At least $10 to transfer
+            self.logger.info(f"   Transferring available ${spot_usdc:.2f} USDC from spot")
+            if self.market_api.transfer_usd_to_perp(spot_usdc):
+                if self.market_api.add_position_margin(symbol, spot_usdc):
+                    margin_to_add -= spot_usdc
+                    self.logger.info(f"   ✓ Transferred ${spot_usdc:.2f}, still need ${margin_to_add:.2f}")
         
-        # Strategy 3: Reduce position size if we can't add margin
-        # Note: This requires selling spot and reducing perp proportionally
-        if distance_pct < 10.0:  # Critical - less than 10% to liquidation
-            self.logger.warning(f"   CRITICAL: Only {distance_pct:.1f}% to liquidation!")
+        # Strategy 3: SELL SPOT to raise USDC, transfer to perp as collateral
+        # This is the key for delta-neutral: sell spot, use proceeds for perp margin
+        # Both sides reduce proportionally, maintaining delta-neutrality
+        
+        if margin_to_add > 0:
+            self.logger.warning(f"   Selling spot to raise ${margin_to_add:.2f} for perp collateral")
             
-            # Calculate 50% reduction
-            reduction_factor = 0.5
-            self.logger.warning(f"   Reducing position by {reduction_factor*100:.0f}%")
-            
+            # Find the spot leg
+            spot_leg = None
             for leg in position.legs:
-                reduce_size = leg.size * reduction_factor
-                order_side = 'sell' if leg.side == 'long' else 'buy'
+                if leg.market_type == 'spot':
+                    spot_leg = leg
+                    break
+            
+            if not spot_leg:
+                self.logger.error(f"   No spot leg found in position - cannot raise collateral!")
+                return
+            
+            # Calculate how much spot to sell
+            spot_price = self._get_leg_price(spot_leg.symbol, 'spot')
+            if not spot_price or spot_price <= 0:
+                self.logger.error(f"   Cannot get spot price for {spot_leg.symbol}")
+                return
+            
+            # Add 5% buffer for slippage
+            amount_to_sell = (margin_to_add * 1.05) / spot_price
+            
+            # Don't sell more than we have
+            max_sell = spot_leg.size * 0.8  # Keep at least 20% to maintain some hedge
+            amount_to_sell = min(amount_to_sell, max_sell)
+            
+            if amount_to_sell <= 0:
+                self.logger.error(f"   Cannot sell any more spot (would eliminate hedge)")
+                return
+            
+            self.logger.info(f"   Selling {amount_to_sell:.6f} {spot_leg.symbol} @ ~${spot_price:.4f}")
+            
+            # Execute spot sale
+            result = self.market_api.execute_order(
+                symbol=spot_leg.symbol,
+                side='sell',
+                size=amount_to_sell,
+                reduce_only=False,
+                urgency="high",
+                market_type='spot',
+            )
+            
+            if result and result.get('filled_size', 0) > 0:
+                filled_size = result['filled_size']
+                fill_price = result.get('avg_fill_price', spot_price)
+                usdc_raised = filled_size * fill_price
                 
-                self.logger.info(f"   Reducing {leg.symbol}: {order_side} {reduce_size:.6f}")
+                self.logger.info(f"   ✓ Sold {filled_size:.6f} spot for ${usdc_raised:.2f}")
                 
-                result = self.market_api.execute_order(
-                    symbol=leg.symbol,
-                    side=order_side,
-                    size=reduce_size,
-                    reduce_only=leg.market_type == 'perp',
+                # Update spot leg size
+                spot_leg.size -= filled_size
+                
+                # Now also reduce perp position proportionally to maintain delta-neutral
+                perp_leg = at_risk_leg
+                perp_reduction = filled_size * (spot_price / current_price)  # Adjust for price difference
+                
+                self.logger.info(f"   Reducing perp by {perp_reduction:.6f} to maintain delta-neutral")
+                
+                perp_result = self.market_api.execute_order(
+                    symbol=perp_leg.symbol,
+                    side='buy' if perp_leg.side == 'short' else 'sell',
+                    size=perp_reduction,
+                    reduce_only=True,
                     urgency="high",
-                    market_type=leg.market_type,
+                    market_type=perp_leg.market_type,
                 )
                 
-                if result and result.get('filled_size', 0) > 0:
-                    # Update leg size
-                    leg.size -= result['filled_size']
-                    self.logger.info(f"     ✓ Reduced to {leg.size:.6f}")
+                if perp_result and perp_result.get('filled_size', 0) > 0:
+                    perp_leg.size -= perp_result['filled_size']
+                    self.logger.info(f"   ✓ Perp reduced to {perp_leg.size:.6f}")
+                
+                # Transfer the raised USDC to perp
+                # Note: The USDC from spot sale should already be in spot account
+                time.sleep(0.5)  # Brief delay for settlement
+                
+                transfer_amount = min(usdc_raised * 0.95, margin_to_add)  # 95% to account for fees
+                self.logger.info(f"   Transferring ${transfer_amount:.2f} to perp account")
+                
+                if self.market_api.transfer_usd_to_perp(transfer_amount):
+                    if self.market_api.add_position_margin(symbol, transfer_amount):
+                        self.logger.info(f"   ✓ Successfully added ${transfer_amount:.2f} as perp collateral")
+                    else:
+                        self.logger.warning(f"   Transferred but failed to add margin - funds in perp account")
                 else:
-                    self.logger.error(f"     ✗ Failed to reduce {leg.symbol}")
-            
-            # Save updated positions
-            self.save_positions_to_file()
-            return
+                    self.logger.warning(f"   Failed to transfer - USDC remains in spot account")
+                
+                # Save updated positions
+                self.save_positions_to_file()
+                
+                self.logger.info(f"   Position rebalanced: maintained delta-neutral while increasing collateral")
+                self.logger.info(f"   New spot size: {spot_leg.size:.6f}, New perp size: {perp_leg.size:.6f}")
+                
+            else:
+                self.logger.error(f"   ✗ Failed to sell spot - manual intervention may be required!")
         
-        # Strategy 4: Emergency close if extremely close to liquidation
-        if distance_pct < 5.0:  # Emergency - less than 5% to liquidation
-            self.logger.error(f"   EMERGENCY: Closing entire position to avoid liquidation")
-            
-            # Create exit signal
-            exit_signal = {
-                'signal': 'exit_arb',
-                'signal_type': 'multi_leg',
-                'action': 'exit',
-                'symbol': position.primary_symbol,
-                'reason': 'liquidation_emergency',
-                'urgency': 'high',
-                'legs': []
-            }
-            
-            self._execute_multi_leg_exit(position.primary_symbol, exit_signal, position.strategy)
+        # Final check - if still critical after all attempts, log severe warning
+        # But DO NOT close the position - that would realize the loss
+        updated_risk = self.market_api.check_liquidation_risk(symbol, threshold_pct=5.0)
+        if updated_risk.get('at_risk'):
+            self.logger.error(f"   ⚠️ STILL AT RISK after rebalancing - monitor closely!")
+            self.logger.error(f"   Distance to liquidation: {updated_risk.get('distance_to_liquidation_pct', 0):.1f}%")
     
     def _should_execute_signal(self, symbol: str, signal: Dict[str, Any], current_price: float, 
                               ohlcv: pd.DataFrame, strategy_name: str) -> bool:
@@ -1677,9 +1755,29 @@ class StrategyManager:
             return False
     
     def close_all_positions(self, reason: str = "kill_switch"):
-        """Close all open positions."""
+        """Close all open positions (both single-leg and multi-leg)."""
         self.logger.info(f"Closing all positions due to {reason}...")
         
+        # First, close all multi-leg positions
+        if self.multi_leg_positions:
+            self.logger.info(f"Closing {len(self.multi_leg_positions)} multi-leg positions...")
+            for position_id, position in list(self.multi_leg_positions.items()):
+                try:
+                    exit_signal = {
+                        'signal': 'exit_arb',
+                        'signal_type': 'multi_leg',
+                        'action': 'exit',
+                        'symbol': position.primary_symbol,
+                        'reason': reason,
+                        'urgency': 'high',
+                        'legs': []
+                    }
+                    self._execute_multi_leg_exit(position.primary_symbol, exit_signal, position.strategy)
+                    time.sleep(0.1)
+                except Exception as e:
+                    self.logger.error(f"Error closing multi-leg position {position_id}: {e}")
+        
+        # Then close single-leg positions
         # First, get all positions from exchange to ensure we close everything
         try:
             exchange_positions = self.market_api.get_positions()
@@ -1693,7 +1791,7 @@ class StrategyManager:
         local_symbols = set(self.positions.keys())
         all_symbols_to_close = local_symbols.union(exchange_symbols)
         
-        self.logger.info(f"Closing {len(all_symbols_to_close)} positions: local={list(local_symbols)}, exchange={list(exchange_symbols)}")
+        self.logger.info(f"Closing {len(all_symbols_to_close)} single-leg positions: local={list(local_symbols)}, exchange={list(exchange_symbols)}")
         closed_count = 0
         
         for symbol in all_symbols_to_close:
@@ -1705,7 +1803,7 @@ class StrategyManager:
             except Exception as e:
                 self.logger.error(f"Error closing position for {symbol}: {e}")
         
-        self.logger.info(f"Attempted to close {len(all_symbols_to_close)} positions, successfully closed {closed_count}.")
+        self.logger.info(f"Attempted to close {len(all_symbols_to_close)} single-leg positions, successfully closed {closed_count}.")
     
     def get_performance_summary(self) -> Dict[str, Any]:
         """Get comprehensive performance summary from performance tracker."""
@@ -2122,11 +2220,19 @@ class StrategyManager:
             return False
     
     def update_position_prices(self):
-        """Update current prices for all open positions."""
+        """Update current prices for all open positions (single-leg and multi-leg)."""
+        # Update single-leg positions
         for symbol, position in self.positions.items():
             current_price = self.market_api.get_current_price(symbol)
             if current_price:
                 position.current_price = current_price
+        
+        # Update multi-leg positions
+        for position_id, position in self.multi_leg_positions.items():
+            for leg in position.legs:
+                leg_price = self._get_leg_price(leg.symbol, leg.market_type)
+                if leg_price:
+                    leg.current_price = leg_price
     
     def get_positions_summary(self) -> Dict[str, Any]:
         """Get a summary of all open positions with PnL."""
@@ -2165,9 +2271,40 @@ class StrategyManager:
                 'time_open': (datetime.now() - position.entry_time).total_seconds() / 3600,  # hours
             })
         
+        # Add multi-leg positions
+        multi_leg_summary = []
+        for position_id, position in self.multi_leg_positions.items():
+            unrealized_pnl = position.unrealized_pnl
+            capital_at_risk = position.capital_at_risk or position.total_notional
+            
+            if unrealized_pnl is not None:
+                total_unrealized_pnl += unrealized_pnl
+                total_capital_at_risk += capital_at_risk
+            
+            multi_leg_summary.append({
+                'position_id': position_id,
+                'strategy': position.strategy,
+                'symbol': position.primary_symbol,
+                'legs': [{
+                    'symbol': leg.symbol,
+                    'market_type': leg.market_type,
+                    'side': leg.side,
+                    'size': leg.size,
+                    'entry_price': leg.entry_price,
+                    'current_price': leg.current_price,
+                } for leg in position.legs],
+                'unrealized_pnl': unrealized_pnl,
+                'unrealized_pnl_percentage': position.unrealized_pnl_percentage,
+                'net_delta': position.net_delta,
+                'total_notional': position.total_notional,
+                'capital_at_risk': capital_at_risk,
+                'time_open': (datetime.now() - position.entry_time).total_seconds() / 3600,
+            })
+        
         return {
             'positions': positions_summary,
-            'total_positions': len(positions_summary),
+            'multi_leg_positions': multi_leg_summary,
+            'total_positions': len(positions_summary) + len(multi_leg_summary),
             'total_unrealized_pnl': total_unrealized_pnl,
             'total_capital_at_risk': total_capital_at_risk,
             'average_pnl_percentage': (total_unrealized_pnl / total_capital_at_risk * 100) if total_capital_at_risk > 0 else 0,
@@ -2175,7 +2312,7 @@ class StrategyManager:
     
     def display_positions_pnl(self):
         """Display current positions with PnL information."""
-        if not self.positions:
+        if not self.positions and not self.multi_leg_positions:
             return
         
         # Get portfolio allocation info
@@ -2218,8 +2355,46 @@ class StrategyManager:
             
             self.logger.info(f"{symbol:<12} {side:<5} {size:>8.3f} @ ${entry_price:<8.4f} → ${current_price:<8.4f} | PnL: ${pnl:>8.2f} ({pnl_percentage:>6.2f}% / {capital_at_risk_pnl_percentage:>6.2f}%) | Time: {time_open:>4.1f}h | {status} | Risk: {pos_allocation:>5.1f}% | Capital: ${capital_at_risk:>8.2f}")
         
+        # Display multi-leg positions (funding arb, stat arb, etc.)
+        if positions_summary.get('multi_leg_positions'):
+            self.logger.info("-" * 60)
+            self.logger.info("📊 MULTI-LEG POSITIONS (Delta-Neutral)")
+            self.logger.info("-" * 60)
+            
+            for ml_pos in positions_summary['multi_leg_positions']:
+                pnl = ml_pos.get('unrealized_pnl', 0) or 0
+                pnl_pct = ml_pos.get('unrealized_pnl_percentage', 0) or 0
+                net_delta = ml_pos.get('net_delta', 0) or 0
+                time_open = ml_pos.get('time_open', 0)
+                capital = ml_pos.get('capital_at_risk', 0)
+                
+                # Delta-neutral indicator
+                delta_status = "✓ NEUTRAL" if abs(net_delta) < 0.01 else f"⚠ Δ={net_delta:.4f}"
+                
+                if pnl > 0:
+                    status = "🟢"
+                elif pnl < 0:
+                    status = "🔴"
+                else:
+                    status = "⚪"
+                
+                self.logger.info(f"🔗 {ml_pos['strategy']:<20} | {ml_pos['symbol']:<8} | PnL: ${pnl:>8.2f} ({pnl_pct:>6.2f}%) | {delta_status} | Time: {time_open:>4.1f}h {status}")
+                
+                # Show individual legs
+                for leg in ml_pos.get('legs', []):
+                    leg_pnl = 0
+                    if leg.get('current_price') and leg.get('entry_price'):
+                        if leg['side'] == 'long':
+                            leg_pnl = (leg['current_price'] - leg['entry_price']) * leg['size']
+                        else:
+                            leg_pnl = (leg['entry_price'] - leg['current_price']) * leg['size']
+                    
+                    leg_status = "🟢" if leg_pnl > 0 else ("🔴" if leg_pnl < 0 else "⚪")
+                    self.logger.info(f"   └─ {leg['market_type']:<5} {leg['side']:<5} {leg['size']:>10.6f} {leg['symbol']:<12} @ ${leg.get('entry_price', 0):.4f} → ${leg.get('current_price', 0):.4f} | ${leg_pnl:>8.2f} {leg_status}")
+        
         self.logger.info("-" * 60)
-        self.logger.info(f"TOTAL: {len(positions_summary['positions'])} positions | PnL: ${positions_summary['total_unrealized_pnl']:>8.2f} | Capital at Risk: ${allocation['total_capital_at_risk']:>8.2f}")
+        total_positions = len(positions_summary.get('positions', [])) + len(positions_summary.get('multi_leg_positions', []))
+        self.logger.info(f"TOTAL: {total_positions} positions | PnL: ${positions_summary['total_unrealized_pnl']:>8.2f} | Capital at Risk: ${allocation['total_capital_at_risk']:>8.2f}")
         self.logger.info("=" * 60) 
 
     def _cleanup_open_orders(self):
