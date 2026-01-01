@@ -301,6 +301,15 @@
             color: var(--red);
         }
 
+        .liq-danger {
+            color: #ff6b6b;
+            font-weight: bold;
+        }
+
+        .liq-warning {
+            color: #ffd93d;
+        }
+
         .text-muted {
             color: var(--text-muted);
         }
@@ -672,13 +681,15 @@
                             <th>Symbol</th>
                             <th>Side</th>
                             <th>Size</th>
-                            <th>Entry Price</th>
-                            <th>Current Price</th>
+                            <th>Entry</th>
+                            <th>Current</th>
                             <th>Notional</th>
-                            <th>Leverage</th>
+                            <th>Margin</th>
+                            <th>Lev</th>
+                            <th>Liq Price</th>
                             <th>PnL</th>
                             <th>PnL %</th>
-                            <th>Hold Time</th>
+                            <th>Time</th>
                             <th>Strategy</th>
                         </tr>
                     </thead>
@@ -689,6 +700,21 @@
                 const sideClass = pos.side === 'long' ? 'side-long' : 'side-short';
                 const pnlClass = getPnlClass(pos.unrealized_pnl);
                 const leverage = pos.leverage ? pos.leverage.toFixed(1) + 'x' : '--';
+                const margin = pos.margin ? formatCurrency(pos.margin) : '--';
+                const liqPrice = pos.liquidation_price ? formatPrice(pos.liquidation_price) : '--';
+                
+                // Calculate distance to liquidation for warning styling
+                let liqClass = '';
+                if (pos.liquidation_price && pos.current_price) {
+                    const distPct = pos.side === 'long' 
+                        ? ((pos.current_price - pos.liquidation_price) / pos.current_price) * 100
+                        : ((pos.liquidation_price - pos.current_price) / pos.current_price) * 100;
+                    if (distPct < 10) {
+                        liqClass = 'liq-danger';
+                    } else if (distPct < 20) {
+                        liqClass = 'liq-warning';
+                    }
+                }
                 
                 html += `
                     <tr>
@@ -698,7 +724,9 @@
                         <td>${formatPrice(pos.entry_price)}</td>
                         <td>${formatPrice(pos.current_price)}</td>
                         <td>${formatCurrency(pos.notional)}</td>
+                        <td>${margin}</td>
                         <td>${leverage}</td>
+                        <td class="${liqClass}">${liqPrice}</td>
                         <td class="${pnlClass}">${formatCurrency(pos.unrealized_pnl)}</td>
                         <td class="${pnlClass}">${formatPct(pos.unrealized_pnl_pct)}</td>
                         <td class="text-muted">${pos.holding_time || '--'}</td>

@@ -193,6 +193,24 @@ def _get_positions_data() -> Dict[str, Any]:
     }
 
 
+def _format_holding_time(seconds: float) -> str:
+    """Format holding time as days, hours, minutes."""
+    days = int(seconds // 86400)
+    remaining = seconds % 86400
+    hours = int(remaining // 3600)
+    remaining = remaining % 3600
+    minutes = int(remaining // 60)
+    
+    parts = []
+    if days > 0:
+        parts.append(f"{days}d")
+    if hours > 0 or days > 0:
+        parts.append(f"{hours}h")
+    parts.append(f"{minutes}m")
+    
+    return " ".join(parts)
+
+
 def _format_position(position) -> Dict[str, Any]:
     """Format a Position object for the dashboard."""
     entry_time = position.entry_time
@@ -215,6 +233,18 @@ def _format_position(position) -> Dict[str, Any]:
     highest_price = getattr(position, 'highest_price', None)
     lowest_price = getattr(position, 'lowest_price', None)
     
+    # Get liquidation price and margin from API
+    liquidation_price = None
+    margin_used = None
+    if _strategy_manager and _strategy_manager.market_api:
+        try:
+            margin_info = _strategy_manager.market_api.get_position_margin_info(position.symbol)
+            if margin_info:
+                liquidation_price = margin_info.get('liquidation_price')
+                margin_used = margin_info.get('margin_used')
+        except Exception:
+            pass  # Use None if API call fails
+    
     return {
         'symbol': position.symbol,
         'side': position.side,
@@ -225,10 +255,12 @@ def _format_position(position) -> Dict[str, Any]:
         'take_profit': position.take_profit,
         'strategy': position.strategy,
         'entry_time': entry_time.isoformat(),
-        'holding_time': f"{hours:.1f}h",
+        'holding_time': _format_holding_time(holding_time.total_seconds()),
         'holding_hours': hours,
         'notional': notional,
+        'margin': margin_used or position.capital_at_risk,
         'leverage': round(leverage, 2),
+        'liquidation_price': liquidation_price,
         'capital_at_risk': position.capital_at_risk,
         'unrealized_pnl': position.unrealized_pnl,
         'unrealized_pnl_pct': position.unrealized_pnl_percentage,
@@ -267,7 +299,7 @@ def _format_multi_leg_position(multi_pos) -> Dict[str, Any]:
         'strategy': multi_pos.strategy,
         'primary_symbol': multi_pos.primary_symbol,
         'entry_time': entry_time.isoformat(),
-        'holding_time': f"{hours:.1f}h",
+        'holding_time': _format_holding_time(holding_time.total_seconds()),
         'holding_hours': hours,
         'legs': legs_data,
         'leg_count': len(legs_data),
@@ -330,19 +362,37 @@ def _get_strategies_data() -> List[Dict[str, Any]]:
     
     if _strategy_manager is not None:
         selector = _strategy_manager.strategy_selector
+        perf_tracker = getattr(_strategy_manager, 'performance_tracker', None)
         
         for name, strategy in _strategy_manager.strategies.items():
             ranking = selector.strategy_rankings.get(name) if selector else None
-            metrics = ranking.metrics if ranking else {}
+            
+            # Get actual trade metrics from the database
+            trade_count = 0
+            total_pnl = 0.0
+            win_rate = 0.0
+            
+            if perf_tracker and hasattr(perf_tracker, 'db'):
+                try:
+                    # Get strategy-specific stats from the database
+                    strategy_stats = perf_tracker.db.get_strategy_stats(name)
+                    trade_count = strategy_stats.get('total_trades', 0) or 0
+                    total_pnl = strategy_stats.get('total_pnl', 0) or 0.0
+                    # Calculate win rate from winning/total trades
+                    winning_trades = strategy_stats.get('winning_trades', 0) or 0
+                    if trade_count > 0:
+                        win_rate = (winning_trades / trade_count) * 100
+                except Exception as e:
+                    logger.debug(f"Could not get stats for {name}: {e}")
             
             strategies.append({
                 'name': name,
                 'enabled': selector.is_strategy_enabled(name) if selector else True,
                 'weight': ranking.weight if ranking else 1.0,
-                'recent_pnl': metrics.get('total_pnl', 0),
-                'sharpe_ratio': metrics.get('sharpe_ratio', 0),
-                'win_rate': metrics.get('win_rate', 0) * 100,  # Convert to percentage
-                'trade_count': metrics.get('trade_count', 0),
+                'recent_pnl': total_pnl,
+                'sharpe_ratio': 0,  # Could calculate from trades if needed
+                'win_rate': win_rate,
+                'trade_count': trade_count,
                 'on_probation': selector.on_probation.get(name, False) if selector and hasattr(selector, 'on_probation') else False,
                 'in_cooling_off': name in selector.cooling_off_until if selector else False,
             })
@@ -403,8 +453,7 @@ def _calculate_holding_time(entry_time_str: Optional[str]) -> str:
     try:
         entry_time = datetime.fromisoformat(entry_time_str)
         holding = datetime.now() - entry_time
-        hours = holding.total_seconds() / 3600
-        return f"{hours:.1f}h"
+        return _format_holding_time(holding.total_seconds())
     except:
         return "?"
 
@@ -499,7 +548,7 @@ def _get_trades_data(limit: int = 50) -> List[Dict[str, Any]]:
                             exit_dt = exit_time
                         holding_seconds = (exit_dt - entry_dt).total_seconds()
                         holding_hours = holding_seconds / 3600
-                        holding_time = f"{holding_hours:.1f}h"
+                        holding_time = _format_holding_time(holding_seconds)
                     except:
                         pass
                 
