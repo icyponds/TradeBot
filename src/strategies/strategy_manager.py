@@ -1149,6 +1149,11 @@ class StrategyManager:
         action = signal.get('action')
         
         if action == 'enter':
+            # Check position limit and capital rotation before executing multi-leg entry
+            signal_strength = self._calculate_signal_strength(ohlcv, strategy_name)
+            if not self._should_execute_with_position_limit(symbol, signal, signal_strength):
+                self.logger.info(f"Multi-leg entry for {symbol} blocked by position limit check")
+                return
             self._execute_multi_leg_entry(symbol, signal, current_price, strategy_name, ohlcv)
         elif action == 'exit':
             self._execute_multi_leg_exit(symbol, signal, strategy_name)
@@ -2253,7 +2258,13 @@ class StrategyManager:
     
     def _get_position_profitability_score(self, symbol: str, new_signal_strength: float) -> float:
         """
-        Calculate a profitability score for a position to determine if it should be closed.
+        Calculate a comprehensive profitability score for a position.
+        
+        Score components:
+        - Current PnL (25%): Unrealized profit/loss percentage
+        - Expected Value (25%): Distance to TP vs SL, risk/reward
+        - Strategy Performance (25%): Historical win rate and Sharpe from database
+        - Time & Momentum (25%): Position age and price momentum
         
         Args:
             symbol: Symbol of the position
@@ -2271,27 +2282,133 @@ class StrategyManager:
         if not current_price:
             return 0.0
         
-        # Calculate unrealized PnL percentage
+        # ===== 1. Current PnL Score (25%) =====
         pnl_percentage = position.unrealized_pnl_percentage or 0.0
+        # Normalize PnL to 0-1 scale (cap at +/- 10%)
+        pnl_score = max(-1.0, min(1.0, pnl_percentage / 10.0))
+        # Shift to 0-1 range
+        pnl_score = (pnl_score + 1.0) / 2.0
         
-        # Calculate time factor (older positions get lower scores)
+        # ===== 2. Expected Value Score (25%) =====
+        ev_score = 0.5  # Default neutral
+        if position.take_profit and position.stop_loss:
+            # Calculate distance to TP and SL
+            if position.side == 'long':
+                tp_distance = (position.take_profit - current_price) / current_price
+                sl_distance = (current_price - position.stop_loss) / current_price
+            else:
+                tp_distance = (current_price - position.take_profit) / current_price
+                sl_distance = (position.stop_loss - current_price) / current_price
+            
+            # Risk/reward ratio from current price
+            if sl_distance > 0:
+                rr_ratio = tp_distance / sl_distance
+                # Score based on R:R - higher is better
+                ev_score = min(1.0, rr_ratio / 3.0)  # Cap at 3:1 R:R
+            
+            # Bonus if already past breakeven and heading to TP
+            if pnl_percentage > 0 and tp_distance > 0:
+                ev_score = min(1.0, ev_score + 0.2)
+        
+        # ===== 3. Strategy Performance Score (25%) =====
+        strategy_score = 0.5  # Default neutral
+        strategy_name = position.strategy
+        
+        if strategy_name and self.performance_tracker:
+            try:
+                # Get strategy stats from database
+                strategy_stats = self.performance_tracker.db.get_strategy_stats(strategy_name)
+                
+                # Win rate component (0-1)
+                total_trades = strategy_stats.get('total_trades', 0) or 0
+                winning_trades = strategy_stats.get('winning_trades', 0) or 0
+                if total_trades >= 5:  # Need minimum trades for reliability
+                    win_rate = winning_trades / total_trades
+                    win_rate_score = win_rate  # Already 0-1
+                else:
+                    win_rate_score = 0.5  # Neutral if insufficient data
+                
+                # Profit factor component
+                gross_profit = strategy_stats.get('gross_profit', 0) or 0
+                gross_loss = strategy_stats.get('gross_loss', 0) or 1  # Avoid div by 0
+                profit_factor = gross_profit / max(gross_loss, 0.01)
+                pf_score = min(1.0, profit_factor / 2.0)  # Cap at PF of 2.0
+                
+                # Strategy weight from selector (if available)
+                weight_score = 0.5
+                if self.strategy_selector and strategy_name in self.strategy_selector.strategy_rankings:
+                    ranking = self.strategy_selector.strategy_rankings[strategy_name]
+                    weight_score = min(1.0, ranking.weight)  # Weight is typically 0-1
+                
+                # Combined strategy score
+                strategy_score = (win_rate_score * 0.4) + (pf_score * 0.3) + (weight_score * 0.3)
+                
+            except Exception as e:
+                self.logger.debug(f"Could not get strategy stats for {strategy_name}: {e}")
+        
+        # ===== 4. Time & Momentum Score (25%) =====
+        # Time factor - newer positions get slight preference (they haven't had chance to prove themselves)
         time_open = (datetime.now() - position.entry_time).total_seconds() / 3600  # hours
-        time_factor = max(0.1, 1.0 - (time_open / 24))  # Decay over 24 hours
         
-        # Calculate signal strength factor
-        signal_factor = 0.5  # Default for existing positions
+        # Sweet spot is 1-6 hours (had time to develop but not stale)
+        if time_open < 1:
+            time_score = 0.6  # Very new, slight penalty
+        elif time_open < 6:
+            time_score = 0.8  # Optimal range
+        elif time_open < 12:
+            time_score = 0.6  # Getting older
+        elif time_open < 24:
+            time_score = 0.4  # Stale
+        else:
+            time_score = 0.2  # Very stale
         
-        # Calculate overall score
-        score = (pnl_percentage * 0.4) + (time_factor * 0.3) + (signal_factor * 0.3)
+        # Momentum bonus - is the position moving in our favor?
+        momentum_score = 0.5
+        if position.highest_price and position.lowest_price and position.entry_price:
+            if position.side == 'long':
+                # For longs, check if we've made progress toward TP
+                progress = (current_price - position.entry_price) / position.entry_price
+                if progress > 0:
+                    momentum_score = min(1.0, 0.5 + progress * 5)  # Bonus for positive progress
+                else:
+                    momentum_score = max(0.0, 0.5 + progress * 5)  # Penalty for negative progress
+            else:
+                # For shorts, inverse
+                progress = (position.entry_price - current_price) / position.entry_price
+                if progress > 0:
+                    momentum_score = min(1.0, 0.5 + progress * 5)
+                else:
+                    momentum_score = max(0.0, 0.5 + progress * 5)
         
-        return score
+        time_momentum_score = (time_score * 0.5) + (momentum_score * 0.5)
+        
+        # ===== Final Score Calculation =====
+        final_score = (
+            (pnl_score * 0.25) +
+            (ev_score * 0.25) +
+            (strategy_score * 0.25) +
+            (time_momentum_score * 0.25)
+        )
+        
+        self.logger.debug(
+            f"Position score for {symbol}: PnL={pnl_score:.2f}, EV={ev_score:.2f}, "
+            f"Strategy={strategy_score:.2f}, TimeMom={time_momentum_score:.2f}, Final={final_score:.2f}"
+        )
+        
+        return final_score
     
     def _close_least_profitable_position(self, new_signal_strength: float) -> bool:
         """
         Close the least profitable position to make room for a new trade.
         
+        Uses comprehensive scoring that considers:
+        - Current PnL
+        - Expected value (distance to TP/SL)
+        - Strategy historical performance
+        - Position age and momentum
+        
         Args:
-            new_signal_strength: Signal strength of the new potential trade
+            new_signal_strength: Signal strength of the new potential trade (0-1 scale)
             
         Returns:
             True if a position was closed, False otherwise
@@ -2305,23 +2422,47 @@ class StrategyManager:
             score = self._get_position_profitability_score(symbol, new_signal_strength)
             position_scores[symbol] = score
         
+        # Log all position scores for transparency
+        self.logger.info("=== Position Ranking for Capital Rotation ===")
+        sorted_positions = sorted(position_scores.items(), key=lambda x: x[1], reverse=True)
+        for rank, (sym, score) in enumerate(sorted_positions, 1):
+            pos = self.positions.get(sym)
+            pnl = pos.unrealized_pnl if pos else 0
+            strategy = pos.strategy if pos else 'unknown'
+            self.logger.info(f"  #{rank} {sym} ({strategy}): score={score:.3f}, PnL=${pnl:.2f}")
+        self.logger.info(f"  New signal strength: {new_signal_strength:.3f}")
+        self.logger.info("=" * 45)
+        
         # Find the position with the lowest score
         least_profitable_symbol = min(position_scores.keys(), key=lambda x: position_scores[x])
         least_profitable_score = position_scores[least_profitable_symbol]
+        least_profitable_pos = self.positions.get(least_profitable_symbol)
         
-        # If we're at the position limit, be more aggressive about closing positions
-        if self._check_position_limit():
-            # Close the least profitable position if the new signal is stronger
-            if new_signal_strength > least_profitable_score * 1.2:  # 20% stronger when at limit
-                self.logger.info(f"Position limit reached - closing least profitable position {least_profitable_symbol} (score: {least_profitable_score:.2f}) for new trade (strength: {new_signal_strength:.2f})")
-                self.close_position(least_profitable_symbol, "position_limit")
-                return True
+        # Scores are now 0-1 normalized, so use absolute thresholds
+        # At position limit: new signal must be at least 0.1 points higher (10% of scale)
+        # Below limit: new signal must be at least 0.2 points higher (20% of scale)
+        
+        at_limit = self._check_position_limit()
+        threshold = 0.1 if at_limit else 0.2
+        
+        score_difference = new_signal_strength - least_profitable_score
+        
+        if score_difference > threshold:
+            reason = "position_limit" if at_limit else "capital_rotation"
+            self.logger.info(
+                f"{'⚡ CAPITAL ROTATION' if at_limit else '🔄 CAPITAL ROTATION'}: "
+                f"Closing {least_profitable_symbol} ({least_profitable_pos.strategy if least_profitable_pos else 'unknown'}) "
+                f"[score={least_profitable_score:.3f}, PnL=${least_profitable_pos.unrealized_pnl:.2f if least_profitable_pos else 0}] "
+                f"for new trade [strength={new_signal_strength:.3f}] "
+                f"(diff={score_difference:.3f} > threshold={threshold:.2f})"
+            )
+            self.close_position(least_profitable_symbol, reason)
+            return True
         else:
-            # Normal mode - only close if significantly stronger
-            if new_signal_strength > least_profitable_score * 1.5:  # 50% stronger
-                self.logger.info(f"Closing least profitable position {least_profitable_symbol} (score: {least_profitable_score:.2f}) for new trade (strength: {new_signal_strength:.2f})")
-                self.close_position(least_profitable_symbol, "position_limit")
-                return True
+            self.logger.info(
+                f"❌ Capital rotation rejected: {least_profitable_symbol} score ({least_profitable_score:.3f}) "
+                f"+ threshold ({threshold:.2f}) > new signal ({new_signal_strength:.3f})"
+            )
         
         return False
     

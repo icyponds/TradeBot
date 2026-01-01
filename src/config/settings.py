@@ -96,8 +96,8 @@ def load_config() -> Dict[str, Any]:
             
             # Portfolio-based position sizing
             "use_portfolio_based_sizing": os.getenv("USE_PORTFOLIO_BASED_SIZING", "true").lower() == "true",
-            "max_position_size_usd": float(os.getenv("MAX_POSITION_SIZE_USD", "100")),  # Fallback max USD per position
-            "max_position_size_percentage": float(os.getenv("MAX_POSITION_SIZE_PERCENTAGE", "20.0")),  # Max % of portfolio per position
+            "max_position_size_usd": float(os.getenv("MAX_POSITION_SIZE_USD", "50")),  # Fallback max USD per position
+            "max_position_size_percentage": float(os.getenv("MAX_POSITION_SIZE_PERCENTAGE", "10.0")),  # Max % of portfolio per position
             "max_positions_percentage": float(os.getenv("MAX_POSITIONS_PERCENTAGE", "80.0")),  # Max % of portfolio in all positions
             "risk_percentage": float(os.getenv("RISK_PERCENTAGE", "10.0")),
             "stop_loss_percentage": float(os.getenv("STOP_LOSS_PERCENTAGE", "5.0")),

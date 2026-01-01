@@ -1,0 +1,335 @@
+================================================================================
+STRATEGY RESEARCH & IMPROVEMENT IDEAS
+Generated: 2026-01-01
+================================================================================
+
+This document contains research on potential new strategies and improvements
+to existing strategies for the Hyperliquid trading bot.
+
+================================================================================
+NEW STRATEGY IDEAS
+================================================================================
+
+1. VOLATILITY BREAKOUT STRATEGY
+--------------------------------------------------------------------------------
+Description:
+- Detect low volatility periods (Bollinger Band squeeze, ATR compression)
+- Enter on breakout with volume confirmation
+- Works well in crypto's regime-switching nature
+
+Implementation:
+- Monitor Bollinger Band width (BBW) or ATR percentile
+- When BBW drops below 20th percentile, prepare for breakout
+- Enter long on upper band break with volume > 1.5x average
+- Enter short on lower band break with volume > 1.5x average
+- Stop loss: Opposite band or 1 ATR
+
+Pros:
+- Catches big moves early
+- Clear entry/exit rules
+- Works across timeframes
+
+Cons:
+- False breakouts in choppy markets
+- Requires patience during compression periods
+- May miss gradual trends
+
+
+2. ORDER FLOW IMBALANCE STRATEGY
+--------------------------------------------------------------------------------
+Description:
+- Use Hyperliquid's order book and trade data
+- Detect aggressive buying/selling via trade tape analysis
+- Enter when imbalance exceeds threshold
+
+Implementation:
+- Track buy vs sell volume over rolling windows (1m, 5m, 15m)
+- Calculate Order Flow Imbalance (OFI) = (BuyVol - SellVol) / TotalVol
+- Enter long when OFI > 0.6 across multiple timeframes
+- Enter short when OFI < -0.6 across multiple timeframes
+- Quick exits on imbalance reversal
+
+Pros:
+- Very short-term alpha potential
+- Sub-minute signal generation
+- Direct measure of market pressure
+
+Cons:
+- Requires fast execution
+- High turnover, more fees
+- May need WebSocket trade stream
+
+
+3. CROSS-EXCHANGE BASIS TRADE
+--------------------------------------------------------------------------------
+Description:
+- Compare Hyperliquid perp price vs spot prices on other exchanges
+- Trade when basis deviates from historical norms
+- Mean reversion on the basis spread
+
+Implementation:
+- Fetch spot prices from Binance/Coinbase via API
+- Calculate basis = (Perp - Spot) / Spot * 100
+- Track rolling mean and std of basis
+- Enter when basis Z-score > 2 or < -2
+- Exit when Z-score reverts to 0
+
+Pros:
+- Market-neutral strategy
+- Statistically robust foundation
+- Less correlated with directional strategies
+
+Cons:
+- Requires external data feeds (Binance, Coinbase APIs)
+- Latency sensitive for execution
+- Need to account for exchange-specific factors
+
+
+4. VOLATILITY REGIME STRATEGY
+--------------------------------------------------------------------------------
+Description:
+- Classify market into volatility regimes (high/medium/low)
+- Dynamically adjust strategy weights based on regime
+- Mean reversion works in low vol, momentum in high vol
+
+Implementation:
+- Calculate realized volatility over 24h, 7d windows
+- Compare to historical percentiles
+- Low vol regime: Increase mean reversion weight
+- High vol regime: Increase momentum weight, tighter stops
+- Medium vol: Balanced allocation
+
+Pros:
+- Adapts to changing market conditions
+- Reduces drawdowns during unfavorable regimes
+- Meta-strategy that improves existing strategies
+
+Cons:
+- Regime detection has lag
+- Transitions can be noisy
+- Requires sufficient historical data
+
+
+5. MACHINE LEARNING SIGNAL ENSEMBLE
+--------------------------------------------------------------------------------
+Description:
+- Combine outputs from existing strategies
+- Train classifier on historical signal quality
+- Weight signals by predicted accuracy
+
+Implementation:
+- Collect features: strategy signals, volatility, volume, time of day
+- Label historical signals as profitable/unprofitable
+- Train gradient boosting or neural network classifier
+- Use predicted probability to weight position sizes
+- Retrain periodically on new data
+
+Pros:
+- Potentially better signal quality
+- Can discover non-linear relationships
+- Adapts over time
+
+Cons:
+- Requires ML training infrastructure
+- Risk of overfitting
+- Needs significant historical data
+- Black box nature makes debugging harder
+
+
+================================================================================
+IMPROVEMENTS TO EXISTING STRATEGIES
+================================================================================
+
+OU MEAN REVERSION STRATEGY
+--------------------------------------------------------------------------------
+Current Implementation:
+- Uses Z-score to detect deviation from mean
+- Fixed entry/exit thresholds
+
+Suggested Improvements:
+
+1. Adaptive Z-Score Thresholds
+   - Current: Fixed zscore_entry = 2.0
+   - Improvement: Scale threshold by rolling volatility
+   - Example: zscore_entry = 2.0 * (avg_vol / current_vol)
+   - Rationale: Tighter thresholds in low vol, wider in high vol
+
+2. Half-Life Filter
+   - Only trade if estimated half-life < 24 hours
+   - Half-life = -log(2) / log(theta) where theta is OU mean reversion speed
+   - Rationale: Avoid slow mean-reverting assets
+
+3. Regime Filter
+   - Disable strategy when BTC is in strong trend (ADX > 30)
+   - Rationale: Mean reversion fails in trending markets
+
+4. Entry Timing
+   - Wait for momentum to slow before entry (RSI divergence)
+   - Rationale: Catch falling knives less often
+
+
+MOMENTUM FACTOR STRATEGY
+--------------------------------------------------------------------------------
+Current Implementation:
+- Ranks assets by momentum score
+- Enters top/bottom N assets
+- Fixed rebalance periods
+
+Suggested Improvements:
+
+1. Event-Driven Rebalancing
+   - Current: Rebalance on fixed schedule
+   - Improvement: Rebalance when rank changes significantly
+   - Example: If asset drops from top 3 to bottom 10, exit immediately
+   - Rationale: React faster to momentum shifts
+
+2. Momentum Crash Protection
+   - Monitor correlation of momentum returns to BTC drawdowns
+   - Reduce exposure when BTC drops > 5% in 24h
+   - Rationale: Momentum strategies crash during market panics
+
+3. Sector Neutrality
+   - Ensure long/short balance within sectors (DeFi, L1, meme, etc.)
+   - Rationale: Reduce sector concentration risk
+
+4. Momentum Quality
+   - Prefer smooth momentum over choppy (high R² of price trend)
+   - Rationale: Smooth momentum more likely to persist
+
+
+STATISTICAL ARBITRAGE STRATEGY
+--------------------------------------------------------------------------------
+Current Implementation:
+- Uses correlation to find related pairs
+- Trades spread Z-score
+
+Suggested Improvements:
+
+1. Cointegration Testing
+   - Current: Correlation-based pair selection
+   - Improvement: Use Engle-Granger or Johansen cointegration test
+   - Rationale: Cointegration is more robust than correlation
+
+2. Dynamic Hedge Ratios
+   - Current: Static hedge ratio
+   - Improvement: Use Kalman filter for rolling hedge ratio
+   - Rationale: Relationship between pairs drifts over time
+
+3. Spread Stationarity Check
+   - Regularly test if spread is still stationary (ADF test)
+   - Exit if stationarity breaks down
+   - Rationale: Non-stationary spreads can blow up
+
+4. Transaction Cost Awareness
+   - Factor in fees when calculating expected profit
+   - Only trade if expected profit > 2x fees
+   - Rationale: Stat arb has high turnover
+
+
+FUNDING RATE ARBITRAGE STRATEGY
+--------------------------------------------------------------------------------
+Current Implementation:
+- Enters when funding rate exceeds threshold
+- Delta-neutral long perp + short spot (or vice versa)
+
+Suggested Improvements:
+
+1. Adaptive Thresholds
+   - Current: Fixed funding rate threshold
+   - Improvement: Use funding rate percentiles
+   - Example: Enter when funding > 90th percentile of 30-day distribution
+   - Rationale: What's "high" changes over time
+
+2. Funding Term Structure
+   - Monitor predicted funding rates for future periods
+   - Prefer positions where funding expected to persist
+   - Rationale: Single high funding may not repeat
+
+3. Cost-Adjusted APR
+   - Calculate net APR after trading fees and slippage
+   - Only enter if net APR > hurdle rate (e.g., 20% annualized)
+   - Rationale: Gross funding can be misleading
+
+4. Funding Rate Momentum
+   - Track if funding is increasing or decreasing
+   - Enter on high funding + increasing momentum
+   - Rationale: Catch funding before it peaks
+
+
+================================================================================
+INFRASTRUCTURE IMPROVEMENTS
+================================================================================
+
+1. BACKTESTING FRAMEWORK
+--------------------------------------------------------------------------------
+- Build proper historical simulation engine
+- Include slippage modeling (0.1% per trade minimum)
+- Account for funding payments in backtests
+- Track per-strategy Sharpe, Sortino, max drawdown
+- Compare live vs backtest performance
+
+2. STRATEGY WARMUP PERIOD
+--------------------------------------------------------------------------------
+- Don't trade until sufficient data collected
+- Example: Need 100 candles of 15m data = 25 hours
+- Prevents trading on incomplete signals
+- Log warmup status in dashboard
+
+3. CORRELATION MONITORING
+--------------------------------------------------------------------------------
+- Track correlation between strategy returns
+- Alert if correlation > 0.7 (too similar)
+- Reduce allocation to correlated strategies
+- Goal: Diversification of return streams
+
+4. EXECUTION OPTIMIZATION
+--------------------------------------------------------------------------------
+- Implement TWAP (Time-Weighted Average Price) for larger orders
+- Split orders > $500 into 3-5 chunks over 30-60 seconds
+- Reduce market impact and slippage
+- Track execution quality vs arrival price
+
+5. REAL-TIME P&L ATTRIBUTION
+--------------------------------------------------------------------------------
+- Track which strategy contributes to gains/losses
+- Dashboard showing per-strategy contribution
+- Disable underperforming strategies automatically
+- Monthly strategy performance review
+
+
+================================================================================
+PRIORITY RECOMMENDATIONS
+================================================================================
+
+High Priority (Quick Wins):
+1. Add half-life filter to OU Mean Reversion
+2. Implement event-driven rebalancing for Momentum
+3. Add cointegration test to Stat Arb pair selection
+4. Build basic backtesting for new strategies
+
+Medium Priority (Significant Effort):
+5. Implement Volatility Breakout strategy
+6. Add Kalman filter hedge ratios to Stat Arb
+7. Build correlation monitoring dashboard
+8. Implement TWAP execution
+
+Lower Priority (Research Required):
+9. Order Flow Imbalance strategy (needs data pipeline)
+10. ML Signal Ensemble (needs training infrastructure)
+11. Cross-Exchange Basis trade (needs external APIs)
+
+
+================================================================================
+NOTES
+================================================================================
+
+- All new strategies should be paper traded for 2+ weeks before live
+- Backtest on at least 6 months of data before implementation
+- Start with minimal position sizes (25% of normal) for new strategies
+- Monitor for strategy decay over time (alpha erosion)
+- Consider market regime when evaluating strategy performance
+
+================================================================================
+END OF DOCUMENT
+================================================================================
+
