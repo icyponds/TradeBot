@@ -958,7 +958,11 @@ class StrategyManager:
                 self.logger.info(f"Cannot open multi-leg position for {symbol}: insufficient margin")
                 return
             
-            self.logger.info(f"Executing multi-leg entry for {symbol}: {len(signal['legs'])} legs, size={position_size:.6f}")
+            # Calculate notional value for delta-neutral hedging
+            # Use perp price as reference, but each leg will calculate its own size
+            notional_value = position_size * current_price
+            
+            self.logger.info(f"Executing multi-leg entry for {symbol}: {len(signal['legs'])} legs, notional=${notional_value:.2f}")
             
             # Execute legs atomically
             legs = signal.get('legs', [])
@@ -971,13 +975,24 @@ class StrategyManager:
                 leg_order_side = leg_spec['order_side']
                 leg_reduce_only = leg_spec.get('reduce_only', False)
                 
-                self.logger.info(f"  Leg {i+1}/{len(legs)}: {leg_order_side} {position_size} {leg_symbol} ({leg_market_type})")
+                # Calculate leg-specific size based on notional value and leg's price
+                # This ensures delta-neutrality even with price/decimal differences
+                leg_price = self._get_leg_price(leg_symbol, leg_market_type)
+                if not leg_price or leg_price <= 0:
+                    self.logger.error(f"Cannot get price for leg {leg_symbol} ({leg_market_type})")
+                    if is_atomic and executed_legs:
+                        self._unwind_executed_legs(executed_legs)
+                    return
                 
-                # Execute the leg
+                leg_size = notional_value / leg_price
+                
+                self.logger.info(f"  Leg {i+1}/{len(legs)}: {leg_order_side} {leg_size:.6f} {leg_symbol} @ ${leg_price:.6f} ({leg_market_type})")
+                
+                # Execute the leg - execute_order will round to appropriate szDecimals
                 result = self.market_api.execute_order(
                     symbol=leg_symbol,
                     side=leg_order_side,
-                    size=position_size,
+                    size=leg_size,
                     reduce_only=leg_reduce_only,
                     urgency="normal",
                     market_type=leg_market_type,
@@ -1133,6 +1148,32 @@ class StrategyManager:
             self.logger.error(f"Error executing multi-leg exit for {symbol}: {e}")
             import traceback
             self.logger.error(traceback.format_exc())
+    
+    def _get_leg_price(self, symbol: str, market_type: str) -> Optional[float]:
+        """Get current price for a leg based on market type."""
+        try:
+            if market_type == 'perp' or market_type == 'hip3':
+                return self.market_api.get_current_price(symbol)
+            elif market_type == 'spot':
+                # For spot, extract base token from symbol (e.g., "BTC/USDC" -> "BTC")
+                if '/' in symbol:
+                    base_token = symbol.split('/')[0]
+                else:
+                    base_token = symbol
+                
+                # Get the spot token name from mapping (e.g., "BTC" -> "UBTC")
+                spot_token = self.market_api.get_spot_token_for_perp(base_token)
+                if spot_token:
+                    return self.market_api.get_spot_price(spot_token, 'USDC')
+                else:
+                    self.logger.warning(f"No spot token mapping for {base_token}")
+                    return None
+            else:
+                self.logger.error(f"Unknown market type: {market_type}")
+                return None
+        except Exception as e:
+            self.logger.error(f"Error getting price for {symbol} ({market_type}): {e}")
+            return None
     
     def _unwind_executed_legs(self, executed_legs: List[PositionLeg]):
         """Unwind executed legs on failure (atomic rollback)."""
