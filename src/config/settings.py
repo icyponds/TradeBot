@@ -181,8 +181,8 @@ def load_config() -> Dict[str, Any]:
             "cointegration": {
                 "adf_pvalue_threshold": float(os.getenv("COINT_ADF_PVALUE", "0.05")),
                 "half_life_max_hours": float(os.getenv("COINT_HALF_LIFE_MAX", "48")),
-                "zscore_entry": float(os.getenv("COINT_ZSCORE_ENTRY", "2.0")),
-                "zscore_exit": float(os.getenv("COINT_ZSCORE_EXIT", "0.5")),
+                "zscore_entry": float(os.getenv("COINT_ZSCORE_ENTRY", "1.5")),  # Lowered from 2.0
+                "zscore_exit": float(os.getenv("COINT_ZSCORE_EXIT", "0.3")),    # Lowered from 0.5
                 "lookback_period": int(os.getenv("COINT_LOOKBACK_PERIOD", "20")),
                 "kalman_filter_enabled": os.getenv("COINT_KALMAN_ENABLED", "true").lower() == "true",
                 "kalman_Q": float(os.getenv("COINT_KALMAN_Q", "0.001")),
@@ -191,8 +191,8 @@ def load_config() -> Dict[str, Any]:
             
             # Funding Rate Arbitrage Strategy
             "funding_rate_arbitrage": {
-                "entry_threshold": float(os.getenv("FR_ARB_ENTRY_THRESHOLD", "0.0003")),  # 0.03% per 8h
-                "exit_threshold": float(os.getenv("FR_ARB_EXIT_THRESHOLD", "0.0001")),    # 0.01% per 8h
+                "entry_threshold": float(os.getenv("FR_ARB_ENTRY_THRESHOLD", "0.00005")),  # 0.005% per 8h = 5.5% APR
+                "exit_threshold": float(os.getenv("FR_ARB_EXIT_THRESHOLD", "0.00002")),    # 0.002% per 8h
                 "max_position_pct": float(os.getenv("FR_ARB_MAX_POSITION_PCT", "20")),
                 "min_holding_periods": int(os.getenv("FR_ARB_MIN_HOLDING_PERIODS", "1")),
                 "rebalance_threshold": float(os.getenv("FR_ARB_REBALANCE_THRESHOLD", "0.02")),
@@ -202,8 +202,8 @@ def load_config() -> Dict[str, Any]:
             
             # Ornstein-Uhlenbeck Mean Reversion Strategy
             "ou_mean_reversion": {
-                "zscore_entry": float(os.getenv("OU_ZSCORE_ENTRY", "2.0")),
-                "zscore_exit": float(os.getenv("OU_ZSCORE_EXIT", "0.5")),
+                "zscore_entry": float(os.getenv("OU_ZSCORE_ENTRY", "1.5")),  # Lowered from 2.0
+                "zscore_exit": float(os.getenv("OU_ZSCORE_EXIT", "0.3")),    # Lowered from 0.5
                 "half_life_max_hours": float(os.getenv("OU_HALF_LIFE_MAX", "24")),
                 "half_life_min_hours": float(os.getenv("OU_HALF_LIFE_MIN", "1")),
                 "min_mean_reversion_speed": float(os.getenv("OU_MIN_THETA", "0.1")),
