@@ -974,11 +974,23 @@ class DynamicPairSelector:
         
         # Pre-fetch price histories with rate limiting (batching to avoid 429/circuit breaker)
         self.logger.debug("Pre-fetching price histories (with rate limiting)...")
-        batch_size = 5
-        delay_between_batches = 1.0  # seconds
+        batch_size = 2
+        delay_between_batches = 2.0  # seconds
+        circuit_breaker_hit = False
         for i, asset in enumerate(assets_to_analyze):
             symbol = asset.get('name', '')
-            self._get_price_history(symbol)
+            try:
+                self._get_price_history(symbol)
+            except Exception as e:
+                msg = str(e)
+                if "Circuit breaker is open" in msg or "429" in msg:
+                    circuit_breaker_hit = True
+                    self.logger.warning(f"Stopping prefetch due to rate limit/circuit breaker while fetching {symbol}")
+                    # Queue current and remaining for backfill
+                    remaining_assets = assets_to_analyze[i:] + remaining_assets
+                    break
+                else:
+                    self.logger.warning(f"Prefetch error for {symbol}: {e}")
             # Throttle aggressively to stay under rate limits
             if (i + 1) % batch_size == 0:
                 time.sleep(delay_between_batches)
