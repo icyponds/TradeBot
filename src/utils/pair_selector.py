@@ -993,6 +993,7 @@ class DynamicPairSelector:
                         self.logger.warning("Prefetch error cap reached; queueing remaining assets and stopping prefetch")
                         remaining_assets = assets_to_analyze[i+1:] + remaining_assets
                         break
+                    # Do not retry this symbol further in this cycle; move on
                     continue
                 else:
                     self.logger.warning(f"Prefetch error for {symbol}: {e}")
