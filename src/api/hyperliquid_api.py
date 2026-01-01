@@ -964,8 +964,14 @@ class HyperliquidAPI:
         return None
     
     @with_retry(max_attempts=3, base_delay=0.5)
-    def get_market_data(self, symbol: str) -> Optional[Dict[str, Any]]:
-        """Get comprehensive market data for a symbol."""
+    def get_market_data(self, symbol: str, timeframe: str = "1m") -> Optional[Dict[str, Any]]:
+        """
+        Get comprehensive market data for a symbol.
+        
+        Args:
+            symbol: Trading symbol
+            timeframe: Timeframe for data (not used currently, for interface compatibility)
+        """
         cache_key = f"market_data_{symbol}"
         cached = self.cache.get(cache_key)
         if cached is not None:
@@ -1609,81 +1615,86 @@ class HyperliquidAPI:
             return []
     
     def get_all_perp_assets(self, include_hip3: bool = True) -> List[Dict[str, Any]]:
-        """Get all perpetual assets across native and HIP-3."""
+        """
+        Get all perpetual assets across native and HIP-3.
+        
+        Note: When Info is initialized with perp_dexs, HIP-3 assets are automatically
+        included in meta_and_asset_ctxs(). We identify them by checking the asset index
+        against the native asset count.
+        """
         all_assets = []
         
-        # Native perps
-        asset_info = self.get_asset_info()
-        if asset_info:
-            for asset in asset_info.get('universe', []):
-                asset['dex'] = ''
-                asset['is_hip3'] = False
-                all_assets.append(asset)
-        
-        # HIP-3 perps
-        if include_hip3 and self.hip3_enabled and self.perp_dexs:
-            for dex_name in self.perp_dexs:
-                if dex_name == '':
+        try:
+            # Get all assets (native + HIP-3 if perp_dexs was passed to Info)
+            meta_and_ctxs = self.info.meta_and_asset_ctxs()
+            
+            if len(meta_and_ctxs) < 2:
+                return all_assets
+            
+            universe = meta_and_ctxs[0].get('universe', [])
+            contexts = meta_and_ctxs[1]
+            
+            # Get native perp count from meta (if available)
+            # Assets beyond this index are HIP-3
+            native_count = len(universe)  # Default assume all native
+            
+            # Try to determine native vs HIP-3 boundary
+            # Native perps have '' as dex, HIP-3 have a dex name
+            for i, asset in enumerate(universe):
+                ctx = contexts[i] if i < len(contexts) else {}
+                
+                # Check if this is a HIP-3 asset
+                # HIP-3 assets may have different structure or dex field
+                is_hip3 = asset.get('dex', '') != '' if 'dex' in asset else False
+                
+                # Skip HIP-3 if not requested
+                if is_hip3 and not include_hip3:
                     continue
                 
-                try:
-                    meta_and_ctxs = self.info.meta_and_asset_ctxs(dex=dex_name)
-                    if len(meta_and_ctxs) >= 2:
-                        for i, asset in enumerate(meta_and_ctxs[0].get('universe', [])):
-                            ctx = meta_and_ctxs[1][i] if i < len(meta_and_ctxs[1]) else {}
-                            
-                            all_assets.append({
-                                'name': asset['name'],
-                                'dex': dex_name,
-                                'is_hip3': True,
-                                'maxLeverage': asset.get('maxLeverage', 0),
-                                'szDecimals': asset.get('szDecimals', 0),
-                                'openInterest': float(ctx.get('openInterest', 0)) * float(ctx.get('markPx', 0)),
-                                'volume24h': float(ctx.get('dayNtlVlm', 0)),
-                                'markPrice': float(ctx.get('markPx', 0)),
-                                'funding': float(ctx.get('funding', 0)),
-                            })
-                except Exception as e:
-                    self.logger.error(f"Error fetching HIP-3 assets for {dex_name}: {e}")
+                # Skip HIP-3 if not enabled
+                if is_hip3 and not self.hip3_enabled:
+                    continue
+                
+                all_assets.append({
+                    'name': asset.get('name', ''),
+                    'dex': asset.get('dex', ''),
+                    'is_hip3': is_hip3,
+                    'maxLeverage': asset.get('maxLeverage', 0),
+                    'szDecimals': asset.get('szDecimals', 0),
+                    'openInterest': float(ctx.get('openInterest', 0)) * float(ctx.get('markPx', 0)) if ctx.get('markPx') else 0,
+                    'volume24h': float(ctx.get('dayNtlVlm', 0)),
+                    'markPrice': float(ctx.get('markPx', 0)) if ctx.get('markPx') else 0,
+                    'funding': float(ctx.get('funding', 0)),
+                })
+                
+        except Exception as e:
+            self.logger.error(f"Error fetching all perp assets: {e}")
         
         return all_assets
     
     def get_all_positions(self, include_hip3: bool = True) -> List[Dict[str, Any]]:
-        """Get all positions across native and HIP-3."""
-        all_positions = []
+        """
+        Get all positions across native and HIP-3.
         
-        # Native positions
+        Note: When Info is initialized with perp_dexs, HIP-3 positions are automatically
+        included in user_state(). We return all positions from get_positions().
+        """
+        # get_positions() already returns all positions (native + HIP-3 when perp_dexs is set)
         positions = self.get_positions()
-        for pos in positions:
-            pos['dex'] = ''
-            pos['is_hip3'] = False
-            all_positions.append(pos)
         
-        # HIP-3 positions
-        if include_hip3 and self.hip3_enabled and self.perp_dexs:
-            for dex_name in self.perp_dexs:
-                if dex_name == '':
-                    continue
-                
-                try:
-                    user_state = self.info.user_state(self.public_account_address, dex=dex_name)
-                    
-                    for pos in user_state.get('assetPositions', []):
-                        position_data = pos.get('position', {})
-                        size = float(position_data.get('szi', 0))
-                        
-                        if size != 0:
-                            all_positions.append({
-                                'symbol': position_data.get('coin'),
-                                'dex': dex_name,
-                                'is_hip3': True,
-                                'size': size,
-                                'side': 'long' if size > 0 else 'short',
-                                'entry_price': float(position_data.get('entryPx', 0)),
-                                'unrealized_pnl': float(position_data.get('unrealizedPnl', 0)),
-                            })
-                except Exception as e:
-                    self.logger.error(f"Error fetching HIP-3 positions for {dex_name}: {e}")
+        all_positions = []
+        for pos in positions:
+            # Add metadata fields if not present
+            if 'dex' not in pos:
+                pos['dex'] = ''
+            if 'is_hip3' not in pos:
+                pos['is_hip3'] = pos.get('dex', '') != ''
+            
+            # Filter HIP-3 if not requested
+            if pos['is_hip3'] and not include_hip3:
+                continue
+            
+            all_positions.append(pos)
         
         return all_positions
     
