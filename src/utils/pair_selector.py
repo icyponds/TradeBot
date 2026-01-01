@@ -15,6 +15,7 @@ Selection Factors:
 """
 
 import logging
+import time
 from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime, timedelta
 from collections import defaultdict
@@ -153,6 +154,8 @@ class DynamicPairSelector:
         self.correlation_matrix: Optional[pd.DataFrame] = None
         self.last_scan_time = None
         self.pair_history = {}
+        self.backfill_queue: List[Dict[str, Any]] = []
+        self.backfill_symbols_in_queue: set = set()
         
         self.logger.info(f"Initialized DynamicPairSelector (Mode: {self.selection_mode.value})")
         self.logger.info(f"  Weights: Liquidity={self.weight_liquidity:.0%}, Volatility={self.weight_volatility:.0%}, "
@@ -964,12 +967,13 @@ class DynamicPairSelector:
         
         sorted_by_liquidity = sorted(eligible_assets, key=quick_liquidity_score, reverse=True)
         assets_to_analyze = sorted_by_liquidity[:max_to_analyze]
+        analyze_symbols = {a.get('name', '') for a in assets_to_analyze}
+        remaining_assets = [a for a in eligible_assets if a.get('name', '') not in analyze_symbols]
         
         self.logger.info(f"Pre-filtered to top {len(assets_to_analyze)} assets by liquidity")
         
         # Pre-fetch price histories with rate limiting (batching to avoid 429/circuit breaker)
         self.logger.debug("Pre-fetching price histories (with rate limiting)...")
-        import time
         batch_size = 5
         delay_between_batches = 1.0  # seconds
         for i, asset in enumerate(assets_to_analyze):
@@ -978,6 +982,18 @@ class DynamicPairSelector:
             # Throttle aggressively to stay under rate limits
             if (i + 1) % batch_size == 0:
                 time.sleep(delay_between_batches)
+
+        # Queue remaining assets for staged backfill (processed gradually each scan)
+        if remaining_assets:
+            queued = 0
+            for asset in remaining_assets:
+                sym = asset.get('name', '')
+                if sym and sym not in self.backfill_symbols_in_queue and sym not in self.price_history:
+                    self.backfill_queue.append(asset)
+                    self.backfill_symbols_in_queue.add(sym)
+                    queued += 1
+            if queued > 0:
+                self.logger.info(f\"Queued {queued} assets for staged backfill\")
         
         # Build correlation matrix
         self._build_correlation_matrix()
@@ -1091,6 +1107,9 @@ class DynamicPairSelector:
         
         self.logger.info("=" * 60)
         self.logger.info(f"Selected {len(selected_pairs)} pairs for trading")
+        
+        # Process staged backfill queue in small batches to avoid rate limits
+        self._process_backfill_queue()
         
         return selected_pairs, pairs_metadata
     
@@ -1218,6 +1237,34 @@ class DynamicPairSelector:
     def get_native_perp_pairs(self) -> List[str]:
         """Get only native (non-HIP-3) perpetual pairs."""
         return self.get_pairs_by_type(market_type='perp', is_hip3=False)
+
+    def _process_backfill_queue(self, batch_size: int = 5, delay_between_batches: float = 1.0):
+        """
+        Gradually backfill historical data for queued assets to avoid rate limits.
+        
+        Args:
+            batch_size: How many assets to process per invocation
+            delay_between_batches: Delay in seconds after each batch
+        """
+        if not self.backfill_queue:
+            return
+        
+        to_process = min(batch_size, len(self.backfill_queue))
+        processed = 0
+        for i in range(to_process):
+            asset = self.backfill_queue.pop(0)
+            sym = asset.get('name', '')
+            if not sym:
+                continue
+            self._get_price_history(sym)
+            processed += 1
+            if processed % batch_size == 0:
+                time.sleep(delay_between_batches)
+        
+        # Rebuild queue symbol set
+        self.backfill_symbols_in_queue = {a.get('name', '') for a in self.backfill_queue if a.get('name', '')}
+        
+        self.logger.info(f"Backfill processed {processed} assets; {len(self.backfill_queue)} remaining in queue")
     
     def get_available_markets_summary(self) -> Dict[str, Any]:
         """
