@@ -120,6 +120,34 @@ def load_config() -> Dict[str, Any]:
             # Emergency portfolio stop: close all positions if portfolio loss exceeds this percent
             # Loss is computed vs total capital_at_risk across positions.
             "emergency_portfolio_loss_pct": float(os.getenv("EMERGENCY_PORTFOLIO_LOSS_PCT", "10.0")),
+
+            # Regime detection + allocation (HMM) and change-point gating (Page-Hinkley)
+            # These features are optional and default to enabled with conservative settings.
+            "regime_allocator": {
+                "enabled": os.getenv("REGIME_ALLOCATOR_ENABLED", "true").lower() == "true",
+                "proxy_symbol": os.getenv("REGIME_PROXY_SYMBOL", "BTC"),
+                "timeframe": os.getenv("REGIME_TIMEFRAME", "15m"),
+                "lookback": int(os.getenv("REGIME_LOOKBACK", "220")),
+                "retrain_minutes": int(os.getenv("REGIME_RETRAIN_MINUTES", "30")),
+                "hysteresis_threshold": float(os.getenv("REGIME_HYSTERESIS_THRESHOLD", "0.60")),
+                "min_switch_minutes": int(os.getenv("REGIME_MIN_SWITCH_MINUTES", "15")),
+            },
+            "change_point": {
+                "enabled": os.getenv("CHANGEPOINT_ENABLED", "true").lower() == "true",
+                "proxy_symbol": os.getenv("CHANGEPOINT_PROXY_SYMBOL", "BTC"),
+                "timeframe": os.getenv("CHANGEPOINT_TIMEFRAME", "15m"),
+                "cooldown_minutes": int(os.getenv("CHANGEPOINT_COOLDOWN_MINUTES", "20")),
+                # Default: only gate fragile mean-reversion / stat-arb entries
+                "apply_to_strategies": [
+                    s.strip()
+                    for s in os.getenv("CHANGEPOINT_APPLY_TO", "ou_mean_reversion,stat_arb").split(",")
+                    if s.strip()
+                ],
+                # Page-Hinkley parameters (tuned for abs returns)
+                "delta": float(os.getenv("CHANGEPOINT_DELTA", "0.0")),
+                "threshold": float(os.getenv("CHANGEPOINT_THRESHOLD", "0.02")),
+                "alpha": float(os.getenv("CHANGEPOINT_ALPHA", "0.99")),
+            },
         },
         
         # Leverage Management Configuration

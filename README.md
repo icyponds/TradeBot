@@ -8,6 +8,8 @@ An automated multi-strategy trading bot for Hyperliquid perpetual futures exchan
 - **Real-Time Dashboard**: Web-based monitoring at `localhost:5050` with positions, PnL, trade history
 - **Dynamic Pair Selection**: Automatically trades all assets meeting liquidity/volume/open interest thresholds
 - **Strategy-Specific Risk Management**: Custom TP/SL logic and trailing stops per strategy
+- **Regime-Aware Allocation**: 3-state HMM regime classifier adjusts effective strategy weights dynamically
+- **Change-Point Safety Gate**: Temporarily blocks new mean-reversion/stat-arb entries during detected market shifts
 - **Capital Rotation**: Automatically closes weaker positions for stronger signals
 - **Graceful Shutdown**: Ensures positions are closed on Ctrl+C, kill signals, or crashes
 - **SQLite Performance Tracking**: Persistent trade history and per-strategy analytics

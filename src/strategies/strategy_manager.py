@@ -18,6 +18,8 @@ from src.utils.leverage_manager import LeverageManager
 from src.utils.portfolio_manager import PortfolioManager
 from src.utils.correlation_manager import CorrelationManager
 from src.utils.performance_tracker import PerformanceTracker
+from src.utils.regime_hmm import RegimeAllocator
+from src.utils.change_point import PageHinkley
 from .strategy_selector import StrategySelector
 from src.models.trade import Trade, Position, MultiLegPosition, PositionLeg
 
@@ -118,6 +120,122 @@ class StrategyManager:
         self._last_prices = {}
         
         # Signal handling and shutdown safety is managed by the top-level entrypoint (`src/main.py`).
+
+        # Regime + change-point gating
+        self._regime_allocator: Optional[RegimeAllocator] = None
+        self._regime_result: Optional[Dict[str, Any]] = None
+        self._regime_last_update_ts: float = 0.0
+
+        self._change_point: Optional[PageHinkley] = None
+        self._entry_block_until: Optional[datetime] = None
+        self._entry_block_reason: Optional[str] = None
+        self._entry_block_strategies = set()
+
+        self._initialize_regime_and_changepoint()
+
+    def _initialize_regime_and_changepoint(self) -> None:
+        """Initialize optional regime allocator and change-point detector."""
+        rm = self.config.get("risk_management", {})
+
+        ra = rm.get("regime_allocator", {}) or {}
+        if ra.get("enabled", False):
+            try:
+                self._regime_allocator = RegimeAllocator(
+                    lookback=int(ra.get("lookback", 220)),
+                    retrain_minutes=int(ra.get("retrain_minutes", 30)),
+                    hysteresis_threshold=float(ra.get("hysteresis_threshold", 0.60)),
+                    min_switch_minutes=int(ra.get("min_switch_minutes", 15)),
+                )
+                self.logger.info(
+                    "Regime allocator enabled (3-state HMM): "
+                    f"proxy={ra.get('proxy_symbol','BTC')}/{ra.get('timeframe','15m')}, "
+                    f"lookback={ra.get('lookback',220)}, retrain={ra.get('retrain_minutes',30)}m"
+                )
+            except Exception as e:
+                self._regime_allocator = None
+                self.logger.warning(f"Failed to initialize regime allocator; disabled. Error: {e}")
+
+        cp = rm.get("change_point", {}) or {}
+        if cp.get("enabled", False):
+            try:
+                self._change_point = PageHinkley(
+                    delta=float(cp.get("delta", 0.0)),
+                    threshold=float(cp.get("threshold", 0.02)),
+                    alpha=float(cp.get("alpha", 0.99)),
+                )
+                self._entry_block_strategies = set(cp.get("apply_to_strategies", []) or [])
+                self.logger.info(
+                    "Change-point gate enabled (Page-Hinkley): "
+                    f"proxy={cp.get('proxy_symbol','BTC')}/{cp.get('timeframe','15m')}, "
+                    f"cooldown={cp.get('cooldown_minutes',20)}m, "
+                    f"strategies={sorted(self._entry_block_strategies)}"
+                )
+            except Exception as e:
+                self._change_point = None
+                self.logger.warning(f"Failed to initialize change-point detector; disabled. Error: {e}")
+
+    def _is_entry_block_active(self) -> bool:
+        return self._entry_block_until is not None and datetime.now() < self._entry_block_until
+
+    def _is_strategy_entry_blocked(self, strategy_name: str) -> bool:
+        return self._is_entry_block_active() and strategy_name in self._entry_block_strategies
+
+    def _get_effective_strategy_weight(self, strategy_name: str) -> float:
+        """Selector weight multiplied by regime multiplier (if enabled)."""
+        base_weight = float(self.strategy_selector.get_strategy_weight(strategy_name))
+        if not self._regime_allocator or not self._regime_result:
+            return base_weight
+        regime = str(self._regime_result.get("regime", "range"))
+        mult = float(self._regime_allocator.get_multiplier(strategy_name, regime))
+        return max(0.0, base_weight * mult)
+
+    def _maybe_update_regime_and_changepoint(self) -> None:
+        """Update regime and change-point state from the configured proxy symbol."""
+        rm = self.config.get("risk_management", {})
+        ra = rm.get("regime_allocator", {}) or {}
+        cp = rm.get("change_point", {}) or {}
+
+        # We update at most once per execution cycle.
+        now_ts = time.time()
+        if self._regime_last_update_ts and (now_ts - self._regime_last_update_ts) < max(5.0, float(self.execution_interval)):
+            return
+        self._regime_last_update_ts = now_ts
+
+        proxy_symbol = ra.get("proxy_symbol") or cp.get("proxy_symbol") or "BTC"
+        timeframe = ra.get("timeframe") or cp.get("timeframe") or "15m"
+        lookback = int(ra.get("lookback", 220))
+
+        try:
+            df = self.market_api.get_ohlcv(proxy_symbol, timeframe, limit=max(lookback, 120))
+            if df is None or len(df) < 50:
+                return
+
+            # Update regime allocator
+            if self._regime_allocator and ra.get("enabled", False):
+                X = self._regime_allocator.build_features_from_ohlcv(df)
+                res = self._regime_allocator.update(X, now_ts)
+                self._regime_result = {"regime": res.regime, "probs": res.probs}
+                self.logger.debug(f"Regime={res.regime} probs={res.probs}")
+
+            # Update change-point detector on abs return of last bar
+            if self._change_point and cp.get("enabled", False):
+                close = df["close"].astype(float).values
+                if len(close) >= 2 and close[-2] > 0:
+                    r = abs((close[-1] - close[-2]) / close[-2])
+                    triggered, score = self._change_point.update(float(r))
+                    if triggered:
+                        cooldown = int(cp.get("cooldown_minutes", 20))
+                        self._entry_block_until = datetime.now() + timedelta(minutes=cooldown)
+                        self._entry_block_reason = f"change_point(score={score:.4f})"
+                        self.logger.warning(
+                            f"⚠️ Change-point detected on {proxy_symbol} ({timeframe}): score={score:.4f}. "
+                            f"Blocking new entries for {sorted(self._entry_block_strategies)} until {self._entry_block_until}."
+                        )
+                        # Reset detector so we don't immediately retrigger in the cooldown window
+                        self._change_point.reset()
+
+        except Exception as e:
+            self.logger.debug(f"Regime/changepoint update failed: {e}")
     
     def _update_account_balance(self):
         """Update account balance and portfolio information."""
@@ -626,6 +744,9 @@ class StrategyManager:
         while self.is_running:
             try:
                 current_time = time.time()
+
+                # Update regime and change-point gating from market proxy (once per cycle)
+                self._maybe_update_regime_and_changepoint()
                 
                 # With WebSocket, positions are updated in real-time
                 # Only sync periodically to ensure accuracy
@@ -853,6 +974,14 @@ class StrategyManager:
     def _generate_signal_for_strategy(self, symbol: str, strategy_name: str, strategy, ohlcv: pd.DataFrame, current_price: float) -> Optional[Dict[str, Any]]:
         """Generate a signal from a strategy without executing it."""
         try:
+            # Gate new entries for selected strategies during change-point cooldown
+            if self._is_strategy_entry_blocked(strategy_name):
+                self.logger.info(
+                    f"Entry gated for {strategy_name}/{symbol}: cooldown active ({self._entry_block_reason}), "
+                    f"until {self._entry_block_until}"
+                )
+                return None
+
             # Check if strategy is enabled by the strategy selector
             if not self.strategy_selector.is_strategy_enabled(strategy_name):
                 self.logger.debug(f"Strategy {strategy_name} is disabled by selector, skipping")
@@ -870,7 +999,7 @@ class StrategyManager:
             
             if signal:
                 # Get strategy weight
-                strategy_weight = self.strategy_selector.get_strategy_weight(strategy_name)
+                strategy_weight = self._get_effective_strategy_weight(strategy_name)
                 signal['_strategy_weight'] = strategy_weight
                 signal['_weighted_strength'] = signal.get('signal_strength', 0.5) * strategy_weight
                 
@@ -947,7 +1076,7 @@ class StrategyManager:
             return
         
         # Get strategy weight from selector
-        strategy_weight = self.strategy_selector.get_strategy_weight(strategy_name)
+        strategy_weight = self._get_effective_strategy_weight(strategy_name)
         
         # Check if we should act on the signal
         should_execute = self._should_execute_signal(symbol, signal, current_price, ohlcv, strategy_name)
@@ -1009,6 +1138,11 @@ class StrategyManager:
                         )
                         
                         if should_execute:
+                            # Apply regime-aware strategy weight to signal strength (if present) for sizing.
+                            # Momentum signals may not include signal_strength; sizing will fallback to internal strength calc.
+                            eff_w = self._get_effective_strategy_weight('momentum_factor')
+                            if 'signal_strength' in signal:
+                                signal['signal_strength'] *= eff_w
                             self._execute_trade(symbol, signal, current_price, 'momentum_factor', ohlcv)
                             
         except Exception as e:
@@ -1017,6 +1151,14 @@ class StrategyManager:
     def _execute_strategy(self, symbol: str, strategy_name: str, strategy, ohlcv: pd.DataFrame, current_price: float):
         """Execute a single strategy."""
         try:
+            # Gate new entries for selected strategies during change-point cooldown
+            if self._is_strategy_entry_blocked(strategy_name):
+                self.logger.info(
+                    f"Entry gated for {strategy_name}/{symbol}: cooldown active ({self._entry_block_reason}), "
+                    f"until {self._entry_block_until}"
+                )
+                return
+
             # Check if strategy is enabled by the strategy selector
             if not self.strategy_selector.is_strategy_enabled(strategy_name):
                 self.logger.debug(f"Strategy {strategy_name} is disabled by selector, skipping")
@@ -1054,7 +1196,7 @@ class StrategyManager:
             
             # Standard single-leg signal handling
             # Get strategy weight from selector
-            strategy_weight = self.strategy_selector.get_strategy_weight(strategy_name)
+            strategy_weight = self._get_effective_strategy_weight(strategy_name)
             self.logger.debug(f"Strategy {strategy_name} weight: {strategy_weight:.2f}")
             
             # Check if we should act on the signal
