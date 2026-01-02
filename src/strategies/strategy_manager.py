@@ -1393,9 +1393,17 @@ class StrategyManager:
             signal_strength = self._calculate_signal_strength(ohlcv, strategy_name)
             market_volatility = self._calculate_market_volatility(ohlcv)
             available_capital = self.portfolio_manager.calculate_available_capital_for_trading()
+            # Keep a reserve for exploration trades by sizing normal trades using reduced available capital
+            exploration_cfg = (self.config.get("risk_management", {}) or {}).get("strategy_exploration", {}) or {}
+            reserve_pct = float(exploration_cfg.get("reserve_capital_pct", 0.10) or 0.0)
+            is_exploration = bool(signal.get("_exploration"))
+            reserved_amount = max(0.0, float(available_capital) * reserve_pct)
+            available_capital_for_trade = float(available_capital)
+            if (not is_exploration) and reserve_pct > 0:
+                available_capital_for_trade = max(0.0, float(available_capital) - reserved_amount)
             
             position_size, margin_required, leverage = self.leverage_manager.calculate_leveraged_position_size(
-                symbol, current_price, available_capital, strategy_name, signal_strength, market_volatility
+                symbol, current_price, available_capital_for_trade, strategy_name, signal_strength, market_volatility
             )
             
             if position_size <= 0 or margin_required <= 0:
@@ -1403,7 +1411,7 @@ class StrategyManager:
                 return
             
             # Check if we can open the position
-            if not self.leverage_manager.can_open_position(symbol, margin_required, available_capital):
+            if not self.leverage_manager.can_open_position(symbol, margin_required, available_capital_for_trade):
                 self.logger.info(f"Cannot open multi-leg position for {symbol}: insufficient margin")
                 return
             
@@ -2051,16 +2059,29 @@ class StrategyManager:
         
         # Calculate dynamic leveraged position size
         available_capital = self.portfolio_manager.calculate_available_capital_for_trading()
-        self.logger.info(f"Calculating position size for {symbol}: available capital=${available_capital:.2f}, signal_strength={signal_strength:.2f}, volatility={market_volatility:.2f}")
+        # Keep a reserve for exploration trades by sizing normal trades using reduced available capital
+        exploration_cfg = (self.config.get("risk_management", {}) or {}).get("strategy_exploration", {}) or {}
+        reserve_pct = float(exploration_cfg.get("reserve_capital_pct", 0.10) or 0.0)
+        is_exploration = bool(signal.get("_exploration"))
+        reserved_amount = max(0.0, float(available_capital) * reserve_pct)
+        available_capital_for_trade = float(available_capital)
+        if (not is_exploration) and reserve_pct > 0:
+            available_capital_for_trade = max(0.0, float(available_capital) - reserved_amount)
+
+        self.logger.info(
+            f"Calculating position size for {symbol}: available capital=${available_capital:.2f} "
+            f"(trade_capital=${available_capital_for_trade:.2f}, reserve=${reserved_amount:.2f}), "
+            f"signal_strength={signal_strength:.2f}, volatility={market_volatility:.2f}"
+        )
         
         position_size, margin_required, leverage = self.leverage_manager.calculate_leveraged_position_size(
-            symbol, current_price, available_capital, strategy_name, signal_strength, market_volatility
+            symbol, current_price, available_capital_for_trade, strategy_name, signal_strength, market_volatility
         )
         
         self.logger.info(f"Position calculation for {symbol}: size={position_size:.4f}, margin=${margin_required:.2f}, leverage={leverage:.1f}x")
         
         # Check if we can open the position
-        can_open = self.leverage_manager.can_open_position(symbol, margin_required, available_capital)
+        can_open = self.leverage_manager.can_open_position(symbol, margin_required, available_capital_for_trade)
         self.logger.info(f"Can open position for {symbol}: {can_open}")
         
         if not can_open:
@@ -2572,22 +2593,28 @@ class StrategyManager:
         """
         return len(self.pair_selector.get_current_pairs())
     
-    def _check_position_limit(self) -> bool:
+    def _check_position_limit(self, max_allocation_pct: Optional[float] = None) -> bool:
         """
         Check if we've reached the position limit based on capital at risk.
         
         Returns:
             True if position limit reached, False otherwise
         """
+        if max_allocation_pct is None:
+            max_allocation_pct = self.max_positions_percentage
+
         # Check portfolio allocation to see if we're at the limit
         allocation = self._check_portfolio_allocation()
         current_allocation = allocation['allocation_percentage']
         
         # Log the current allocation status
-        self.logger.info(f"Position limit check: {len(self.positions)} positions, {current_allocation:.1f}% of portfolio at risk (max: {self.max_positions_percentage}%)")
+        self.logger.info(
+            f"Position limit check: {len(self.positions)} positions, {current_allocation:.1f}% of portfolio at risk "
+            f"(max: {float(max_allocation_pct):.1f}%)"
+        )
         
         # Return True if we're at or exceeding the allocation limit
-        return current_allocation >= self.max_positions_percentage
+        return current_allocation >= float(max_allocation_pct)
     
     def _get_position_profitability_score(self, symbol: str, new_signal_strength: float) -> float:
         """
@@ -2868,10 +2895,23 @@ class StrategyManager:
         
         # Check portfolio allocation first
         allocation = self._check_portfolio_allocation()
-        self.logger.info(f"Portfolio allocation for {symbol}: {allocation['allocation_percentage']:.1f}% (max: {self.max_positions_percentage}%)")
+        exploration_cfg = (self.config.get("risk_management", {}) or {}).get("strategy_exploration", {}) or {}
+        reserve_pct = float(exploration_cfg.get("reserve_capital_pct", 0.10) or 0.0)
+        is_exploration = bool(signal.get("_exploration"))
+        effective_max = float(self.max_positions_percentage)
+        if (not is_exploration) and reserve_pct > 0:
+            # Keep reserve_pct of available capital "free" by lowering the max allocation threshold for normal trades.
+            effective_max = max(0.0, float(self.max_positions_percentage) - (reserve_pct * 100.0))
+
+        self.logger.info(
+            f"Portfolio allocation for {symbol}: {allocation['allocation_percentage']:.1f}% "
+            f"(max: {effective_max:.1f}%, exploration={is_exploration}, reserve_pct={reserve_pct:.2f})"
+        )
         
-        if allocation['allocation_percentage'] >= self.max_positions_percentage:
-            self.logger.warning(f"Portfolio allocation limit reached: {allocation['allocation_percentage']:.1f}% >= {self.max_positions_percentage}%")
+        if allocation['allocation_percentage'] >= effective_max:
+            self.logger.warning(
+                f"Portfolio allocation limit reached: {allocation['allocation_percentage']:.1f}% >= {effective_max:.1f}%"
+            )
             # Try to close least profitable position to make room
             if self._close_least_profitable_position(signal_strength):
                 self.logger.info(f"Closed least profitable position to make room for {symbol}")
@@ -2879,7 +2919,7 @@ class StrategyManager:
             return False
         
         # If we haven't reached the position count limit, allow the trade
-        position_limit_reached = self._check_position_limit()
+        position_limit_reached = self._check_position_limit(max_allocation_pct=effective_max)
         self.logger.info(f"Position limit check for {symbol}: {len(self.positions)} positions, limit reached: {position_limit_reached}")
         
         if not position_limit_reached:
