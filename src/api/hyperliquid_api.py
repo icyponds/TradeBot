@@ -1692,7 +1692,11 @@ class HyperliquidAPI:
         size: float,
         reduce_only: bool = False,
         urgency: str = "normal",
-        market_type: str = "perp"
+        market_type: str = "perp",
+        # Emergency overrides (used for forced unwind/kill-switch execution)
+        max_slippage_bps: Optional[float] = None,
+        initial_slippage_bps: Optional[float] = None,
+        max_attempts_override: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Unified smart order execution for all market types.
@@ -1742,7 +1746,7 @@ class HyperliquidAPI:
             
             is_buy = side.lower() == 'buy'
             
-            # Configure slippage based on urgency
+            # Configure slippage based on urgency (defaults)
             if urgency == "low":
                 initial_slippage = self._INITIAL_SLIPPAGE_BPS / 2
                 max_attempts = self._ORDER_WALK_MAX_ATTEMPTS + 3
@@ -1752,6 +1756,13 @@ class HyperliquidAPI:
             else:
                 initial_slippage = self._INITIAL_SLIPPAGE_BPS
                 max_attempts = self._ORDER_WALK_MAX_ATTEMPTS
+
+            # Apply emergency overrides (if provided)
+            if initial_slippage_bps is not None:
+                initial_slippage = float(initial_slippage_bps)
+            if max_attempts_override is not None:
+                max_attempts = int(max_attempts_override)
+            max_slippage_cap = float(max_slippage_bps) if max_slippage_bps is not None else float(self._MAX_SLIPPAGE_BPS)
             
             # Track aggregated fills
             total_filled = 0.0
@@ -1760,7 +1771,7 @@ class HyperliquidAPI:
             
             self.logger.info(
                 f"Executing {market_type} order: {side} {remaining_size} {display_symbol} "
-                f"@ ~{current_price:.6f} (urgency: {urgency})"
+                f"@ ~{current_price:.6f} (urgency: {urgency}, max_slip_bps: {max_slippage_cap:.0f}, max_attempts: {max_attempts})"
             )
             
             for attempt in range(max_attempts):
@@ -1775,7 +1786,7 @@ class HyperliquidAPI:
                 # Calculate execution price with progressive slippage
                 slippage_bps = min(
                     initial_slippage + (attempt * self._ORDER_WALK_STEP_BPS),
-                    self._MAX_SLIPPAGE_BPS
+                    max_slippage_cap
                 )
                 slippage_mult = slippage_bps / 10000
                 
