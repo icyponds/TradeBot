@@ -51,6 +51,9 @@ class StrategyManager:
         """
         self.config = config
         self.logger = logging.getLogger(__name__)
+
+        # Session tracking (used by dashboard to compute "since bot started" metrics)
+        self.session_start_time = datetime.now()
         
         # Initialize portfolio manager
         self.portfolio_manager = PortfolioManager(config)

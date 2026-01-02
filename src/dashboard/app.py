@@ -466,7 +466,12 @@ def _get_win_rate() -> float:
     """Get overall win rate from trade database."""
     if _strategy_manager is not None and hasattr(_strategy_manager, 'performance_tracker'):
         try:
-            trades = _strategy_manager.performance_tracker.db.get_recent_trades(100)
+            start_time = getattr(_strategy_manager, "session_start_time", None)
+            if start_time:
+                trades = _strategy_manager.performance_tracker.db.get_trades_in_range(start_time, datetime.now())
+            else:
+                # Fallback: last 7 days (TradeDatabase.get_recent_trades takes days, not limit)
+                trades = _strategy_manager.performance_tracker.db.get_recent_trades(7)
             if trades:
                 wins = sum(1 for t in trades if t.get('pnl', 0) > 0)
                 return (wins / len(trades)) * 100
@@ -476,10 +481,17 @@ def _get_win_rate() -> float:
 
 
 def _get_total_realized_pnl() -> float:
-    """Get total realized PnL from trade database."""
+    """Get realized PnL since the bot session started."""
     if _strategy_manager is not None and hasattr(_strategy_manager, 'performance_tracker'):
         try:
-            trades = _strategy_manager.performance_tracker.db.get_recent_trades(1000)
+            start_time = getattr(_strategy_manager, "session_start_time", None)
+            if not start_time:
+                # If the bot was started before this code existed, we can't know session start.
+                # Fall back to 7 days instead of showing a wrong "since start" value.
+                trades = _strategy_manager.performance_tracker.db.get_recent_trades(7)
+                return sum(t.get('pnl', 0) or 0 for t in trades)
+
+            trades = _strategy_manager.performance_tracker.db.get_trades_in_range(start_time, datetime.now())
             return sum(t.get('pnl', 0) or 0 for t in trades)
         except Exception as e:
             logger.debug(f"Error getting total realized PnL: {e}")
@@ -513,7 +525,11 @@ def _get_trade_stats() -> Dict[str, Any]:
     
     if _strategy_manager is not None and hasattr(_strategy_manager, 'performance_tracker'):
         try:
-            trades = _strategy_manager.performance_tracker.db.get_recent_trades(1000)
+            start_time = getattr(_strategy_manager, "session_start_time", None)
+            if start_time:
+                trades = _strategy_manager.performance_tracker.db.get_trades_in_range(start_time, datetime.now())
+            else:
+                trades = _strategy_manager.performance_tracker.db.get_recent_trades(7)
             if trades:
                 stats['total_trades'] = len(trades)
                 stats['winning_trades'] = sum(1 for t in trades if (t.get('pnl') or 0) > 0)
@@ -532,7 +548,15 @@ def _get_trades_data(limit: int = 50) -> List[Dict[str, Any]]:
     
     if _strategy_manager is not None and hasattr(_strategy_manager, 'performance_tracker'):
         try:
-            raw_trades = _strategy_manager.performance_tracker.db.get_recent_trades(limit)
+            # Prefer "since bot started" when available; otherwise show last 7 days.
+            start_time = getattr(_strategy_manager, "session_start_time", None)
+            if start_time:
+                raw_trades = _strategy_manager.performance_tracker.db.get_trades_in_range(start_time, datetime.now())
+            else:
+                raw_trades = _strategy_manager.performance_tracker.db.get_recent_trades(7)
+
+            # Limit after fetching (TradeDatabase.get_recent_trades takes days, not limit)
+            raw_trades = raw_trades[:limit]
             for trade in raw_trades:
                 # Format trade data for display
                 exit_time = trade.get('exit_time') or trade.get('timestamp')
