@@ -1454,6 +1454,42 @@ class StrategyManager:
             spot_required *= 1.02
             
             self.logger.info(f"Fund allocation: perp=${perp_required:.2f}, spot=${spot_required:.2f}")
+
+            # If combined USDC (spot + perp withdrawable) is insufficient, scale down the trade to fit.
+            try:
+                ml_cfg = (self.config.get("trading", {}) or {}).get("multi_leg", {}) or {}
+                if ml_cfg.get("auto_scale_to_funds", True):
+                    total_required = float(perp_required) + float(spot_required)
+                    if total_required > 0:
+                        spot_usdc = float(self.market_api.get_spot_balance("USDC") or 0.0)
+                        perp_withdrawable = float((self.market_api.get_perp_balance() or {}).get("withdrawable", 0.0) or 0.0)
+                        total_available = max(0.0, spot_usdc) + max(0.0, perp_withdrawable)
+
+                        if total_available + 1e-6 < total_required:
+                            scale = total_available / total_required if total_required > 0 else 0.0
+                            min_scale = float(ml_cfg.get("min_scale_factor", 0.10) or 0.0)
+
+                            if scale < min_scale:
+                                self.logger.warning(
+                                    f"Multi-leg entry for {symbol} blocked: insufficient combined USDC. "
+                                    f"required=${total_required:.2f}, available=${total_available:.2f}, "
+                                    f"scale={scale:.3f} < min_scale={min_scale:.2f}"
+                                )
+                                return
+
+                            self.logger.warning(
+                                f"Scaling multi-leg entry for {symbol} to available funds: "
+                                f"required=${total_required:.2f}, available=${total_available:.2f}, scale={scale:.3f}"
+                            )
+
+                            # All sizing components are linear in notional -> scale proportionally.
+                            position_size = float(position_size) * scale
+                            margin_required = float(margin_required) * scale
+                            notional_value = float(notional_value) * scale
+                            perp_required = float(perp_required) * scale
+                            spot_required = float(spot_required) * scale
+            except Exception as e:
+                self.logger.debug(f"Multi-leg auto-scale-to-funds failed (continuing without scaling): {e}")
             
             # Ensure perp account has funds
             if perp_required > 0:
