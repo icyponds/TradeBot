@@ -541,8 +541,9 @@
                 <div class="summary-value" id="total-equity">--</div>
             </div>
             <div class="summary-card">
-                <div class="summary-label">Realized PnL</div>
+                <div class="summary-label">Realized PnL <span class="text-muted" id="realized-scope"></span></div>
                 <div class="summary-value" id="realized-pnl">--</div>
+                <div class="summary-change text-muted" id="session-start"></div>
             </div>
             <div class="summary-card">
                 <div class="summary-label">Unrealized PnL</div>
@@ -965,6 +966,18 @@
 
             document.getElementById('total-equity').textContent = formatCurrency(account.total_equity);
             
+            // Session label for realized pnl
+            const sessionStartTime = performance.session_start_time || null;
+            const realizedScopeEl = document.getElementById('realized-scope');
+            const sessionStartEl = document.getElementById('session-start');
+            if (sessionStartTime) {
+                if (realizedScopeEl) realizedScopeEl.textContent = '(since bot start)';
+                if (sessionStartEl) sessionStartEl.textContent = `Start: ${formatDateTime(sessionStartTime)}`;
+            } else {
+                if (realizedScopeEl) realizedScopeEl.textContent = '';
+                if (sessionStartEl) sessionStartEl.textContent = '';
+            }
+
             // Realized PnL
             const realizedPnl = performance.total_realized_pnl || 0;
             const realizedPnlEl = document.getElementById('realized-pnl');

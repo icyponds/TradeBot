@@ -324,6 +324,9 @@ def _get_summary_data() -> Dict[str, Any]:
         
         # Get trade stats
         trade_stats = _get_trade_stats()
+
+        # Session start time (if available)
+        session_start = getattr(_strategy_manager, "session_start_time", None)
         
         return {
             'account': {
@@ -338,6 +341,7 @@ def _get_summary_data() -> Dict[str, Any]:
                 'winning_trades': trade_stats.get('winning_trades', 0),
                 'losing_trades': trade_stats.get('losing_trades', 0),
                 'win_rate': trade_stats.get('win_rate', 0),
+                'session_start_time': session_start.isoformat() if session_start else None,
                 'total_realized_pnl': total_realized_pnl,
                 'total_unrealized_pnl': total_unrealized_pnl,
                 'total_pnl': total_realized_pnl + total_unrealized_pnl,
