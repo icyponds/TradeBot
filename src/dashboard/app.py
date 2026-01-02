@@ -389,10 +389,14 @@ def _get_strategies_data() -> List[Dict[str, Any]]:
                 'name': name,
                 'enabled': selector.is_strategy_enabled(name) if selector else True,
                 'weight': ranking.weight if ranking else 1.0,
+                'effective_weight': _strategy_manager._get_effective_strategy_weight(name) if hasattr(_strategy_manager, '_get_effective_strategy_weight') else (ranking.weight if ranking else 1.0),
                 'recent_pnl': total_pnl,
                 'sharpe_ratio': 0,  # Could calculate from trades if needed
                 'win_rate': win_rate,
                 'trade_count': trade_count,
+                'trade_confidence': (ranking.metrics.get('trade_confidence') if ranking and ranking.metrics else None),
+                'adj_win_rate': (ranking.metrics.get('adj_win_rate') if ranking and ranking.metrics else None),
+                'adj_profit_factor': (ranking.metrics.get('adj_profit_factor') if ranking and ranking.metrics else None),
                 'on_probation': selector.on_probation.get(name, False) if selector and hasattr(selector, 'on_probation') else False,
                 'in_cooling_off': name in selector.cooling_off_until if selector else False,
             })

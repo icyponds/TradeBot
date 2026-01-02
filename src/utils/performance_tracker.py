@@ -336,6 +336,8 @@ class PerformanceTracker:
         take_profit: Optional[float] = None,
         leverage: Optional[float] = None,
         fees: float = 0.0,
+        pnl_override: Optional[float] = None,
+        pnl_percentage_override: Optional[float] = None,
     ):
         """
         Record a trade from position closure data.
@@ -344,13 +346,24 @@ class PerformanceTracker:
         the data available when closing a position.
         """
         # Calculate PnL
-        if side == 'long':
-            pnl = (exit_price - entry_price) * size - fees
+        if pnl_override is not None:
+            pnl = float(pnl_override)
         else:
-            pnl = (entry_price - exit_price) * size - fees
+            if side == 'long':
+                pnl = (exit_price - entry_price) * size - fees
+            elif side == 'short':
+                pnl = (entry_price - exit_price) * size - fees
+            else:
+                raise ValueError(
+                    f"record_trade_from_position() requires pnl_override for side='{side}'. "
+                    "Valid price-based sides are 'long' or 'short'."
+                )
         
         # Calculate PnL percentage based on capital at risk
-        pnl_percentage = (pnl / capital_at_risk * 100) if capital_at_risk > 0 else 0
+        if pnl_percentage_override is not None:
+            pnl_percentage = float(pnl_percentage_override)
+        else:
+            pnl_percentage = (pnl / capital_at_risk * 100) if capital_at_risk > 0 else 0
         
         trade = CompletedTrade(
             symbol=symbol,

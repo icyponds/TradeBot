@@ -7,6 +7,7 @@ import time
 import signal
 import sys
 import json
+import random
 from typing import Dict, List, Any, Optional
 from datetime import datetime, timedelta
 import pandas as pd
@@ -1054,11 +1055,85 @@ class StrategyManager:
                 self.logger.info(f"✗ Skipping {symbol}: Equal strength conflicting signals, no trade taken")
                 return None
             
-            return winner
+            return self._maybe_apply_strategy_exploration(symbol, collected_signals, winner)
         
         # No conflict - return the strongest signal
         best_signal = max(collected_signals, key=lambda s: s['signal'].get('_weighted_strength', 0))
-        return best_signal
+        return self._maybe_apply_strategy_exploration(symbol, collected_signals, best_signal)
+
+    def _maybe_apply_strategy_exploration(self, symbol: str, collected_signals: List[Dict], winner: Dict) -> Dict:
+        """
+        Optional exploration: if multiple strategies produce same-direction entry signals,
+        occasionally execute an under-sampled strategy with reduced size to gather data.
+        """
+        try:
+            cfg = (self.config.get("risk_management", {}) or {}).get("strategy_exploration", {}) or {}
+            if not cfg.get("enabled", False):
+                return winner
+
+            # Only explore on entries (not when we already have a position)
+            if symbol in self.positions:
+                return winner
+
+            direction = winner.get("signal", {}).get("signal")
+            if direction not in ("buy", "sell"):
+                return winner
+
+            # Only explore among same-direction candidates to avoid flipping trade direction
+            same_dir = [s for s in collected_signals if s.get("signal", {}).get("signal") == direction]
+            if len(same_dir) <= 1:
+                return winner
+
+            min_trades = int(cfg.get("min_trades_per_strategy", 20))
+            eps = float(cfg.get("epsilon", 0.15))
+            close_delta = float(cfg.get("close_strength_delta", 0.10))
+            size_scale = float(cfg.get("position_size_scale", 0.30))
+
+            # Pull trade counts from selector rankings (updated periodically)
+            def trade_count(strategy_name: str) -> int:
+                r = getattr(self.strategy_selector, "strategy_rankings", {}).get(strategy_name)
+                if not r:
+                    return 0
+                m = r.metrics or {}
+                return int(m.get("total_trades", 0) or 0)
+
+            under = [s for s in same_dir if trade_count(s["strategy_name"]) < min_trades]
+            if not under:
+                return winner
+
+            # Determine if winner is only marginally better than runner-up
+            sorted_same = sorted(same_dir, key=lambda s: s["signal"].get("_weighted_strength", 0), reverse=True)
+            best_strength = float(sorted_same[0]["signal"].get("_weighted_strength", 0) or 0)
+            second_strength = float(sorted_same[1]["signal"].get("_weighted_strength", 0) or 0)
+            gap = 0.0
+            denom = abs(best_strength) if abs(best_strength) > 1e-9 else 1.0
+            gap = (best_strength - second_strength) / denom
+
+            should_explore = (random.random() < eps) or (gap < close_delta)
+            if not should_explore:
+                return winner
+
+            # Choose an under-sampled strategy with inverse-trade-count weighting
+            weights = []
+            for s in under:
+                n = trade_count(s["strategy_name"])
+                weights.append(1.0 / (1.0 + float(n)))
+
+            chosen = random.choices(under, weights=weights, k=1)[0]
+            chosen_sig = chosen.get("signal", {})
+            chosen_sig["_exploration"] = True
+            chosen_sig["_exploration_size_scale"] = size_scale
+            chosen_sig["_exploration_reason"] = f"under_sampled(<{min_trades})"
+
+            self.logger.info(
+                f"🧪 Exploration override for {symbol}: choosing {chosen['strategy_name']} over "
+                f"{winner.get('strategy_name')} (size_scale={size_scale:.2f})"
+            )
+            return chosen
+
+        except Exception as e:
+            self.logger.debug(f"Strategy exploration decision failed: {e}")
+            return winner
     
     def _execute_resolved_signal(self, symbol: str, signal_data: Dict):
         """Execute a resolved signal after conflict resolution."""
@@ -1083,6 +1158,20 @@ class StrategyManager:
         self.logger.info(f"Should execute {strategy_name} signal for {symbol}: {should_execute}")
         
         if should_execute:
+            # Apply exploration size scaling (after sizing is computed)
+            if signal.get("_exploration") and signal.get("_exploration_size_scale"):
+                scale = float(signal.get("_exploration_size_scale") or 1.0)
+                try:
+                    if "size" in signal and signal["size"] is not None:
+                        signal["size"] = float(signal["size"]) * scale
+                    if "margin_required" in signal and signal["margin_required"] is not None:
+                        signal["margin_required"] = float(signal["margin_required"]) * scale
+                    # Also reduce effective signal_strength so any downstream logic is consistent
+                    if "signal_strength" in signal and signal["signal_strength"] is not None:
+                        signal["signal_strength"] = float(signal["signal_strength"]) * scale
+                except Exception:
+                    pass
+
             # Apply strategy weight to the signal strength for position sizing
             if 'signal_strength' in signal:
                 signal['signal_strength'] *= strategy_weight
@@ -1515,20 +1604,39 @@ class StrategyManager:
                     price_diff = -price_diff
                 leg_pnl = price_diff * leg.size
                 total_pnl += leg_pnl
-            
+
+            exit_time = datetime.now()
+
+            # For funding rate arbitrage we store realized PnL as funding payments only (delta-neutral)
+            # and represent side as 'delta_neutral' in the DB.
+            pnl_to_record = total_pnl
+            trade_side = "multi_leg"
+            if strategy_name == "funding_rate_arbitrage":
+                pnl_to_record = self._estimate_funding_arb_realized_pnl(position, exit_time)
+                trade_side = "delta_neutral"
+
             # Record trade in performance tracker
             self.performance_tracker.record_trade_from_position(
                 symbol=position.primary_symbol,
                 strategy=strategy_name,
-                side='multi_leg',
+                side=trade_side,
                 entry_price=sum(leg.entry_price * leg.size for leg in position.legs) / position.total_notional if position.total_notional > 0 else 0,
                 exit_price=sum(r['exit_price'] * r['filled_size'] for r in exit_results) / sum(r['filled_size'] for r in exit_results) if exit_results else 0,
                 size=sum(r['filled_size'] for r in exit_results),
                 entry_time=position.entry_time,
-                exit_time=datetime.now(),
+                exit_time=exit_time,
                 capital_at_risk=position.capital_at_risk or 0,
                 exit_reason=signal.get('reason', 'signal'),
+                pnl_override=pnl_to_record,
             )
+
+            # Feed trade result into selector rolling stats (supports rolling Sharpe, etc.)
+            try:
+                cap = position.capital_at_risk or 0
+                ret = (float(pnl_to_record) / float(cap)) if cap else 0.0
+                self.strategy_selector.record_trade_result(strategy_name, ret, exit_time)
+            except Exception as e:
+                self.logger.debug(f"Failed to record multi-leg trade result for selector: {e}")
             
             # Close position in leverage manager
             self.leverage_manager.close_position(position.primary_symbol, 0)  # Price not needed for tracking
@@ -1537,19 +1645,19 @@ class StrategyManager:
             del self.multi_leg_positions[position.position_id]
             
             # Update stats
-            self.total_pnl += total_pnl
+            self.total_pnl += pnl_to_record
             self.total_trades += 1
-            if total_pnl > 0:
+            if pnl_to_record > 0:
                 self.winning_trades += 1
             
             # Update pair selector performance
-            self.pair_selector.update_pair_performance(position.primary_symbol, total_pnl)
+            self.pair_selector.update_pair_performance(position.primary_symbol, pnl_to_record)
             
             # Save positions
             self.save_positions_to_file()
             
             self.logger.info(f"✅ Multi-leg position closed: {position.position_id}")
-            self.logger.info(f"   P&L: ${total_pnl:.2f}")
+            self.logger.info(f"   P&L: ${pnl_to_record:.2f}")
             
         except Exception as e:
             self.logger.error(f"Error executing multi-leg exit for {symbol}: {e}")
@@ -1581,6 +1689,92 @@ class StrategyManager:
         except Exception as e:
             self.logger.error(f"Error getting price for {symbol} ({market_type}): {e}")
             return None
+
+    def _estimate_funding_arb_realized_pnl(self, position: MultiLegPosition, exit_time: datetime) -> float:
+        """
+        Estimate realized PnL for funding-rate arbitrage as funding payments only.
+
+        We intentionally do NOT use price PnL (basis/hedge drift) for this strategy's realized PnL.
+        This is an estimate based on sampled funding rates over the holding period.
+        """
+        try:
+            perp_leg = position.get_leg("perp")
+            if not perp_leg:
+                return 0.0
+
+            perp_side = (position.metadata or {}).get("perp_side", perp_leg.side)
+            # side_sign: long=+1, short=-1
+            side_sign = 1.0 if perp_side == "long" else -1.0
+
+            # Approximate perp notional for funding calculation.
+            # Funding is applied on notional; we approximate using entry notional.
+            notional = float(perp_leg.entry_price) * float(perp_leg.size)
+            if notional <= 0:
+                return 0.0
+
+            start_time = position.entry_time
+            end_time = exit_time
+            if end_time <= start_time:
+                return 0.0
+
+            # Use cached funding rates from the strategy (sampled during runtime).
+            series = []
+            strat = self.strategies.get(position.strategy)
+            if strat is not None and hasattr(strat, "funding_rate_cache"):
+                cache = getattr(strat, "funding_rate_cache", {}) or {}
+                raw = list(cache.get(position.primary_symbol, []))
+                # raw items are (datetime, rate)
+                series = [(ts, float(rate)) for ts, rate in raw if ts and rate is not None]
+                series.sort(key=lambda x: x[0])
+
+            # Fallback if we have no samples
+            if not series:
+                rate = None
+                try:
+                    rate = self.market_api.get_funding_rate(position.primary_symbol)
+                except Exception:
+                    rate = None
+                if rate is None:
+                    rate = (position.metadata or {}).get("entry_funding_rate", 0.0) or 0.0
+
+                hours = (end_time - start_time).total_seconds() / 3600.0
+                # Funding PnL sign convention:
+                # pnl = -funding_rate * notional * side_sign * hours
+                return float(-float(rate) * notional * side_sign * hours)
+
+            # Build stepwise integral over [start_time, end_time]
+            # Use the last known rate as piecewise-constant until the next sample.
+            pnl_rate_integral = 0.0  # sum(rate * dt_hours)
+
+            # Find initial rate at start_time
+            last_rate = series[0][1]
+            for ts, rate in series:
+                if ts <= start_time:
+                    last_rate = rate
+                else:
+                    break
+
+            last_ts = start_time
+            for ts, rate in series:
+                if ts <= start_time:
+                    continue
+                if ts >= end_time:
+                    break
+                dt_hours = (ts - last_ts).total_seconds() / 3600.0
+                if dt_hours > 0:
+                    pnl_rate_integral += last_rate * dt_hours
+                last_ts = ts
+                last_rate = rate
+
+            # Tail interval to end_time
+            dt_hours = (end_time - last_ts).total_seconds() / 3600.0
+            if dt_hours > 0:
+                pnl_rate_integral += last_rate * dt_hours
+
+            return float(-pnl_rate_integral * notional * side_sign)
+        except Exception as e:
+            self.logger.debug(f"Failed to estimate funding arb pnl: {e}")
+            return 0.0
     
     def _unwind_executed_legs(self, executed_legs: List[PositionLeg]):
         """Unwind executed legs on failure (atomic rollback)."""
@@ -2133,7 +2327,21 @@ class StrategyManager:
                         stop_loss=position.stop_loss,
                         take_profit=position.take_profit,
                         leverage=result.get('leverage'),
+                        pnl_override=result.get('pnl'),
+                        pnl_percentage_override=result.get('pnl_percentage'),
                     )
+
+                    # Feed trade result into selector rolling stats (for rolling Sharpe + probation logic)
+                    try:
+                        cap = position.capital_at_risk or result.get('margin_used') or 0
+                        if cap and result.get('pnl') is not None:
+                            ret = float(result.get('pnl')) / float(cap)
+                        else:
+                            # Fallback to percentage if provided
+                            ret = float(result.get('pnl_percentage') or 0) / 100.0
+                        self.strategy_selector.record_trade_result(position.strategy, ret, datetime.now())
+                    except Exception as e:
+                        self.logger.debug(f"Failed to record trade result for selector: {e}")
                     
                     # Update performance counters
                     trade_pnl = result['pnl']

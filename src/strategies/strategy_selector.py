@@ -309,6 +309,9 @@ class StrategySelector:
         
         for strategy_name, metrics in all_metrics.items():
             metrics_dict = metrics.to_dict()
+
+            # Add sample-size aware/shrunk metrics for scoring & weight stability
+            metrics_dict = self._with_sample_size_adjustments(metrics_dict)
             
             # Check minimum trades requirement
             total_trades = metrics_dict.get('total_trades', 0)
@@ -375,6 +378,57 @@ class StrategySelector:
         self._log_rankings()
         
         return self.strategy_rankings
+
+    def _with_sample_size_adjustments(self, metrics: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Add/compute adjusted metrics that are more stable for small sample sizes.
+
+        This prevents a strategy from getting extreme weights after only a handful of trades,
+        which is critical for early-stage profitability assessment.
+        """
+        m = dict(metrics or {})
+        n = int(m.get("total_trades", 0) or 0)
+        wins = int(m.get("winning_trades", 0) or 0)
+        losses = int(m.get("losing_trades", 0) or 0)
+
+        # Confidence ramps from 0 -> 1 as trades approach this threshold
+        min_conf_trades = max(self.min_trades_for_ranking, 20)
+        conf = min(1.0, n / float(min_conf_trades)) if min_conf_trades > 0 else 1.0
+        m["trade_confidence"] = conf
+
+        # Bayesian win rate with Beta(2,2) prior (50% mean, modest strength)
+        # adj_wr = (wins + 2) / (n + 4)
+        denom = (n + 4)
+        adj_wr = ((wins + 2) / float(denom)) * 100.0 if denom > 0 else 50.0
+        m["adj_win_rate"] = adj_wr
+
+        # Shrink profit factor toward 1.0 for small n (use log space to keep symmetry)
+        pf = float(m.get("profit_factor", 0) or 0)
+        if pf <= 0:
+            pf = 1.0
+        try:
+            pf_adj = float(np.exp(conf * np.log(pf) + (1.0 - conf) * np.log(1.0)))
+        except Exception:
+            pf_adj = 1.0
+        m["adj_profit_factor"] = pf_adj
+
+        # Shrink expectancy toward 0 for small n
+        exp = float(m.get("expectancy", 0) or 0)
+        m["adj_expectancy"] = conf * exp
+
+        # Use adjusted values for composite scoring by overwriting the fields used downstream.
+        # We preserve the raw values under adj_* keys for visibility in the dashboard/logs.
+        m["win_rate"] = m.get("adj_win_rate", m.get("win_rate", 0))
+        m["profit_factor"] = m.get("adj_profit_factor", m.get("profit_factor", 0))
+        m["expectancy"] = m.get("adj_expectancy", m.get("expectancy", 0))
+
+        # Ensure streak fields exist even if missing (some DB stats paths omit them)
+        m["current_lose_streak"] = int(m.get("current_lose_streak", 0) or 0)
+        m["current_win_streak"] = int(m.get("current_win_streak", 0) or 0)
+        m["max_lose_streak"] = int(m.get("max_lose_streak", 0) or 0)
+        m["max_win_streak"] = int(m.get("max_win_streak", 0) or 0)
+
+        return m
     
     def _calculate_score(self, metrics: Dict[str, float], strategy_name: str = None) -> float:
         """Calculate strategy score based on ranking metric."""

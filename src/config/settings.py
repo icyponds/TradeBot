@@ -148,6 +148,21 @@ def load_config() -> Dict[str, Any]:
                 "threshold": float(os.getenv("CHANGEPOINT_THRESHOLD", "0.02")),
                 "alpha": float(os.getenv("CHANGEPOINT_ALPHA", "0.99")),
             },
+
+            # Strategy exploration to ensure sufficient sample sizes.
+            # When multiple strategies emit a same-direction entry signal for the same symbol,
+            # we occasionally route execution to under-sampled strategies with smaller sizing.
+            "strategy_exploration": {
+                "enabled": os.getenv("STRATEGY_EXPLORATION_ENABLED", "true").lower() == "true",
+                # Chance to explore when eligible (0.0 - 1.0)
+                "epsilon": float(os.getenv("STRATEGY_EXPLORATION_EPSILON", "0.15")),
+                # Treat strategies with < N trades as "under-sampled"
+                "min_trades_per_strategy": int(os.getenv("STRATEGY_EXPLORATION_MIN_TRADES", "20")),
+                # Scale down position size on exploration executions
+                "position_size_scale": float(os.getenv("STRATEGY_EXPLORATION_SIZE_SCALE", "0.30")),
+                # If winner is only marginally stronger than runner-up, prefer exploring
+                "close_strength_delta": float(os.getenv("STRATEGY_EXPLORATION_CLOSE_DELTA", "0.10")),
+            },
         },
         
         # Leverage Management Configuration
