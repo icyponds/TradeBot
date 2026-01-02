@@ -111,6 +111,16 @@ def load_config() -> Dict[str, Any]:
             
             # Global risk limit: max % of account that can be lost on any single trade
             "max_account_loss_per_trade": float(os.getenv("MAX_ACCOUNT_LOSS_PER_TRADE", "3.0")),  # 3% of account
+
+            # Multi-leg trade controls (used by funding-rate arbitrage: spot + perp)
+            "multi_leg": {
+                # If true, when we don't have enough *combined* USDC across spot + perp silos
+                # to fund both legs, scale the trade down to what is available.
+                "auto_scale_to_funds": os.getenv("MULTI_LEG_AUTO_SCALE_TO_FUNDS", "true").lower() == "true",
+                # If we would need to scale below this factor, skip the trade entirely.
+                # (Prevents dust trades and excessive slippage relative to size.)
+                "min_scale_factor": float(os.getenv("MULTI_LEG_MIN_SCALE_FACTOR", "0.10")),
+            },
         },
         
         # Risk Management Configuration
