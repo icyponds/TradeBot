@@ -162,6 +162,9 @@ def load_config() -> Dict[str, Any]:
                 "position_size_scale": float(os.getenv("STRATEGY_EXPLORATION_SIZE_SCALE", "0.30")),
                 # If winner is only marginally stronger than runner-up, prefer exploring
                 "close_strength_delta": float(os.getenv("STRATEGY_EXPLORATION_CLOSE_DELTA", "0.10")),
+                # Reserve some capital for exploration trades so we can always gather sample size
+                # (Normal trades size/check against available_capital * (1 - reserve_capital_pct))
+                "reserve_capital_pct": float(os.getenv("STRATEGY_EXPLORATION_RESERVE_PCT", "0.10")),
             },
         },
         
