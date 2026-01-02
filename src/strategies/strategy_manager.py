@@ -1829,21 +1829,59 @@ class StrategyManager:
                 # Determine opposite side
                 unwind_side = 'sell' if leg.side == 'long' else 'buy'
                 
-                self.logger.info(f"  Unwinding: {unwind_side} {leg.size} {leg.symbol}")
-                
-                result = self.market_api.execute_order(
-                    symbol=leg.symbol,
-                    side=unwind_side,
-                    size=leg.size,
-                    reduce_only=leg.market_type == 'perp',
-                    urgency="high",
-                    market_type=leg.market_type,
-                )
-                
-                if result and result.get('filled_size', 0) > 0:
-                    self.logger.info(f"    ✓ Unwound successfully")
+                remaining = float(leg.size or 0.0)
+                if remaining <= 0:
+                    continue
+
+                self.logger.info(f"  Unwinding: {unwind_side} {remaining} {leg.symbol} ({leg.market_type})")
+
+                # Escalation ladder:
+                # 1) Normal high-urgency unwind
+                # 2) Forced unwind with higher slippage + more attempts (market-style IOC walking)
+                # 3) Last-chance forced unwind with very high slippage cap
+                attempts = [
+                    {"urgency": "high"},
+                    {"urgency": "high", "max_slippage_bps": 500.0, "initial_slippage_bps": 50.0, "max_attempts_override": 6},
+                    {"urgency": "high", "max_slippage_bps": 1000.0, "initial_slippage_bps": 150.0, "max_attempts_override": 6},
+                ]
+
+                filled_total = 0.0
+                for idx, params in enumerate(attempts, start=1):
+                    if remaining <= 0:
+                        break
+
+                    result = self.market_api.execute_order(
+                        symbol=leg.symbol,
+                        side=unwind_side,
+                        size=remaining,
+                        reduce_only=leg.market_type in ("perp", "hip3"),
+                        urgency=params.get("urgency", "high"),
+                        market_type=leg.market_type,
+                        max_slippage_bps=params.get("max_slippage_bps"),
+                        initial_slippage_bps=params.get("initial_slippage_bps"),
+                        max_attempts_override=params.get("max_attempts_override"),
+                    )
+
+                    filled = float((result or {}).get("filled_size", 0) or 0.0)
+                    filled_total += filled
+                    remaining = max(0.0, remaining - filled)
+
+                    if filled > 0:
+                        self.logger.warning(
+                            f"    Unwind attempt {idx}/{len(attempts)} filled {filled:.6f} "
+                            f"(remaining {remaining:.6f})"
+                        )
+
+                # Treat "almost flat" as success to avoid infinite loops from rounding
+                if remaining <= max(1e-9, float(leg.size) * 0.001):
+                    self.logger.info("    ✓ Unwound successfully (position flattened)")
                 else:
-                    self.logger.error(f"    ✗ Failed to unwind - manual intervention required!")
+                    # This is the critical case: we tried progressively more aggressive IOC execution and still failed.
+                    # At this point, the bot cannot guarantee delta-neutrality and manual intervention may be required.
+                    self.logger.error(
+                        f"    ✗ FAILED TO UNWIND {leg.symbol} ({leg.market_type}). "
+                        f"Remaining size ~{remaining:.6f}. Manual intervention required."
+                    )
                     
             except Exception as e:
                 self.logger.error(f"    ✗ Error unwinding leg: {e}")
