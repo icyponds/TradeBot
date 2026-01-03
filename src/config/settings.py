@@ -191,7 +191,7 @@ def load_config() -> Dict[str, Any]:
         
         # Strategy Configuration
         "strategies": {
-            "enabled": os.getenv("ENABLED_STRATEGIES", "stat_arb,funding_rate_arbitrage,ou_mean_reversion,momentum_factor").split(","),
+            "enabled": os.getenv("ENABLED_STRATEGIES", "stat_arb,funding_rate_arbitrage,ou_mean_reversion,momentum_factor,moving_average,rsi,bollinger_band,supertrend,vwap").split(","),
             # Note: timeframe is now auto-selected per strategy (see each strategy class)
             "ohlcv_limit": int(os.getenv("OHLCV_LIMIT", "100")),
             "moving_average": {

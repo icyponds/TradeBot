@@ -22,6 +22,7 @@ from src.utils.performance_tracker import PerformanceTracker
 from src.utils.regime_hmm import RegimeAllocator
 from src.utils.change_point import PageHinkley
 from .strategy_selector import StrategySelector
+from .execution_engine import ExecutionEngine
 from src.models.trade import Trade, Position, MultiLegPosition, PositionLeg
 
 # Strategy imports - only used when enabled in config
@@ -42,12 +43,13 @@ STRATEGY_CLASSES = {
 class StrategyManager:
     """Manages and orchestrates trading strategies."""
     
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], market_api: Any = None):
         """
         Initialize the strategy manager.
         
         Args:
             config: Configuration dictionary
+            market_api: Optional injected market API (for testing)
         """
         self.config = config
         self.logger = logging.getLogger(__name__)
@@ -62,7 +64,7 @@ class StrategyManager:
         self.leverage_manager = LeverageManager(config, self.portfolio_manager)
         
         # Initialize market API
-        self.market_api = self._initialize_market_api()
+        self.market_api = market_api if market_api else self._initialize_market_api()
         
         # Initialize correlation manager
         self.correlation_manager = CorrelationManager(self.market_api, config)
@@ -97,13 +99,16 @@ class StrategyManager:
         # Calculate execution interval based on timeframe
         self.execution_interval = self._get_execution_interval()
         
-        # Trading state
-        self.positions = {}  # Single-leg positions: symbol -> Position
-        self.multi_leg_positions = {}  # Multi-leg positions: position_id -> MultiLegPosition
-        self.trades = []
-        self.total_trades = 0
-        self.total_pnl = 0.0
-        self.winning_trades = 0
+        # Initialize Execution Engine
+        self.execution_engine = ExecutionEngine(
+            self.config,
+            self.market_api,
+            self.leverage_manager,
+            self.portfolio_manager,
+            self.performance_tracker,
+            self.pair_selector
+        )
+        
         self.is_running = False
         
         self.logger.info(f"Initialized strategy manager with {len(self.strategies)} strategies")
@@ -136,6 +141,38 @@ class StrategyManager:
         self._entry_block_strategies = set()
 
         self._initialize_regime_and_changepoint()
+
+        # Cycle trackers for run_trading_cycle
+        self.last_position_sync = 0
+        self.last_position_monitoring = 0
+        self.last_performance_report = 0
+        self.total_positions_closed = 0
+        self.emergency_stops_triggered = 0
+        self.last_emergency_check = 0
+
+    @property
+    def positions(self):
+        return self.execution_engine.positions
+
+    @property
+    def multi_leg_positions(self):
+        return self.execution_engine.multi_leg_positions
+        
+    @property
+    def trades(self):
+        return self.execution_engine.trades
+        
+    @property
+    def total_trades(self):
+        return self.execution_engine.total_trades
+        
+    @property
+    def total_pnl(self):
+        return self.execution_engine.total_pnl
+        
+    @property
+    def winning_trades(self):
+        return self.execution_engine.winning_trades
 
     def _initialize_regime_and_changepoint(self) -> None:
         """Initialize optional regime allocator and change-point detector."""
@@ -278,112 +315,6 @@ class StrategyManager:
         # WebSocket keeps price data updated in real-time
         return 15
     
-    def _calculate_signal_strength(self, ohlcv: pd.DataFrame, strategy_name: str) -> float:
-        """
-        Calculate signal strength based on strategy and market data.
-        
-        Args:
-            ohlcv: OHLCV data
-            strategy_name: Name of the strategy
-            
-        Returns:
-            Signal strength (0-1)
-        """
-        try:
-            if strategy_name == 'moving_average':
-                # Calculate MA crossover strength
-                if len(ohlcv) < 10:
-                    return 0.5
-                
-                short_ma = ohlcv['close'].rolling(window=5).mean()
-                long_ma = ohlcv['close'].rolling(window=10).mean()
-                
-                if len(short_ma) < 2 or len(long_ma) < 2:
-                    return 0.5
-                
-                # Calculate crossover strength
-                if long_ma.iloc[-1] <= 0:
-                    return 0.5  # Fallback if long MA is invalid
-                ma_diff = abs(short_ma.iloc[-1] - long_ma.iloc[-1]) / long_ma.iloc[-1]
-                signal_strength = min(1.0, ma_diff * 10)  # Scale to 0-1
-                
-                return signal_strength
-                
-            elif strategy_name == 'rsi':
-                # Calculate RSI signal strength
-                if len(ohlcv) < 14:
-                    return 0.5
-                
-                # Simple RSI calculation
-                delta = ohlcv['close'].diff()
-                gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-                loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-                
-                # Handle division by zero in RSI calculation
-                if loss.iloc[-1] == 0:
-                    if gain.iloc[-1] > 0:
-                        current_rsi = 100.0  # All gains, no losses
-                    else:
-                        current_rsi = 50.0   # No gains, no losses (neutral)
-                else:
-                    rs = gain / loss
-                    rsi = 100 - (100 / (1 + rs))
-                    current_rsi = rsi.iloc[-1]
-                
-                # current_rsi is already calculated above
-                
-                # Calculate distance from neutral (50)
-                rsi_distance = abs(current_rsi - 50) / 50
-                signal_strength = min(1.0, rsi_distance * 2)  # Scale to 0-1
-                
-                return signal_strength
-                
-            elif strategy_name == 'bollinger_band':
-                # For BB Squeeze, signal strength is high if squeeze was tight
-                # We can approximate this by bandwidth
-                if len(ohlcv) < 20:
-                    return 0.5
-                    
-                sma = ohlcv['close'].rolling(window=20).mean()
-                std = ohlcv['close'].rolling(window=20).std()
-                upper = sma + (std * 2)
-                lower = sma - (std * 2)
-                
-                bandwidth = (upper - lower) / sma
-                # Lower bandwidth = tighter squeeze = stronger potential move
-                # Normalize: 0.05 bandwidth -> 1.0 strength, 0.2 bandwidth -> 0.0 strength
-                strength = max(0.0, min(1.0, 1.0 - (bandwidth.iloc[-1] * 5)))
-                return strength
-                
-            elif strategy_name == 'supertrend':
-                # For Supertrend, strength is based on distance from trend line
-                # Closer to trend line = better risk/reward = higher strength?
-                # Or further = stronger trend? Let's go with trend persistence
-                return 0.8 # Default high confidence for trend following
-                
-            elif strategy_name == 'vwap':
-                # For VWAP mean reversion, further from VWAP = stronger signal
-                if len(ohlcv) < 20:
-                    return 0.5
-                    
-                # Simplified VWAP distance
-                vwap = (ohlcv['close'] * ohlcv['volume']).cumsum() / ohlcv['volume'].cumsum()
-                dist_pct = abs(ohlcv['close'].iloc[-1] - vwap.iloc[-1]) / vwap.iloc[-1]
-                
-                # 2% deviation = 1.0 strength
-                return min(1.0, dist_pct * 50)
-                
-            elif strategy_name == 'stat_arb':
-                # Z-score is the strength
-                # We don't have easy access to z-score here without recalculating
-                return 0.8
-                
-            else:
-                return 0.5  # Default signal strength
-                
-        except Exception as e:
-            self.logger.error(f"Error calculating signal strength: {e}")
-            return 0.5
     
     def _calculate_market_volatility(self, ohlcv: pd.DataFrame) -> float:
         """
@@ -724,110 +655,119 @@ class StrategyManager:
         except Exception as e:
             self.logger.error(f"Error monitoring pending orders: {e}")
 
+    def run_trading_cycle(self) -> bool:
+        """
+        Run a single iteration of the trading logic.
+        
+        Returns:
+            bool: True if trading logic ran (pairs analyzed), False if skipped (no pairs)
+        """
+        try:
+            current_time = time.time()
+
+            # Update regime and change-point gating from market proxy (once per cycle)
+            self._maybe_update_regime_and_changepoint()
+            
+            # With WebSocket, positions are updated in real-time
+            # Only sync periodically to ensure accuracy
+            if current_time - self.last_position_sync >= self.position_sync_interval:
+                self.logger.debug(f"Syncing positions with exchange (local: {len(self.positions)})")
+                self.sync_positions_with_exchange()
+                self.last_position_sync = current_time
+            
+            # Check liquidation risks for multi-leg positions
+            self._check_liquidation_risks()
+            
+            # Continuous position monitoring and auto-closure
+            position_monitoring_interval = self.config['trading']['position_monitoring_interval']
+            emergency_portfolio_loss_pct = self.config.get('risk_management', {}).get('emergency_portfolio_loss_pct', 10.0)
+            
+            if current_time - self.last_position_monitoring >= position_monitoring_interval:
+                self.logger.debug(f"Running position monitoring check ({len(self.positions)} positions)")
+                self._monitor_and_close_positions(
+                    emergency_portfolio_loss_pct, 
+                    self.total_positions_closed, 
+                    self.emergency_stops_triggered, 
+                    self.last_emergency_check
+                )
+                self.last_position_monitoring = current_time
+            
+            # Validate position integrity (if enabled)
+            if self.enable_position_validation:
+                validation_results = self.validate_position_integrity()
+                if validation_results['total_issues'] > 0:
+                    self.logger.error(f"Position validation found {validation_results['total_issues']} critical issues")
+            
+            # Monitor any pending orders
+            self._monitor_pending_orders()
+            
+            # Clean up stale orders
+            self._cleanup_stale_orders()
+            
+            # Update correlations periodically
+            if self.correlation_manager.should_update():
+                # Get all potential symbols from pair selector or config
+                all_symbols = self.pair_selector.get_current_pairs()
+                if all_symbols:
+                    self.correlation_manager.update_correlations(all_symbols)
+            
+            # Get current trading pairs
+            trading_pairs = self.pair_selector.get_current_pairs()
+            
+            if not trading_pairs:
+                self.logger.warning("No trading pairs available")
+                return False
+            
+            self.logger.info(f"Analyzing {len(trading_pairs)} trading pairs")
+            
+            # Analyze each symbol (per-symbol strategies)
+            for symbol in trading_pairs:
+                # Check running flag inside loop to support clean shutdown
+                if not self.is_running:
+                    break
+                self._analyze_symbol(symbol)
+            
+            # Run cross-sectional strategies (portfolio-level)
+            self._run_portfolio_strategies(trading_pairs)
+            
+            # Update position prices and display PnL
+            self.update_position_prices()
+            self.display_positions_pnl()
+            
+            # Periodically update account balance (every 10 cycles)
+            if hasattr(self, '_balance_update_counter'):
+                self._balance_update_counter += 1
+            else:
+                self._balance_update_counter = 0
+            
+            if self._balance_update_counter >= 10:
+                self._update_account_balance_periodic()
+                self._balance_update_counter = 0
+            
+            # Periodic performance report (every hour)
+            performance_report_interval = 3600
+            if current_time - self.last_performance_report >= performance_report_interval:
+                self.log_performance_report()
+                self.last_performance_report = current_time
+                
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Error in trading cycle: {e}")
+            return False
+
     def _run_trading_loop(self):
         """Main trading loop."""
         self.logger.info("Starting trading loop...")
         
-        # Track last position sync time
-        last_position_sync = 0
-        last_position_monitoring = 0
-        last_performance_report = 0
-        
-        # Position monitoring configuration
-        position_monitoring_interval = self.config['trading']['position_monitoring_interval']
-        emergency_portfolio_loss_pct = self.config.get('risk_management', {}).get('emergency_portfolio_loss_pct', 10.0)
-        
-        # Performance reporting interval (every hour)
-        performance_report_interval = 3600
-        
-        # Statistics
-        total_positions_closed = 0
-        emergency_stops_triggered = 0
-        last_emergency_check = 0
-        
         while self.is_running:
             try:
-                current_time = time.time()
-
-                # Update regime and change-point gating from market proxy (once per cycle)
-                self._maybe_update_regime_and_changepoint()
-                
-                # With WebSocket, positions are updated in real-time
-                # Only sync periodically to ensure accuracy
-                if current_time - last_position_sync >= self.position_sync_interval:
-                    self.logger.debug(f"Syncing positions with exchange (local: {len(self.positions)})")
-                    self.sync_positions_with_exchange()
-                    last_position_sync = current_time
-                
-                # Check liquidation risks for multi-leg positions
-                self._check_liquidation_risks()
-                
-                # Continuous position monitoring and auto-closure
-                if current_time - last_position_monitoring >= position_monitoring_interval:
-                    self.logger.debug(f"Running position monitoring check ({len(self.positions)} positions)")
-                    self._monitor_and_close_positions(
-                        emergency_portfolio_loss_pct, total_positions_closed, emergency_stops_triggered, last_emergency_check
-                    )
-                    last_position_monitoring = current_time
-                
-                # Validate position integrity (if enabled)
-                if self.enable_position_validation:
-                    validation_results = self.validate_position_integrity()
-                    if validation_results['total_issues'] > 0:
-                        self.logger.error(f"Position validation found {validation_results['total_issues']} critical issues")
-                
-                # Monitor any pending orders
-                self._monitor_pending_orders()
-                
-                # Clean up stale orders
-                self._cleanup_stale_orders()
-                
-                # Update correlations periodically
-                if self.correlation_manager.should_update():
-                    # Get all potential symbols from pair selector or config
-                    all_symbols = self.pair_selector.get_current_pairs()
-                    if all_symbols:
-                        self.correlation_manager.update_correlations(all_symbols)
-                
-                # Get current trading pairs
-                trading_pairs = self.pair_selector.get_current_pairs()
-                
-                if not trading_pairs:
-                    self.logger.warning("No trading pairs available")
-                    time.sleep(self.execution_interval)
-                    continue
-                
-                self.logger.info(f"Analyzing {len(trading_pairs)} trading pairs")
-                
-                # Analyze each symbol (per-symbol strategies)
-                for symbol in trading_pairs:
-                    if not self.is_running:
-                        break
-                    self._analyze_symbol(symbol)
-                
-                # Run cross-sectional strategies (portfolio-level)
-                self._run_portfolio_strategies(trading_pairs)
-                
-                # Update position prices and display PnL
-                self.update_position_prices()
-                self.display_positions_pnl()
-                
-                # Periodically update account balance (every 10 cycles)
-                if hasattr(self, '_balance_update_counter'):
-                    self._balance_update_counter += 1
-                else:
-                    self._balance_update_counter = 0
-                
-                if self._balance_update_counter >= 10:
-                    self._update_account_balance_periodic()
-                    self._balance_update_counter = 0
-                
-                # Periodic performance report (every hour)
-                if current_time - last_performance_report >= performance_report_interval:
-                    self.log_performance_report()
-                    last_performance_report = current_time
+                # Run one cycle of trading logic
+                # This has been extracted to allow step-by-step execution in backtesting
+                self.run_trading_cycle()
                 
                 # Wait for next execution cycle
+                # We always sleep here to throttle the loop and mimic interval-based execution
                 time.sleep(self.execution_interval)
                 
             except KeyboardInterrupt:
@@ -1354,765 +1294,22 @@ class StrategyManager:
                 return position
         return None
     
-    def _handle_multi_leg_signal(
-        self, 
-        symbol: str, 
-        signal: Dict[str, Any], 
-        current_price: float,
-        strategy_name: str,
-        ohlcv: pd.DataFrame
-    ):
-        """Handle multi-leg signals (entry or exit)."""
-        action = signal.get('action')
-        
-        if action == 'enter':
-            # Check position limit and capital rotation before executing multi-leg entry
-            signal_strength = self._calculate_signal_strength(ohlcv, strategy_name)
-            if not self._should_execute_with_position_limit(symbol, signal, signal_strength):
-                self.logger.info(f"Multi-leg entry for {symbol} blocked by position limit check")
-                return
-            self._execute_multi_leg_entry(symbol, signal, current_price, strategy_name, ohlcv)
-        elif action == 'exit':
-            self._execute_multi_leg_exit(symbol, signal, strategy_name)
-        else:
-            self.logger.warning(f"Unknown multi-leg action: {action}")
-    
-    def _execute_multi_leg_entry(
-        self, 
-        symbol: str, 
-        signal: Dict[str, Any],
-        current_price: float,
-        strategy_name: str,
-        ohlcv: pd.DataFrame
-    ):
-        """Execute a multi-leg position entry with atomic rollback on failure."""
-        try:
-            # Check if we already have a multi-leg position for this symbol
-            if self._get_multi_leg_position_for_symbol(symbol):
-                self.logger.info(f"Already have multi-leg position for {symbol}, skipping")
-                return
-            
-            # Calculate position sizing
-            signal_strength = self._calculate_signal_strength(ohlcv, strategy_name)
-            market_volatility = self._calculate_market_volatility(ohlcv)
-            available_capital = self.portfolio_manager.calculate_available_capital_for_trading()
-            # Keep a reserve for exploration trades by sizing normal trades using reduced available capital
-            exploration_cfg = (self.config.get("risk_management", {}) or {}).get("strategy_exploration", {}) or {}
-            reserve_pct = float(exploration_cfg.get("reserve_capital_pct", 0.10) or 0.0)
-            is_exploration = bool(signal.get("_exploration"))
-            reserved_amount = max(0.0, float(available_capital) * reserve_pct)
-            available_capital_for_trade = float(available_capital)
-            if (not is_exploration) and reserve_pct > 0:
-                available_capital_for_trade = max(0.0, float(available_capital) - reserved_amount)
-            
-            position_size, margin_required, leverage = self.leverage_manager.calculate_leveraged_position_size(
-                symbol, current_price, available_capital_for_trade, strategy_name, signal_strength, market_volatility
-            )
-            
-            if position_size <= 0 or margin_required <= 0:
-                self.logger.warning(f"Invalid position size for multi-leg entry: {symbol}")
-                return
-            
-            # Check if we can open the position
-            if not self.leverage_manager.can_open_position(symbol, margin_required, available_capital_for_trade):
-                self.logger.info(f"Cannot open multi-leg position for {symbol}: insufficient margin")
-                return
-            
-            # Calculate notional value for delta-neutral hedging
-            # Use perp price as reference, but each leg will calculate its own size
-            notional_value = position_size * current_price
-            
-            self.logger.info(f"Executing multi-leg entry for {symbol}: {len(signal['legs'])} legs, notional=${notional_value:.2f}")
-            
-            # =========================================================================
-            # FUND ALLOCATION: Ensure funds are in the correct accounts
-            # Hyperliquid has separate spot and perp accounts that require transfers
-            # =========================================================================
-            legs = signal.get('legs', [])
-            
-            # Calculate required funds for each account type
-            perp_required = 0.0
-            spot_required = 0.0
-            
-            for leg_spec in legs:
-                leg_market_type = leg_spec['market_type']
-                leg_symbol = leg_spec['symbol']
-                leg_price = self._get_leg_price(leg_symbol, leg_market_type)
-                
-                if not leg_price or leg_price <= 0:
-                    self.logger.error(f"Cannot get price for leg {leg_symbol} ({leg_market_type}) during fund allocation")
-                    return
-                
-                leg_notional = notional_value  # Each leg gets full notional for delta-neutral
-                
-                if leg_market_type in ('perp', 'hip3'):
-                    # Perp requires margin (notional / leverage)
-                    perp_required += margin_required / len([l for l in legs if l['market_type'] in ('perp', 'hip3')])
-                elif leg_market_type == 'spot':
-                    # Spot requires full notional (buying the asset)
-                    spot_required += leg_notional
-            
-            # Add buffer for slippage and fees (2%)
-            perp_required *= 1.02
-            spot_required *= 1.02
-            
-            self.logger.info(f"Fund allocation: perp=${perp_required:.2f}, spot=${spot_required:.2f}")
-
-            # If combined USDC (spot + perp withdrawable) is insufficient, scale down the trade to fit.
-            try:
-                ml_cfg = (self.config.get("trading", {}) or {}).get("multi_leg", {}) or {}
-                if ml_cfg.get("auto_scale_to_funds", True):
-                    total_required = float(perp_required) + float(spot_required)
-                    if total_required > 0:
-                        spot_usdc = float(self.market_api.get_spot_balance("USDC") or 0.0)
-                        perp_withdrawable = float((self.market_api.get_perp_balance() or {}).get("withdrawable", 0.0) or 0.0)
-                        total_available = max(0.0, spot_usdc) + max(0.0, perp_withdrawable)
-
-                        if total_available + 1e-6 < total_required:
-                            scale = total_available / total_required if total_required > 0 else 0.0
-                            min_scale = float(ml_cfg.get("min_scale_factor", 0.10) or 0.0)
-
-                            if scale < min_scale:
-                                self.logger.warning(
-                                    f"Multi-leg entry for {symbol} blocked: insufficient combined USDC. "
-                                    f"required=${total_required:.2f}, available=${total_available:.2f}, "
-                                    f"scale={scale:.3f} < min_scale={min_scale:.2f}"
-                                )
-                                return
-
-                            self.logger.warning(
-                                f"Scaling multi-leg entry for {symbol} to available funds: "
-                                f"required=${total_required:.2f}, available=${total_available:.2f}, scale={scale:.3f}"
-                            )
-
-                            # All sizing components are linear in notional -> scale proportionally.
-                            position_size = float(position_size) * scale
-                            margin_required = float(margin_required) * scale
-                            notional_value = float(notional_value) * scale
-                            perp_required = float(perp_required) * scale
-                            spot_required = float(spot_required) * scale
-            except Exception as e:
-                self.logger.debug(f"Multi-leg auto-scale-to-funds failed (continuing without scaling): {e}")
-            
-            # Ensure perp account has funds
-            if perp_required > 0:
-                if not self.market_api.ensure_perp_funds(perp_required):
-                    self.logger.error(f"Cannot allocate ${perp_required:.2f} to perp account")
-                    return
-            
-            # Ensure spot account has funds
-            if spot_required > 0:
-                if not self.market_api.ensure_spot_funds(spot_required):
-                    self.logger.error(f"Cannot allocate ${spot_required:.2f} to spot account")
-                    return
-            
-            self.logger.info("Fund allocation complete, executing legs...")
-            
-            # Execute legs atomically
-            executed_legs: List[PositionLeg] = []
-            is_atomic = signal.get('atomic', True)
-            
-            for i, leg_spec in enumerate(legs):
-                leg_symbol = leg_spec['symbol']
-                leg_market_type = leg_spec['market_type']
-                leg_order_side = leg_spec['order_side']
-                leg_reduce_only = leg_spec.get('reduce_only', False)
-                
-                # Calculate leg-specific size based on notional value and leg's price
-                # This ensures delta-neutrality even with price/decimal differences
-                leg_price = self._get_leg_price(leg_symbol, leg_market_type)
-                if not leg_price or leg_price <= 0:
-                    self.logger.error(f"Cannot get price for leg {leg_symbol} ({leg_market_type})")
-                    if is_atomic and executed_legs:
-                        self._unwind_executed_legs(executed_legs)
-                    return
-                
-                leg_size = notional_value / leg_price
-                
-                self.logger.info(f"  Leg {i+1}/{len(legs)}: {leg_order_side} {leg_size:.6f} {leg_symbol} @ ${leg_price:.6f} ({leg_market_type})")
-                
-                # Execute the leg - execute_order will round to appropriate szDecimals
-                result = self.market_api.execute_order(
-                    symbol=leg_symbol,
-                    side=leg_order_side,
-                    size=leg_size,
-                    reduce_only=leg_reduce_only,
-                    urgency="normal",
-                    market_type=leg_market_type,
-                )
-                
-                if result and result.get('filled_size', 0) > 0:
-                    # Leg executed successfully
-                    executed_legs.append(PositionLeg(
-                        symbol=leg_symbol,
-                        market_type=leg_market_type,
-                        side=leg_spec['side'],
-                        size=result['filled_size'],
-                        entry_price=result['avg_fill_price'],
-                        order_id=result.get('order_id'),
-                    ))
-                    self.logger.info(f"    ✓ Filled: {result['filled_size']:.6f} @ {result['avg_fill_price']:.6f}")
-                else:
-                    # Leg failed
-                    self.logger.error(f"    ✗ Failed to execute leg: {leg_symbol}")
-                    
-                    if is_atomic and executed_legs:
-                        # Unwind previously executed legs
-                        self._unwind_executed_legs(executed_legs)
-                    return
-            
-            # All legs executed successfully - create multi-leg position
-            position_id = f"{strategy_name}_{symbol}_{int(datetime.now().timestamp() * 1000)}"
-            
-            multi_leg_position = MultiLegPosition(
-                position_id=position_id,
-                strategy=strategy_name,
-                entry_time=datetime.now(),
-                legs=executed_legs,
-                capital_at_risk=margin_required,
-                metadata=signal.get('metadata', {}),
-            )
-            
-            self.multi_leg_positions[position_id] = multi_leg_position
-            
-            # Record in leverage manager
-            self.leverage_manager.record_position(
-                symbol, 'multi_leg', position_size, current_price, leverage, margin_required
-            )
-            
-            # Save positions
-            self.save_positions_to_file()
-            
-            self.logger.info(f"✅ Multi-leg position opened: {position_id}")
-            self.logger.info(f"   Net delta: {multi_leg_position.net_delta:.6f}")
-            self.logger.info(f"   Total notional: ${multi_leg_position.total_notional:.2f}")
-            
-        except Exception as e:
-            self.logger.error(f"Error executing multi-leg entry for {symbol}: {e}")
-            import traceback
-            self.logger.error(traceback.format_exc())
-    
-    def _execute_multi_leg_exit(self, symbol: str, signal: Dict[str, Any], strategy_name: str):
-        """Execute a multi-leg position exit."""
-        try:
-            # Find the position to close
-            position = self._get_multi_leg_position_for_symbol(symbol)
-            if not position:
-                self.logger.warning(f"No multi-leg position found for {symbol}")
-                return
-            
-            self.logger.info(f"Executing multi-leg exit for {symbol}: {len(position.legs)} legs")
-            
-            urgency = signal.get('urgency', 'normal')
-            legs_spec = signal.get('legs', [])
-            
-            # Close each leg
-            exit_results = []
-            for i, leg in enumerate(position.legs):
-                # Find corresponding spec or derive from position
-                order_side = 'sell' if leg.side == 'long' else 'buy'
-                reduce_only = leg.market_type == 'perp'
-                
-                # Check if there's a spec override
-                for spec in legs_spec:
-                    if spec.get('market_type') == leg.market_type:
-                        order_side = spec.get('order_side', order_side)
-                        reduce_only = spec.get('reduce_only', reduce_only)
-                        break
-                
-                self.logger.info(f"  Closing leg {i+1}/{len(position.legs)}: {order_side} {leg.size} {leg.symbol}")
-                
-                result = self.market_api.execute_order(
-                    symbol=leg.symbol,
-                    side=order_side,
-                    size=leg.size,
-                    reduce_only=reduce_only,
-                    urgency=urgency,
-                    market_type=leg.market_type,
-                )
-                
-                if result and result.get('filled_size', 0) > 0:
-                    exit_results.append({
-                        'leg': leg,
-                        'exit_price': result['avg_fill_price'],
-                        'filled_size': result['filled_size'],
-                    })
-                    self.logger.info(f"    ✓ Closed: {result['filled_size']:.6f} @ {result['avg_fill_price']:.6f}")
-                else:
-                    self.logger.error(f"    ✗ Failed to close leg: {leg.symbol}")
-            
-            # Calculate P&L
-            total_pnl = 0.0
-            for result in exit_results:
-                leg = result['leg']
-                exit_price = result['exit_price']
-                price_diff = exit_price - leg.entry_price
-                if leg.side == 'short':
-                    price_diff = -price_diff
-                leg_pnl = price_diff * leg.size
-                total_pnl += leg_pnl
-
-            exit_time = datetime.now()
-
-            # For funding rate arbitrage we store realized PnL as funding payments only (delta-neutral)
-            # and represent side as 'delta_neutral' in the DB.
-            pnl_to_record = total_pnl
-            trade_side = "multi_leg"
-            if strategy_name == "funding_rate_arbitrage":
-                pnl_to_record = self._estimate_funding_arb_realized_pnl(position, exit_time)
-                trade_side = "delta_neutral"
-
-            # Record trade in performance tracker
-            self.performance_tracker.record_trade_from_position(
-                symbol=position.primary_symbol,
-                strategy=strategy_name,
-                side=trade_side,
-                entry_price=sum(leg.entry_price * leg.size for leg in position.legs) / position.total_notional if position.total_notional > 0 else 0,
-                exit_price=sum(r['exit_price'] * r['filled_size'] for r in exit_results) / sum(r['filled_size'] for r in exit_results) if exit_results else 0,
-                size=sum(r['filled_size'] for r in exit_results),
-                entry_time=position.entry_time,
-                exit_time=exit_time,
-                capital_at_risk=position.capital_at_risk or 0,
-                exit_reason=signal.get('reason', 'signal'),
-                pnl_override=pnl_to_record,
-            )
-
-            # Feed trade result into selector rolling stats (supports rolling Sharpe, etc.)
-            try:
-                cap = position.capital_at_risk or 0
-                ret = (float(pnl_to_record) / float(cap)) if cap else 0.0
-                self.strategy_selector.record_trade_result(strategy_name, ret, exit_time)
-            except Exception as e:
-                self.logger.debug(f"Failed to record multi-leg trade result for selector: {e}")
-            
-            # Close position in leverage manager
-            self.leverage_manager.close_position(position.primary_symbol, 0)  # Price not needed for tracking
-            
-            # Remove from active positions
-            del self.multi_leg_positions[position.position_id]
-            
-            # Update stats
-            self.total_pnl += pnl_to_record
-            self.total_trades += 1
-            if pnl_to_record > 0:
-                self.winning_trades += 1
-            
-            # Update pair selector performance
-            self.pair_selector.update_pair_performance(position.primary_symbol, pnl_to_record)
-            
-            # Save positions
-            self.save_positions_to_file()
-            
-            self.logger.info(f"✅ Multi-leg position closed: {position.position_id}")
-            self.logger.info(f"   P&L: ${pnl_to_record:.2f}")
-            
-        except Exception as e:
-            self.logger.error(f"Error executing multi-leg exit for {symbol}: {e}")
-            import traceback
-            self.logger.error(traceback.format_exc())
+    def _handle_multi_leg_signal(self, symbol: str, signal: Dict[str, Any], current_price: float, 
+                                strategy_name: str, ohlcv: pd.DataFrame):
+        """Handle multi-leg trade signal."""
+        self.execution_engine.handle_multi_leg_signal(
+            symbol, signal, current_price, strategy_name, ohlcv, 
+            self.strategies[strategy_name].calculate_signal_strength
+        )
     
     def _get_leg_price(self, symbol: str, market_type: str) -> Optional[float]:
-        """Get current price for a leg based on market type."""
-        try:
-            if market_type == 'perp' or market_type == 'hip3':
-                return self.market_api.get_current_price(symbol)
-            elif market_type == 'spot':
-                # For spot, extract base token from symbol (e.g., "BTC/USDC" -> "BTC")
-                if '/' in symbol:
-                    base_token = symbol.split('/')[0]
-                else:
-                    base_token = symbol
-                
-                # Get the spot token name from mapping (e.g., "BTC" -> "UBTC")
-                spot_token = self.market_api.get_spot_token_for_perp(base_token)
-                if spot_token:
-                    return self.market_api.get_spot_price(spot_token, 'USDC')
-                else:
-                    self.logger.warning(f"No spot token mapping for {base_token}")
-                    return None
-            else:
-                self.logger.error(f"Unknown market type: {market_type}")
-                return None
-        except Exception as e:
-            self.logger.error(f"Error getting price for {symbol} ({market_type}): {e}")
-            return None
+        """Delegate leg price fetching to execution engine."""
+        return self.execution_engine.get_leg_price(symbol, market_type)
 
-    def _estimate_funding_arb_realized_pnl(self, position: MultiLegPosition, exit_time: datetime) -> float:
-        """
-        Estimate realized PnL for funding-rate arbitrage as funding payments only.
-
-        We intentionally do NOT use price PnL (basis/hedge drift) for this strategy's realized PnL.
-        This is an estimate based on sampled funding rates over the holding period.
-        """
-        try:
-            perp_leg = position.get_leg("perp")
-            if not perp_leg:
-                return 0.0
-
-            perp_side = (position.metadata or {}).get("perp_side", perp_leg.side)
-            # side_sign: long=+1, short=-1
-            side_sign = 1.0 if perp_side == "long" else -1.0
-
-            # Approximate perp notional for funding calculation.
-            # Funding is applied on notional; we approximate using entry notional.
-            notional = float(perp_leg.entry_price) * float(perp_leg.size)
-            if notional <= 0:
-                return 0.0
-
-            start_time = position.entry_time
-            end_time = exit_time
-            if end_time <= start_time:
-                return 0.0
-
-            # Use cached funding rates from the strategy (sampled during runtime).
-            series = []
-            strat = self.strategies.get(position.strategy)
-            if strat is not None and hasattr(strat, "funding_rate_cache"):
-                cache = getattr(strat, "funding_rate_cache", {}) or {}
-                raw = list(cache.get(position.primary_symbol, []))
-                # raw items are (datetime, rate)
-                series = [(ts, float(rate)) for ts, rate in raw if ts and rate is not None]
-                series.sort(key=lambda x: x[0])
-
-            # Fallback if we have no samples
-            if not series:
-                rate = None
-                try:
-                    rate = self.market_api.get_funding_rate(position.primary_symbol)
-                except Exception:
-                    rate = None
-                if rate is None:
-                    rate = (position.metadata or {}).get("entry_funding_rate", 0.0) or 0.0
-
-                hours = (end_time - start_time).total_seconds() / 3600.0
-                # Funding PnL sign convention:
-                # pnl = -funding_rate * notional * side_sign * hours
-                return float(-float(rate) * notional * side_sign * hours)
-
-            # Build stepwise integral over [start_time, end_time]
-            # Use the last known rate as piecewise-constant until the next sample.
-            pnl_rate_integral = 0.0  # sum(rate * dt_hours)
-
-            # Find initial rate at start_time
-            last_rate = series[0][1]
-            for ts, rate in series:
-                if ts <= start_time:
-                    last_rate = rate
-                else:
-                    break
-
-            last_ts = start_time
-            for ts, rate in series:
-                if ts <= start_time:
-                    continue
-                if ts >= end_time:
-                    break
-                dt_hours = (ts - last_ts).total_seconds() / 3600.0
-                if dt_hours > 0:
-                    pnl_rate_integral += last_rate * dt_hours
-                last_ts = ts
-                last_rate = rate
-
-            # Tail interval to end_time
-            dt_hours = (end_time - last_ts).total_seconds() / 3600.0
-            if dt_hours > 0:
-                pnl_rate_integral += last_rate * dt_hours
-
-            return float(-pnl_rate_integral * notional * side_sign)
-        except Exception as e:
-            self.logger.debug(f"Failed to estimate funding arb pnl: {e}")
-            return 0.0
-    
-    def _unwind_executed_legs(self, executed_legs: List[PositionLeg]):
-        """Unwind executed legs on failure (atomic rollback)."""
-        self.logger.warning(f"Unwinding {len(executed_legs)} executed legs due to failure")
-        
-        for leg in executed_legs:
-            try:
-                # Determine opposite side
-                unwind_side = 'sell' if leg.side == 'long' else 'buy'
-                
-                remaining = float(leg.size or 0.0)
-                if remaining <= 0:
-                    continue
-
-                self.logger.info(f"  Unwinding: {unwind_side} {remaining} {leg.symbol} ({leg.market_type})")
-
-                # Escalation ladder:
-                # 1) Normal high-urgency unwind
-                # 2) Forced unwind with higher slippage + more attempts (market-style IOC walking)
-                # 3) Last-chance forced unwind with very high slippage cap
-                attempts = [
-                    {"urgency": "high"},
-                    {"urgency": "high", "max_slippage_bps": 500.0, "initial_slippage_bps": 50.0, "max_attempts_override": 6},
-                    {"urgency": "high", "max_slippage_bps": 1000.0, "initial_slippage_bps": 150.0, "max_attempts_override": 6},
-                ]
-
-                filled_total = 0.0
-                for idx, params in enumerate(attempts, start=1):
-                    if remaining <= 0:
-                        break
-
-                    result = self.market_api.execute_order(
-                        symbol=leg.symbol,
-                        side=unwind_side,
-                        size=remaining,
-                        reduce_only=leg.market_type in ("perp", "hip3"),
-                        urgency=params.get("urgency", "high"),
-                        market_type=leg.market_type,
-                        max_slippage_bps=params.get("max_slippage_bps"),
-                        initial_slippage_bps=params.get("initial_slippage_bps"),
-                        max_attempts_override=params.get("max_attempts_override"),
-                    )
-
-                    filled = float((result or {}).get("filled_size", 0) or 0.0)
-                    filled_total += filled
-                    remaining = max(0.0, remaining - filled)
-
-                    if filled > 0:
-                        self.logger.warning(
-                            f"    Unwind attempt {idx}/{len(attempts)} filled {filled:.6f} "
-                            f"(remaining {remaining:.6f})"
-                        )
-
-                # Treat "almost flat" as success to avoid infinite loops from rounding
-                if remaining <= max(1e-9, float(leg.size) * 0.001):
-                    self.logger.info("    ✓ Unwound successfully (position flattened)")
-                else:
-                    # This is the critical case: we tried progressively more aggressive IOC execution and still failed.
-                    # At this point, the bot cannot guarantee delta-neutrality and manual intervention may be required.
-                    self.logger.error(
-                        f"    ✗ FAILED TO UNWIND {leg.symbol} ({leg.market_type}). "
-                        f"Remaining size ~{remaining:.6f}. Manual intervention required."
-                    )
-                    
-            except Exception as e:
-                self.logger.error(f"    ✗ Error unwinding leg: {e}")
-    
-    # =========================================================================
-    # LIQUIDATION RISK MONITORING
-    # =========================================================================
-    
     def _check_liquidation_risks(self):
-        """
-        Check all multi-leg positions for liquidation risk.
-        
-        For funding rate arbitrage and similar strategies, if the perp position
-        approaches liquidation, we need to either:
-        1. Add more collateral to the perp
-        2. Reduce position size on both legs (maintain delta-neutral)
-        3. Emergency close the entire position
-        """
-        if not self.multi_leg_positions:
-            return
-        
-        # Get liquidation risk threshold from config
-        liquidation_threshold = self.config['risk_management'].get('liquidation_risk_threshold', 80)
-        # Convert to percentage distance (e.g., 80% -> 20% distance warning)
-        distance_threshold = 100 - liquidation_threshold
-        
-        for position_id, position in list(self.multi_leg_positions.items()):
-            try:
-                # Find perp legs to check liquidation
-                for leg in position.legs:
-                    if leg.market_type in ('perp', 'hip3'):
-                        risk_info = self.market_api.check_liquidation_risk(
-                            leg.symbol, 
-                            threshold_pct=distance_threshold
-                        )
-                        
-                        if risk_info.get('at_risk'):
-                            self._handle_liquidation_risk(position, leg, risk_info)
-                            
-            except Exception as e:
-                self.logger.error(f"Error checking liquidation risk for {position_id}: {e}")
-    
-    def _handle_liquidation_risk(
-        self, 
-        position: MultiLegPosition, 
-        at_risk_leg: PositionLeg,
-        risk_info: Dict[str, Any]
-    ):
-        """
-        Handle a delta-neutral position at liquidation risk.
-        
-        For funding rate arbitrage and similar delta-neutral strategies:
-        - DO NOT close the position (defeats the purpose of the arb)
-        - Instead: Sell spot → Transfer USDC to perp → Add as collateral
-        - This maintains delta-neutrality while securing the perp position
-        
-        Strategy:
-        1. Try to add margin from existing perp withdrawable balance
-        2. If insufficient, transfer USDC from spot account to perp
-        3. If still insufficient, SELL some spot, transfer proceeds to perp as collateral
-           (This reduces position size proportionally on both legs, maintaining delta-neutral)
-        4. Keep repeating step 3 until position is safe (never fully close the arb)
-        """
-        symbol = at_risk_leg.symbol
-        distance_pct = risk_info.get('distance_to_liquidation_pct', 0)
-        margin_info = risk_info.get('margin_info', {})
-        current_price = risk_info.get('current_price', at_risk_leg.entry_price)
-        
-        self.logger.warning(f"⚠️ LIQUIDATION RISK: {symbol} is {distance_pct:.1f}% from liquidation!")
-        self.logger.warning(f"   Position: {at_risk_leg.side} {at_risk_leg.size} @ {at_risk_leg.entry_price:.4f}")
-        self.logger.warning(f"   Current: ${current_price:.4f}, Liquidation: ${risk_info.get('liquidation_price', 0):.4f}")
-        
-        # Calculate how much margin we need to add to be safe (aim for 30% distance)
-        target_distance_pct = 30.0
-        if distance_pct >= target_distance_pct:
-            return
-        
-        # Estimate margin needed to reach target distance
-        # Rough formula: margin_needed ≈ position_value * (target_distance - current_distance) / leverage
-        position_value = abs(at_risk_leg.size * current_price)
-        current_margin = margin_info.get('margin_used', 0)
-        leverage = margin_info.get('leverage_value', 1)
-        
-        # Calculate margin shortfall
-        margin_ratio_needed = target_distance_pct / 100
-        margin_to_add = max(current_margin * 0.5, position_value * 0.1)  # At least 10% of position value
-        
-        self.logger.info(f"   Need to add ~${margin_to_add:.2f} margin to reach {target_distance_pct}% buffer")
-        
-        # Strategy 1: Try to add margin from existing perp withdrawable balance
-        perp_balance = self.market_api.get_perp_balance()
-        withdrawable = perp_balance.get('withdrawable', 0)
-        
-        if withdrawable >= margin_to_add:
-            self.logger.info(f"   Adding ${margin_to_add:.2f} margin from perp withdrawable (${withdrawable:.2f} available)")
-            if self.market_api.add_position_margin(symbol, margin_to_add):
-                self.logger.info(f"   ✓ Margin added successfully")
-                return
-        elif withdrawable > 0:
-            # Add what we can from withdrawable
-            self.logger.info(f"   Adding available ${withdrawable:.2f} from perp withdrawable")
-            if self.market_api.add_position_margin(symbol, withdrawable):
-                margin_to_add -= withdrawable
-                self.logger.info(f"   ✓ Added ${withdrawable:.2f}, still need ${margin_to_add:.2f}")
-        
-        # Strategy 2: Transfer existing USDC from spot account to perp
-        spot_usdc = self.market_api.get_spot_balance('USDC')
-        
-        if spot_usdc >= margin_to_add:
-            self.logger.info(f"   Transferring ${margin_to_add:.2f} USDC from spot to perp")
-            if self.market_api.transfer_usd_to_perp(margin_to_add):
-                if self.market_api.add_position_margin(symbol, margin_to_add):
-                    self.logger.info(f"   ✓ Transferred and added margin successfully")
-                    return
-        elif spot_usdc > 10:  # At least $10 to transfer
-            self.logger.info(f"   Transferring available ${spot_usdc:.2f} USDC from spot")
-            if self.market_api.transfer_usd_to_perp(spot_usdc):
-                if self.market_api.add_position_margin(symbol, spot_usdc):
-                    margin_to_add -= spot_usdc
-                    self.logger.info(f"   ✓ Transferred ${spot_usdc:.2f}, still need ${margin_to_add:.2f}")
-        
-        # Strategy 3: SELL SPOT to raise USDC, transfer to perp as collateral
-        # This is the key for delta-neutral: sell spot, use proceeds for perp margin
-        # Both sides reduce proportionally, maintaining delta-neutrality
-        
-        if margin_to_add > 0:
-            self.logger.warning(f"   Selling spot to raise ${margin_to_add:.2f} for perp collateral")
-            
-            # Find the spot leg
-            spot_leg = None
-            for leg in position.legs:
-                if leg.market_type == 'spot':
-                    spot_leg = leg
-                    break
-            
-            if not spot_leg:
-                self.logger.error(f"   No spot leg found in position - cannot raise collateral!")
-                return
-            
-            # Calculate how much spot to sell
-            spot_price = self._get_leg_price(spot_leg.symbol, 'spot')
-            if not spot_price or spot_price <= 0:
-                self.logger.error(f"   Cannot get spot price for {spot_leg.symbol}")
-                return
-            
-            # Add 5% buffer for slippage
-            amount_to_sell = (margin_to_add * 1.05) / spot_price
-            
-            # Don't sell more than we have
-            max_sell = spot_leg.size * 0.8  # Keep at least 20% to maintain some hedge
-            amount_to_sell = min(amount_to_sell, max_sell)
-            
-            if amount_to_sell <= 0:
-                self.logger.error(f"   Cannot sell any more spot (would eliminate hedge)")
-                return
-            
-            self.logger.info(f"   Selling {amount_to_sell:.6f} {spot_leg.symbol} @ ~${spot_price:.4f}")
-            
-            # Execute spot sale
-            result = self.market_api.execute_order(
-                symbol=spot_leg.symbol,
-                side='sell',
-                size=amount_to_sell,
-                reduce_only=False,
-                urgency="high",
-                market_type='spot',
-            )
-            
-            if result and result.get('filled_size', 0) > 0:
-                filled_size = result['filled_size']
-                fill_price = result.get('avg_fill_price', spot_price)
-                usdc_raised = filled_size * fill_price
-                
-                self.logger.info(f"   ✓ Sold {filled_size:.6f} spot for ${usdc_raised:.2f}")
-                
-                # Update spot leg size
-                spot_leg.size -= filled_size
-                
-                # Now also reduce perp position proportionally to maintain delta-neutral
-                perp_leg = at_risk_leg
-                perp_reduction = filled_size * (spot_price / current_price)  # Adjust for price difference
-                
-                self.logger.info(f"   Reducing perp by {perp_reduction:.6f} to maintain delta-neutral")
-                
-                perp_result = self.market_api.execute_order(
-                    symbol=perp_leg.symbol,
-                    side='buy' if perp_leg.side == 'short' else 'sell',
-                    size=perp_reduction,
-                    reduce_only=True,
-                    urgency="high",
-                    market_type=perp_leg.market_type,
-                )
-                
-                if perp_result and perp_result.get('filled_size', 0) > 0:
-                    perp_leg.size -= perp_result['filled_size']
-                    self.logger.info(f"   ✓ Perp reduced to {perp_leg.size:.6f}")
-                
-                # Transfer the raised USDC to perp
-                # Note: The USDC from spot sale should already be in spot account
-                time.sleep(0.5)  # Brief delay for settlement
-                
-                transfer_amount = min(usdc_raised * 0.95, margin_to_add)  # 95% to account for fees
-                self.logger.info(f"   Transferring ${transfer_amount:.2f} to perp account")
-                
-                if self.market_api.transfer_usd_to_perp(transfer_amount):
-                    if self.market_api.add_position_margin(symbol, transfer_amount):
-                        self.logger.info(f"   ✓ Successfully added ${transfer_amount:.2f} as perp collateral")
-                    else:
-                        self.logger.warning(f"   Transferred but failed to add margin - funds in perp account")
-                else:
-                    self.logger.warning(f"   Failed to transfer - USDC remains in spot account")
-                
-                # Save updated positions
-                self.save_positions_to_file()
-                
-                self.logger.info(f"   Position rebalanced: maintained delta-neutral while increasing collateral")
-                self.logger.info(f"   New spot size: {spot_leg.size:.6f}, New perp size: {perp_leg.size:.6f}")
-                
-            else:
-                self.logger.error(f"   ✗ Failed to sell spot - manual intervention may be required!")
-        
-        # Final check - if still critical after all attempts, log severe warning
-        # But DO NOT close the position - that would realize the loss
-        updated_risk = self.market_api.check_liquidation_risk(symbol, threshold_pct=5.0)
-        if updated_risk.get('at_risk'):
-            self.logger.error(f"   ⚠️ STILL AT RISK after rebalancing - monitor closely!")
-            self.logger.error(f"   Distance to liquidation: {updated_risk.get('distance_to_liquidation_pct', 0):.1f}%")
-    
+        """Delegate liquidation risk check to execution engine."""
+        self.execution_engine.check_liquidation_risks(self.strategies)
+
     def _should_execute_signal(self, symbol: str, signal: Dict[str, Any], current_price: float, 
                               ohlcv: pd.DataFrame, strategy_name: str) -> bool:
         """Determine if we should execute a trading signal."""
@@ -2127,7 +1324,7 @@ class StrategyManager:
                 return False
         
         # Calculate signal strength and volatility
-        signal_strength = self._calculate_signal_strength(ohlcv, strategy_name)
+        signal_strength = self.strategies[strategy_name].calculate_signal_strength(ohlcv)
         market_volatility = self._calculate_market_volatility(ohlcv)
         
         # Check position limit before proceeding
@@ -2175,357 +1372,13 @@ class StrategyManager:
     
     def _execute_trade(self, symbol: str, signal: Dict[str, Any], current_price: float, strategy_name: str, ohlcv: pd.DataFrame):
         """Execute a trade based on signal."""
-        try:
-            # Determine trade side
-            if signal['signal'] == 'buy':
-                side = 'buy'
-                position_side = 'long'
-            elif signal['signal'] == 'sell':
-                side = 'sell'
-                position_side = 'short'
-            else:
-                return
-            
-            # Get leverage and position details
-            position_size = signal['size']
-            leverage = signal['leverage']
-            margin_required = signal['margin_required']
-            signal_strength = signal['signal_strength']
-            market_volatility = signal['market_volatility']
-            
-            # === STOP LOSS CALCULATION ===
-            # Three stop loss approaches, use the most conservative:
-            # 1. Strategy-specific stop loss
-            # 2. 3% max account loss (global safety net)
-            # 3. Leverage-based stop loss
-            
-            strategy = self.strategies[strategy_name]
-            
-            # Build signal context for strategy-specific calculations
-            signal_context = {
-                'z_score': signal.get('z_score'),
-                'sigma': signal.get('sigma'),
-                'mu': signal.get('mu'),
-                'market_volatility': market_volatility,
-                'signal_strength': signal_strength,
-            }
-            
-            # 1. Strategy-specific stop loss (strategies expect 'buy'/'sell')
-            strategy_stop_loss = strategy.calculate_stop_loss(
-                current_price, side, signal_context
-            )
-            
-            # 2. Global safety net: Max X% of account value loss per trade (default 3%)
-            # Get account equity
-            account_equity = self.portfolio_manager.total_equity if self.portfolio_manager else 10000
-            max_account_loss_pct = self.config['trading'].get('max_account_loss_per_trade', 3.0) / 100
-            max_account_loss = account_equity * max_account_loss_pct
-            
-            # Position notional value
-            notional_value = position_size * current_price
-            
-            # Calculate price move that would cause 3% account loss
-            # Loss = position_size * price_change
-            # So price_change = max_loss / position_size
-            max_price_change = max_account_loss / position_size if position_size > 0 else current_price * 0.05
-            
-            if position_side == 'long':
-                stop_loss_account_based = current_price - max_price_change
-            else:
-                stop_loss_account_based = current_price + max_price_change
-            
-            # 3. Leverage-based stop loss (original method)
-            stop_loss_leverage_based = self.leverage_manager.calculate_stop_loss_with_leverage(
-                current_price, position_side, leverage
-            )
-            
-            # Use the MOST CONSERVATIVE stop loss (closest to entry price)
-            if position_side == 'long':
-                # For longs, higher price = more conservative (triggers earlier)
-                stop_loss = max(strategy_stop_loss, stop_loss_account_based, stop_loss_leverage_based)
-            else:
-                # For shorts, lower price = more conservative (triggers earlier)
-                stop_loss = min(strategy_stop_loss, stop_loss_account_based, stop_loss_leverage_based)
-            
-            self.logger.debug(f"Stop loss calculation for {symbol}:")
-            self.logger.debug(f"  Strategy SL: {strategy_stop_loss:.4f}")
-            self.logger.debug(f"  Account 3% SL: {stop_loss_account_based:.4f}")
-            self.logger.debug(f"  Leverage SL: {stop_loss_leverage_based:.4f}")
-            self.logger.debug(f"  Final (most conservative): {stop_loss:.4f}")
-            
-            # === TAKE PROFIT CALCULATION ===
-            # Strategy-specific take profit (strategies expect 'buy'/'sell')
-            strategy_take_profit = strategy.calculate_take_profit(
-                current_price, side, ohlcv, signal_strength, market_volatility
-            )
-            
-            take_profit = self.leverage_manager.calculate_take_profit_with_leverage(
-                current_price, position_side, leverage, strategy_take_profit
-            )
-            
-            # Capital-based take profit as alternative
-            target_profit_amount = margin_required * 1.0  # 100% of margin as target
-            take_profit_capital_based = self.leverage_manager.calculate_take_profit_with_capital_at_risk(
-                current_price, position_side, margin_required, target_profit_amount
-            )
-            
-            # Use more conservative take profit
-            if position_side == 'long':
-                take_profit = min(take_profit, take_profit_capital_based)  # Lower price = more conservative
-            else:
-                take_profit = max(take_profit, take_profit_capital_based)  # Higher price = more conservative
-            
-            # Execute order with smart price management
-            order_result = self.market_api.execute_order(
-                symbol=symbol,
-                side=side,
-                size=position_size,
-                reduce_only=False,
-                urgency="normal"
-            )
-            
-            # Check if order was filled
-            if order_result and order_result.get('filled_size', 0) > 0:
-                fill_size = order_result['filled_size']
-                fill_price = order_result['avg_fill_price']
-                order_id = order_result.get('order_id')
-                
-                # Warn if partial fill
-                if order_result.get('status') == 'partial':
-                    self.logger.warning(
-                        f"⚠ Partial fill for {symbol}: {fill_size}/{position_size}"
-                    )
-                
-                # Create trade record
-                trade = Trade(
-                    symbol=symbol,
-                    side=side,
-                    size=fill_size,
-                    price=fill_price,
-                    timestamp=datetime.now(),
-                    strategy=strategy_name,
-                    order_id=order_id,
-                )
-                
-                # Get trailing stop config from strategy
-                trailing_config = strategy.get_trailing_stop_config()
-                
-                # Create position record
-                position = Position(
-                    symbol=symbol,
-                    side=position_side,
-                    size=fill_size,
-                    entry_price=fill_price,
-                    entry_time=datetime.now(),
-                    strategy=strategy_name,
-                    stop_loss=stop_loss,
-                    take_profit=take_profit,
-                    capital_at_risk=margin_required,
-                    trailing_stop_enabled=trailing_config.get('enabled', False),
-                    trailing_stop_pct=trailing_config.get('trail_pct', 0.0),
-                    trailing_stop_activation_pct=trailing_config.get('activation_pct', 0.0),
-                    highest_price=fill_price if position_side == 'long' else None,
-                    lowest_price=fill_price if position_side == 'short' else None,
-                    trailing_stop_active=False,
-                )
-                
-                # Record position in leverage manager
-                self.leverage_manager.record_position(
-                    symbol, position_side, fill_size, fill_price, leverage, margin_required
-                )
-                
-                self.positions[symbol] = position
-                self.trades.append(trade)
-                self.total_trades += 1
-                
-                # Save positions to file for kill switch access
-                self.save_positions_to_file()
-                
-                self.logger.info(
-                    f"✅ Executed {side} trade for {symbol}: {fill_size} @ {fill_price:.6f} "
-                    f"with {leverage:.1f}x leverage"
-                )
-                self.logger.info(f"Signal strength: {signal_strength:.2f}, Volatility: {market_volatility:.2f}")
-                self.logger.info(f"Stop loss: {stop_loss:.2f}, Take profit: {take_profit:.2f}")
-                if trailing_config.get('enabled'):
-                    self.logger.info(f"Trailing stop: {trailing_config['trail_pct']*100:.1f}% trail, "
-                                    f"activates at {trailing_config['activation_pct']*100:.1f}% gain")
-                
-                # Verify position was recorded correctly
-                exchange_positions = self.market_api.get_positions()
-                self.logger.info(
-                    f"📊 Position recorded: {len(self.positions)} local positions, "
-                    f"{len(exchange_positions)} exchange positions"
-                )
-            else:
-                self.logger.error(f"Failed to fill order for {symbol}")
-                
-        except Exception as e:
-            self.logger.error(f"Error executing trade for {symbol}: {e}")
+        # Delegate to execution engine
+        self.execution_engine.execute_trade(symbol, signal, current_price, strategy_name, ohlcv, self.strategies)
     
     def close_position(self, symbol: str, reason: str = "manual") -> bool:
-        """
-        Close a position and record it in performance tracker.
-        
-        Args:
-            symbol: Trading symbol
-            reason: Reason for closing (stop_loss, take_profit, manual, timeout, etc.)
-            
-        Returns:
-            True if position was closed successfully, False otherwise
-        """
-        if symbol not in self.positions:
-            self.logger.warning(f"No position to close for {symbol}")
-            return False
-        
-        try:
-            position = self.positions[symbol]
-            
-            # Determine close side
-            close_side = 'sell' if position.side == 'long' else 'buy'
-            
-            # Determine urgency based on close reason
-            urgency = "high" if reason in ['stop_loss', 'liquidation_risk', 'emergency'] else "normal"
-            
-            # Execute close order with smart price management
-            order_result = self.market_api.execute_order(
-                symbol=symbol,
-                side=close_side,
-                size=position.size,
-                reduce_only=True,
-                urgency=urgency
-            )
-            
-            if order_result and order_result.get('filled_size', 0) > 0:
-                exit_price = order_result['avg_fill_price']
-                filled_size = order_result['filled_size']
-                
-                # Warn if partial fill on close
-                if order_result.get('status') == 'partial':
-                    self.logger.warning(
-                        f"⚠ Partial close for {symbol}: {filled_size}/{position.size}"
-                    )
-                
-                # Close position in leverage manager
-                result = self.leverage_manager.close_position(symbol, exit_price)
-                
-                if result:
-                    # Record completed trade in performance tracker
-                    self.performance_tracker.record_trade_from_position(
-                        symbol=symbol,
-                        strategy=position.strategy,
-                        side=position.side,
-                        entry_price=position.entry_price,
-                        exit_price=exit_price,
-                        size=filled_size,
-                        entry_time=position.entry_time,
-                        exit_time=datetime.now(),
-                        capital_at_risk=position.capital_at_risk or result.get('margin_used', position.size * position.entry_price),
-                        exit_reason=reason,
-                        stop_loss=position.stop_loss,
-                        take_profit=position.take_profit,
-                        leverage=result.get('leverage'),
-                        pnl_override=result.get('pnl'),
-                        pnl_percentage_override=result.get('pnl_percentage'),
-                    )
+        """Close a position and record it."""
+        return self.execution_engine.close_position(symbol, reason)
 
-                    # Feed trade result into selector rolling stats (for rolling Sharpe + probation logic)
-                    try:
-                        cap = position.capital_at_risk or result.get('margin_used') or 0
-                        if cap and result.get('pnl') is not None:
-                            ret = float(result.get('pnl')) / float(cap)
-                        else:
-                            # Fallback to percentage if provided
-                            ret = float(result.get('pnl_percentage') or 0) / 100.0
-                        self.strategy_selector.record_trade_result(position.strategy, ret, datetime.now())
-                    except Exception as e:
-                        self.logger.debug(f"Failed to record trade result for selector: {e}")
-                    
-                    # Update performance counters
-                    trade_pnl = result['pnl']
-                    self.total_pnl += trade_pnl
-                    self.total_trades += 1
-                    if trade_pnl > 0:
-                        self.winning_trades += 1
-                    
-                    # Update pair selector performance
-                    self.pair_selector.update_pair_performance(symbol, trade_pnl)
-                    
-                    # Check if strategy should go into cooling-off (after loss)
-                    if trade_pnl < 0:
-                        self.strategy_selector.check_for_cooling_off(position.strategy)
-                    
-                    # Remove position
-                    del self.positions[symbol]
-                    
-                    # Save positions to file for kill switch access
-                    self.save_positions_to_file()
-                    
-                    self.logger.info(
-                        f"✅ Closed position for {symbol} ({reason}): "
-                        f"${trade_pnl:.2f} ({result['pnl_percentage']:.2f}%)"
-                    )
-                    return True
-                
-            else:
-                self.logger.error(f"Failed to close position for {symbol}")
-                return False
-                
-        except Exception as e:
-            self.logger.error(f"Error closing position for {symbol}: {e}")
-            return False
-    
-    def close_all_positions(self, reason: str = "kill_switch"):
-        """Close all open positions (both single-leg and multi-leg)."""
-        self.logger.info(f"Closing all positions due to {reason}...")
-        
-        # First, close all multi-leg positions
-        if self.multi_leg_positions:
-            self.logger.info(f"Closing {len(self.multi_leg_positions)} multi-leg positions...")
-            for position_id, position in list(self.multi_leg_positions.items()):
-                try:
-                    exit_signal = {
-                        'signal': 'exit_arb',
-                        'signal_type': 'multi_leg',
-                        'action': 'exit',
-                        'symbol': position.primary_symbol,
-                        'reason': reason,
-                        'urgency': 'high',
-                        'legs': []
-                    }
-                    self._execute_multi_leg_exit(position.primary_symbol, exit_signal, position.strategy)
-                    time.sleep(0.1)
-                except Exception as e:
-                    self.logger.error(f"Error closing multi-leg position {position_id}: {e}")
-        
-        # Then close single-leg positions
-        # First, get all positions from exchange to ensure we close everything
-        try:
-            exchange_positions = self.market_api.get_positions()
-            exchange_symbols = {pos['symbol'] for pos in exchange_positions}
-            self.logger.info(f"Found {len(exchange_positions)} positions on exchange: {list(exchange_symbols)}")
-        except Exception as e:
-            self.logger.error(f"Error getting exchange positions: {e}")
-            exchange_symbols = set()
-        
-        # Combine local and exchange positions to ensure we close everything
-        local_symbols = set(self.positions.keys())
-        all_symbols_to_close = local_symbols.union(exchange_symbols)
-        
-        self.logger.info(f"Closing {len(all_symbols_to_close)} single-leg positions: local={list(local_symbols)}, exchange={list(exchange_symbols)}")
-        closed_count = 0
-        
-        for symbol in all_symbols_to_close:
-            try:
-                # Try to close position with timeout
-                self.close_position(symbol, reason)
-                closed_count += 1
-                time.sleep(0.1)  # Small delay between orders to avoid rate limiting
-            except Exception as e:
-                self.logger.error(f"Error closing position for {symbol}: {e}")
-        
-        self.logger.info(f"Attempted to close {len(all_symbols_to_close)} single-leg positions, successfully closed {closed_count}.")
-    
     def get_performance_summary(self) -> Dict[str, Any]:
         """Get comprehensive performance summary from performance tracker."""
         # Get comprehensive metrics from performance tracker
@@ -3014,86 +1867,11 @@ class StrategyManager:
 
     def save_positions_to_file(self):
         """Save current positions to a JSON file."""
-        # Single-leg positions
-        positions_data = {}
-        for symbol, position in self.positions.items():
-            positions_data[symbol] = {
-                'side': position.side,
-                'size': position.size,
-                'entry_price': position.entry_price,
-                'entry_time': position.entry_time.isoformat(),
-                'strategy': position.strategy,
-                'stop_loss': position.stop_loss,
-                'take_profit': position.take_profit,
-                'capital_at_risk': position.capital_at_risk,
-            }
-        
-        # Multi-leg positions
-        multi_leg_data = {}
-        for position_id, position in self.multi_leg_positions.items():
-            multi_leg_data[position_id] = position.to_dict()
-        
-        all_data = {
-            'single_leg': positions_data,
-            'multi_leg': multi_leg_data,
-        }
-        
-        try:
-            with open('positions.json', 'w') as f:
-                json.dump(all_data, f, indent=2, default=str)
-            total_positions = len(positions_data) + len(multi_leg_data)
-            self.logger.info(f"Saved {total_positions} positions to positions.json "
-                           f"({len(positions_data)} single-leg, {len(multi_leg_data)} multi-leg)")
-        except Exception as e:
-            self.logger.error(f"Failed to save positions: {e}")
+        return self.execution_engine.save_positions_to_file()
     
     def load_positions_from_file(self):
         """Load positions from JSON file."""
-        try:
-            with open('positions.json', 'r') as f:
-                all_data = json.load(f)
-            
-            # Handle both old format (just positions) and new format (single_leg + multi_leg)
-            if 'single_leg' in all_data:
-                positions_data = all_data['single_leg']
-                multi_leg_data = all_data.get('multi_leg', {})
-            else:
-                # Old format - all positions are single-leg
-                positions_data = all_data
-                multi_leg_data = {}
-            
-            # Load single-leg positions
-            for symbol, pos_data in positions_data.items():
-                entry_time = datetime.fromisoformat(pos_data['entry_time'])
-                
-                position = Position(
-                    symbol=symbol,
-                    side=pos_data['side'],
-                    size=pos_data['size'],
-                    entry_price=pos_data['entry_price'],
-                    entry_time=entry_time,
-                    strategy=pos_data['strategy'],
-                    stop_loss=pos_data.get('stop_loss'),
-                    take_profit=pos_data.get('take_profit'),
-                    capital_at_risk=pos_data.get('capital_at_risk'),
-                )
-                self.positions[symbol] = position
-            
-            # Load multi-leg positions
-            for position_id, pos_data in multi_leg_data.items():
-                position = MultiLegPosition.from_dict(pos_data)
-                self.multi_leg_positions[position_id] = position
-            
-            total_loaded = len(positions_data) + len(multi_leg_data)
-            self.logger.info(f"Loaded {total_loaded} positions from positions.json "
-                           f"({len(positions_data)} single-leg, {len(multi_leg_data)} multi-leg)")
-            return True
-        except FileNotFoundError:
-            self.logger.info("No positions.json file found")
-            return False
-        except Exception as e:
-            self.logger.error(f"Failed to load positions: {e}")
-            return False
+        return self.execution_engine.load_positions_from_file()
     
     def update_position_prices(self):
         """Update current prices for all open positions (single-leg and multi-leg)."""

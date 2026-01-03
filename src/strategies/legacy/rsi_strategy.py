@@ -157,6 +157,31 @@ class RSIStrategy(BaseStrategy):
             'rsi': rsi,
             'strategy': 'rsi',
         }
+
+    def calculate_signal_strength(self, ohlcv: pd.DataFrame) -> float:
+        """
+        Calculate signal strength based on RSI deviation from neutral.
+        
+        Args:
+            ohlcv: OHLCV data DataFrame
+            
+        Returns:
+            Signal strength (0-1)
+        """
+        if ohlcv is None or len(ohlcv) < self.period + 1:
+            return 0.5
+            
+        rsi = self.calculate_rsi(ohlcv['close'], self.period)
+        
+        # Calculate distance from neutral (50)
+        # Normalized: 50 -> 0.0, 0/100 -> 1.0
+        rsi_distance = abs(rsi - 50) / 50
+        
+        # Scale factor (e.g. *2 means 25 deviation = 100% strength)
+        # Manager used mult 2. So 25 deviation (RSI 75 or 25) = 0.5 * 2 = 1.0 strength
+        signal_strength = min(1.0, rsi_distance * 2)
+        
+        return signal_strength
     
     def calculate_rsi(self, prices: pd.Series, period: int = 14) -> float:
         """

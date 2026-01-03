@@ -141,6 +141,35 @@ class MovingAverageStrategy(BaseStrategy):
             'long_ma': long_ma_current,
             'strategy': 'moving_average',
         }
+
+    def calculate_signal_strength(self, ohlcv: pd.DataFrame) -> float:
+        """
+        Calculate signal strength based on MA distance.
+        
+        Args:
+            ohlcv: OHLCV data DataFrame
+            
+        Returns:
+            Signal strength (0-1)
+        """
+        if ohlcv is None or len(ohlcv) < self.long_period:
+            return 0.5
+            
+        # Calculate moving averages
+        short_ma = ohlcv['close'].rolling(window=self.short_period).mean()
+        long_ma = ohlcv['close'].rolling(window=self.long_period).mean()
+        
+        if len(short_ma) < 2 or len(long_ma) < 2:
+            return 0.5
+            
+        # Calculate crossover strength (normalized distance between MAs)
+        if long_ma.iloc[-1] <= 0:
+            return 0.5
+            
+        ma_diff = abs(short_ma.iloc[-1] - long_ma.iloc[-1]) / long_ma.iloc[-1]
+        signal_strength = min(1.0, ma_diff * 10)  # Scale to 0-1 (10% diff = 1.0 strength)
+        
+        return signal_strength
     
     def analyze(self, market_data: Dict[str, Any]) -> Dict[str, Any]:
         """

@@ -134,3 +134,30 @@ class VWAPStrategy(BaseStrategy):
             'target_price': vwap # Target is return to VWAP
         }
 
+    def calculate_signal_strength(self, ohlcv: pd.DataFrame) -> float:
+        """
+        Calculate signal strength based on distance from VWAP.
+        
+        Args:
+            ohlcv: OHLCV data DataFrame
+            
+        Returns:
+            Signal strength (0-1)
+        """
+        if ohlcv is None or len(ohlcv) < 100:
+            return 0.5
+            
+        # Calculate VWAP
+        vwap_df = self.calculate_vwap(ohlcv)
+        
+        current_price = vwap_df['close'].iloc[-1]
+        vwap = vwap_df['vwap'].iloc[-1]
+        
+        if vwap == 0:
+            return 0.5
+            
+        dist_pct = abs(current_price - vwap) / vwap
+        
+        # 2% deviation = 1.0 strength
+        return min(1.0, dist_pct * 50)
+

@@ -57,6 +57,19 @@ class BaseStrategy(ABC):
             Signal dictionary or None if no signal
         """
         pass
+
+    def calculate_signal_strength(self, ohlcv: pd.DataFrame) -> float:
+        """
+        Calculate the strength of the trading signal.
+        
+        Args:
+            ohlcv: OHLCV data DataFrame
+            
+        Returns:
+            Signal strength between 0.0 and 1.0
+        """
+        # Default implementation returns 0.5 (neutral)
+        return 0.5
     
     def calculate_position_size(self, price: float, risk_amount: float) -> float:
         """

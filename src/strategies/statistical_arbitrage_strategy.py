@@ -453,3 +453,17 @@ class StatisticalArbitrageStrategy(BaseStrategy):
             'trail_pct': 0.04,         # 4% trailing stop (loose)
             'activation_pct': 0.05,    # Only activate after 5% gain (spread overshoot)
         }
+
+    def calculate_signal_strength(self, ohlcv: pd.DataFrame) -> float:
+        """
+        Calculate signal strength.
+        
+        Args:
+            ohlcv: OHLCV data DataFrame
+            
+        Returns:
+            Signal strength (0-1)
+        """
+        # Stat Arb requires pair data which isn't available in this context
+        # Return default strength as per legacy implementation
+        return 0.8

@@ -133,3 +133,17 @@ class SupertrendStrategy(BaseStrategy):
             'supertrend_value': supertrend_val
         }
 
+    def calculate_signal_strength(self, ohlcv: pd.DataFrame) -> float:
+        """
+        Calculate signal strength.
+        
+        Args:
+            ohlcv: OHLCV data DataFrame
+            
+        Returns:
+            Signal strength (0-1)
+        """
+        # For Supertrend, strength is based on trend persistence
+        # Default high confidence for trend following
+        return 0.8
+

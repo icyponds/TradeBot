@@ -104,3 +104,35 @@ class BollingerBandSqueezeStrategy(BaseStrategy):
             'lower_bb': curr_lower_bb
         }
 
+    def calculate_signal_strength(self, ohlcv: pd.DataFrame) -> float:
+        """
+        Calculate signal strength based on Bandwidth Squeeze.
+        
+        Args:
+            ohlcv: OHLCV data DataFrame
+            
+        Returns:
+            Signal strength (0-1)
+        """
+        if ohlcv is None or len(ohlcv) < self.bb_period:
+            return 0.5
+            
+        # Calculate Bollinger Bands
+        sma = ohlcv['close'].rolling(window=self.bb_period).mean()
+        std = ohlcv['close'].rolling(window=self.bb_period).std()
+        
+        upper_bb = sma + (std * self.bb_std)
+        lower_bb = sma - (std * self.bb_std)
+        
+        if sma.iloc[-1] == 0:
+            return 0.5
+            
+        bandwidth = (upper_bb - lower_bb) / sma
+        
+        # Lower bandwidth = tighter squeeze = stronger potential move
+        # Normalize: 0.05 bandwidth -> 1.0 strength, 0.25+ bandwidth -> 0.0 strength
+        # Using *5 factor from original manager logic
+        strength = max(0.0, min(1.0, 1.25 - (bandwidth.iloc[-1] * 5)))
+        
+        return strength
+
