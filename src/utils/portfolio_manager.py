@@ -141,10 +141,17 @@ class PortfolioManager:
         Returns:
             Portfolio summary dictionary
         """
+        # Calculate margin usage percentage
+        margin_usage_percentage = 0.0
+        if self.total_equity > 0:
+            margin_usage_percentage = (self.used_margin / self.total_equity) * 100
+
         return {
             'total_equity': self.total_equity,
             'free_margin': self.free_margin,
+            'available_margin': self.free_margin, # Alias for dashboard compatibility
             'used_margin': self.used_margin,
+            'margin_usage_percentage': margin_usage_percentage,
             'max_position_size': self.calculate_max_position_size(),
             'available_capital': self.calculate_available_capital_for_trading(),
             'use_portfolio_based_sizing': self.use_portfolio_based_sizing,
