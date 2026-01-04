@@ -532,6 +532,33 @@ class StrategyManager:
         """Emergency stop - close all positions and stop trading."""
         self.logger.warning("EMERGENCY STOP: Closing all positions...")
         self.stop(close_positions=True)
+
+    def close_all_positions(self, reason: str = "emergency_cleanup") -> None:
+        """
+        Close all currently open positions.
+        
+        Args:
+            reason: Reason for closure
+        """
+        self.logger.info(f"Closing all positions (Reason: {reason})...")
+        
+        # Get list of symbols to avoid dictionary size change checks
+        symbols = list(self.positions.keys())
+        
+        if not symbols:
+            self.logger.info("No open positions to close.")
+            return
+
+        for symbol in symbols:
+            try:
+                self.logger.info(f"Closing position: {symbol}")
+                # Use execution engine to close
+                if hasattr(self, 'execution_engine'):
+                    self.execution_engine.close_position(symbol, reason=reason)
+                else:
+                    self.logger.error("Execution engine not initialized, cannot close position")
+            except Exception as e:
+                self.logger.error(f"Error closing position {symbol}: {e}")
     
     def sync_positions_with_exchange(self):
         """
