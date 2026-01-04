@@ -68,8 +68,8 @@ class OUMeanReversionStrategy(BaseStrategy):
     # OU mean reversion needs granular data to detect short-term reversions
     PREFERRED_TIMEFRAME = '15m'
     
-    def __init__(self, config: Dict[str, Any]):
-        super().__init__(config)
+    def __init__(self, config: Dict[str, Any], timeframe: str = None):
+        super().__init__(config, timeframe)
         
         # Strategy parameters from config
         ou_config = config.get('strategies', {}).get('ou_mean_reversion', {})
@@ -102,21 +102,27 @@ class OUMeanReversionStrategy(BaseStrategy):
                         f"z_entry={self.zscore_entry}, z_exit={self.zscore_exit}, "
                         f"half_life_max={self.half_life_max_hours}h")
     
-    def generate_signal(self, ohlcv: pd.DataFrame) -> Optional[Dict[str, Any]]:
+    def generate_signal(self, symbol: str, ohlcv: Dict[str, pd.DataFrame]) -> Optional[Dict[str, Any]]:
         """
         Generate trading signal based on OU mean reversion.
         
-        Note: This method needs symbol context. Use generate_signal_for_symbol.
-        
         Args:
-            ohlcv: OHLCV data DataFrame
+            symbol: Symbol being analyzed
+            ohlcv: Dictionary of OHLCV DataFrames
             
         Returns:
             Signal dictionary or None
         """
-        # Without symbol context, we can't use the cache effectively
-        # Try to generate signal anyway
-        return self._generate_signal_internal(ohlcv, symbol="unknown")
+        # Get preferred timeframe data
+        tf_data = ohlcv.get(self.timeframe)
+        if tf_data is None:
+            # Fallback to first available if preferred not found
+            if ohlcv:
+                tf_data = next(iter(ohlcv.values()))
+            else:
+                return None
+
+        return self._generate_signal_internal(tf_data, symbol)
     
     def generate_signal_for_symbol(self, symbol: str, ohlcv: pd.DataFrame) -> Optional[Dict[str, Any]]:
         """
@@ -244,37 +250,49 @@ class OUMeanReversionStrategy(BaseStrategy):
             if age_hours < self.cache_ttl_hours:
                 return cached_params
         
-        # Estimate new parameters
-        ou_params = self._estimate_ou_parameters(prices)
+        # Adaptive Lookback (Phase 7 Refinement)
+        # Try multiple lookback windows and pick the one with best fit (lowest residuals)
+        candidate_lookbacks = [50, 100, 200]
+        # Ensure we don't exceed available history
+        available_points = len(prices)
+        candidate_lookbacks = [L for L in candidate_lookbacks if L <= available_points]
         
-        if ou_params:
-            self.ou_params_cache[symbol] = (ou_params, datetime.now())
-        
-        return ou_params
-    
-    def _estimate_ou_parameters(self, prices: pd.Series) -> Optional[OUParameters]:
-        """
-        Estimate OU process parameters from price data.
-        
-        Uses the discretized OU process:
-            X_{t+1} - X_t = θ(μ - X_t)Δt + σ√Δt * ε
-        
-        Which can be estimated via OLS regression:
-            ΔX = α + β*X + ε
-        
-        Where: θ = -β, μ = -α/β, σ² = var(ε) / Δt
-        
-        Args:
-            prices: Price series
+        # If explicitly configured lookback is not in list, add it
+        if self.estimation_lookback not in candidate_lookbacks and self.estimation_lookback <= available_points:
+            candidate_lookbacks.append(self.estimation_lookback)
             
-        Returns:
-            OUParameters or None if estimation fails
+        best_params = None
+        best_error = float('inf')
+        
+        for lookback in candidate_lookbacks:
+            # Slice prices to this lookback
+            slice_prices = prices.iloc[-lookback:]
+            
+            # Estimate parameters
+            params, error = self._estimate_ou_parameters_with_error(slice_prices)
+            
+            if params and error < best_error:
+                best_params = params
+                best_error = error
+                # Store the optimal lookback in the params object for debugging
+                best_params.optimal_lookback = lookback
+        
+        if best_params:
+            self.ou_params_cache[symbol] = (best_params, datetime.now())
+            if hasattr(best_params, 'optimal_lookback') and best_params.optimal_lookback != self.estimation_lookback:
+                 self.logger.debug(f"{symbol}: Adaptive lookback selected {best_params.optimal_lookback} periods (default {self.estimation_lookback})")
+        
+        return best_params
+    
+    def _estimate_ou_parameters_with_error(self, prices: pd.Series) -> Tuple[Optional[OUParameters], float]:
+        """
+        Estimate OU parameters and return fitting error (residual variance).
         """
         try:
             if len(prices) < self.min_data_points:
-                return None
+                return None, float('inf')
             
-            # Use log prices for better stationarity
+            # Use log prices
             log_prices = np.log(prices.values)
             
             # Calculate price changes
@@ -282,38 +300,37 @@ class OUMeanReversionStrategy(BaseStrategy):
             dX = log_prices[1:] - log_prices[:-1]
             
             # OLS regression: dX = α + β*X + ε
-            # Using numpy for simplicity
             n = len(X)
             X_mean = np.mean(X)
             dX_mean = np.mean(dX)
             
-            # Calculate beta (slope)
+            # Calculate beta
             numerator = np.sum((X - X_mean) * (dX - dX_mean))
             denominator = np.sum((X - X_mean) ** 2)
             
             if denominator == 0:
-                return None
+                return None, float('inf')
             
             beta = numerator / denominator
             alpha = dX_mean - beta * X_mean
             
-            # OU parameters (assuming Δt = 1 period)
+            # OU parameters
             theta = -beta
             
             if theta <= 0:
-                # Not mean-reverting
-                return None
+                # Not mean-reverting (error is high)
+                return None, float('inf')
             
             mu = -alpha / beta if beta != 0 else X_mean
             
-            # Estimate sigma from residuals
+            # Estimate residuals
             residuals = dX - alpha - beta * X
+            # Error metric: Standard deviation of residuals (sigma)
+            # Smaller sigma means tighter fit to the mean-reverting process
             sigma = np.std(residuals)
             
             # Calculate half-life
             half_life = np.log(2) / theta if theta > 0 else float('inf')
-            
-            # Convert mu back from log space
             mu_price = np.exp(mu)
             
             params = OUParameters(
@@ -323,14 +340,16 @@ class OUMeanReversionStrategy(BaseStrategy):
                 half_life=half_life,
             )
             
-            self.logger.debug(f"Estimated OU params: theta={theta:.4f}, mu={mu_price:.2f}, "
-                            f"sigma={sigma:.4f}, half_life={half_life:.1f}")
-            
-            return params
+            return params, sigma
             
         except Exception as e:
-            self.logger.error(f"Error estimating OU parameters: {e}")
-            return None
+            # self.logger.error(f"Error estimating OU parameters: {e}")
+            return None, float('inf')
+
+    def _estimate_ou_parameters(self, prices: pd.Series) -> Optional[OUParameters]:
+        """Legacy wrapper for backward compatibility."""
+        params, _ = self._estimate_ou_parameters_with_error(prices)
+        return params
     
     def _estimate_ou_parameters_mle(self, prices: pd.Series) -> Optional[OUParameters]:
         """
@@ -425,7 +444,7 @@ class OUMeanReversionStrategy(BaseStrategy):
         
         return True
     
-    def calculate_take_profit(self, entry_price: float, side: str, ohlcv: pd.DataFrame = None,
+    def calculate_take_profit(self, entry_price: float, side: str, ohlcv: Dict[str, pd.DataFrame] = None,
                              signal_strength: float = 1.0, market_volatility: float = 1.0) -> float:
         """
         Calculate take profit for OU mean reversion.

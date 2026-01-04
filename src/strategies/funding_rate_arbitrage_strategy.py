@@ -41,8 +41,8 @@ class FundingRateArbitrageStrategy(BaseStrategy):
     # Funding rates are paid every 8 hours, 1h timeframe is optimal for monitoring
     PREFERRED_TIMEFRAME = '1h'
     
-    def __init__(self, config: Dict[str, Any], market_api=None):
-        super().__init__(config)
+    def __init__(self, config: Dict[str, Any], market_api=None, timeframe: str = None):
+        super().__init__(config, timeframe)
         
         # Strategy parameters from config
         arb_config = config.get('strategies', {}).get('funding_rate_arbitrage', {})
@@ -102,7 +102,14 @@ class FundingRateArbitrageStrategy(BaseStrategy):
         # Fetch fresh list
         if self.market_api and hasattr(self.market_api, 'get_funding_arb_eligible_symbols'):
             eligible_list = self.market_api.get_funding_arb_eligible_symbols()
-            self._eligible_symbols_cache = set(eligible_list)
+            # Handle list of dicts (from Mock) or strings
+            processed_list = []
+            for item in eligible_list:
+                if isinstance(item, dict):
+                    processed_list.append(item.get('symbol'))
+                else:
+                    processed_list.append(item)
+            self._eligible_symbols_cache = set(processed_list)
             self._eligible_symbols_last_update = now
             self.logger.info(f"Refreshed eligible symbols: {sorted(self._eligible_symbols_cache)}")
         else:
@@ -115,22 +122,48 @@ class FundingRateArbitrageStrategy(BaseStrategy):
         """Check if a symbol can be used for funding rate arbitrage."""
         return symbol in self.get_eligible_symbols()
     
-    def generate_signal(self, ohlcv: pd.DataFrame) -> Optional[Dict[str, Any]]:
+    def generate_signal(self, symbol: str, ohlcv: Dict[str, pd.DataFrame]) -> Optional[Dict[str, Any]]:
         """
         Generate signal for funding rate arbitrage.
         
-        Note: This strategy doesn't use OHLCV data directly.
-        It needs funding rate data which should be fetched separately.
-        
         Args:
-            ohlcv: OHLCV data (not used for this strategy)
+            symbol: Symbol being analyzed
+            ohlcv: OHLCV data (not used directly, but context provided)
             
         Returns:
             Signal dictionary or None
         """
-        # This strategy requires symbol context
-        # Use generate_signal_for_symbol instead
-        return None
+        if not self.market_api:
+            self.logger.warning("Market API not set for Funding Rate Arb")
+            return None
+
+        # Fetch current funding rate
+        current_rate = self.market_api.get_funding_rate(symbol)
+        
+        if current_rate is None:
+            return None
+            
+        # Update cache
+        self.update_funding_cache(symbol, current_rate)
+        
+        # Get history for persistence check
+        history = self.get_funding_history(symbol)
+        
+        # Check for existing position context (this needs to be passed or tracked)
+        # For now, we rely on StrategyManager or the Strategy itself to know active positions?
+        # StrategyManager handles active positions but currently doesn't pass them here.
+        # However, generate_signal_for_symbol asks for `has_existing_position`.
+        # We can implement a basic internal tracking or rely on a query to execution engine?
+        
+        # NOTE: StrategyManager tracks active positions. Ideally, it should pass this context.
+        # But for now, let's assume no existing position unless we track it internally here 
+        # (which base strategy doesn't strictly enforce across restarts without persistence).
+        # We have `self.trades` but that's for history.
+        
+        # We will assume entry checking. Exit checking is typically handled by `should_exit` 
+        # or explicit calls.
+        
+        return self.generate_signal_for_symbol(symbol, current_rate, history)
     
     def generate_signal_for_symbol(
         self, 
@@ -215,6 +248,15 @@ class FundingRateArbitrageStrategy(BaseStrategy):
         periods_per_year = 365 * 24 / self.funding_interval_hours  # ~1095 periods
         annualized_return = abs_funding * periods_per_year
         
+        # Yield-Weighted Sizing (Phase 7 Refinement)
+        # Scale position size based on attractiveness of yield
+        # Base case: 10% APR = 1.0x sizing multiplier
+        # Max case: 50% APR = 2.0x sizing multiplier
+        base_yield = 0.10  # 10%
+        size_multiplier = min(2.0, max(0.5, annualized_return / base_yield))
+        
+        reason += f" (APR: {annualized_return:.1%}, Size: {size_multiplier:.1f}x)"
+        
         # Return multi-leg signal
         return {
             'signal': 'buy',  # Standard signal type for entry
@@ -225,6 +267,7 @@ class FundingRateArbitrageStrategy(BaseStrategy):
             'strategy': 'funding_rate_arbitrage',
             'funding_rate': funding_rate,
             'annualized_return': annualized_return,
+            'size_multiplier': size_multiplier,
             # Multi-leg specification
             'legs': [
                 {
@@ -348,7 +391,7 @@ class FundingRateArbitrageStrategy(BaseStrategy):
         
         return opportunities
     
-    def calculate_take_profit(self, entry_price: float, side: str, ohlcv: pd.DataFrame = None,
+    def calculate_take_profit(self, entry_price: float, side: str, ohlcv: Dict[str, pd.DataFrame] = None,
                              signal_strength: float = 1.0, market_volatility: float = 1.0) -> float:
         """
         Calculate take profit for funding rate arbitrage.

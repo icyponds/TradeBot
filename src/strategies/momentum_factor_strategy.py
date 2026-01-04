@@ -85,8 +85,8 @@ class MomentumFactorStrategy(BaseStrategy):
     # Momentum is a slower signal - 4h timeframe balances noise vs responsiveness
     PREFERRED_TIMEFRAME = '4h'
     
-    def __init__(self, config: Dict[str, Any], market_api=None):
-        super().__init__(config)
+    def __init__(self, config: Dict[str, Any], market_api=None, timeframe: str = None):
+        super().__init__(config, timeframe)
         
         # Strategy parameters from config
         momentum_config = config.get('strategies', {}).get('momentum_factor', {})
@@ -129,7 +129,7 @@ class MomentumFactorStrategy(BaseStrategy):
         """Set the market API for data access."""
         self.market_api = market_api
     
-    def generate_signal(self, ohlcv: pd.DataFrame) -> Optional[Dict[str, Any]]:
+    def generate_signal(self, symbol: str, ohlcv: Dict[str, pd.DataFrame]) -> Optional[Dict[str, Any]]:
         """
         Generate signal - not used for this cross-sectional strategy.
         
@@ -261,10 +261,23 @@ class MomentumFactorStrategy(BaseStrategy):
             if past_price <= 0:
                 return None
             
-            # Calculate return
-            momentum = (current_price - past_price) / past_price
+            # Calculate return (Momentum)
+            momentum_return = (current_price - past_price) / past_price
             
-            return momentum
+            # Volatility Adjustment (Phase 7 Refinement)
+            # Calculate realized volatility over the lookback period
+            # std_dev(returns) * sqrt(periods)
+            price_changes = prices.pct_change().dropna()
+            volatility = price_changes.std() * np.sqrt(len(price_changes))
+            
+            if volatility == 0 or np.isnan(volatility):
+                return None
+                
+            # Adjusted Momentum = Return / Volatility (Sharpe Ratio proxy)
+            # This penalizes high-volatility assets that just got lucky
+            adjusted_momentum = momentum_return / volatility
+            
+            return adjusted_momentum
             
         except Exception as e:
             self.logger.error(f"Error calculating momentum for {symbol}: {e}")
@@ -426,7 +439,7 @@ class MomentumFactorStrategy(BaseStrategy):
         
         return summary
     
-    def calculate_take_profit(self, entry_price: float, side: str, ohlcv: pd.DataFrame = None,
+    def calculate_take_profit(self, entry_price: float, side: str, ohlcv: Dict[str, pd.DataFrame] = None,
                              signal_strength: float = 1.0, market_volatility: float = 1.0) -> float:
         """
         Calculate take profit for momentum positions.

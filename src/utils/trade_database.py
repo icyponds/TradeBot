@@ -13,6 +13,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Tuple
 from contextlib import contextmanager
+import pandas as pd
 
 
 class TradeDatabase:
@@ -132,6 +133,36 @@ class TradeDatabase:
                 "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
                 ("schema_version", str(self.SCHEMA_VERSION))
             )
+
+            # Market Data Table (Phase 9)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS market_data (
+                    symbol TEXT NOT NULL,
+                    timeframe TEXT NOT NULL,
+                    timestamp TIMESTAMP NOT NULL,
+                    open REAL NOT NULL,
+                    high REAL NOT NULL,
+                    low REAL NOT NULL,
+                    close REAL NOT NULL,
+                    volume REAL NOT NULL,
+                    PRIMARY KEY (symbol, timeframe, timestamp)
+                ) WITHOUT ROWID
+            """)
+            
+            # Index for fast range queries
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_market_data_range ON market_data(symbol, timeframe, timestamp)")
+            
+            # Funding Rates Table (Phase 12)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS funding_rates (
+                    symbol TEXT NOT NULL,
+                    timestamp TIMESTAMP NOT NULL,
+                    funding_rate REAL NOT NULL,
+                    PRIMARY KEY (symbol, timestamp)
+                ) WITHOUT ROWID
+            """)
+            
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_funding_rates_range ON funding_rates(symbol, timestamp)")
             
             self.logger.info("Database schema initialized")
     
@@ -486,6 +517,19 @@ class TradeDatabase:
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM trades")
             return cursor.fetchone()[0]
+
+    def delete_all_trades(self) -> None:
+        """
+        Delete all trade/performance rows.
+
+        This is primarily used for backtesting runs that should not be mixed with
+        previous backtest results.
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM trades")
+            cursor.execute("DELETE FROM equity_snapshots")
+            cursor.execute("DELETE FROM daily_pnl")
     
     def get_strategies(self) -> List[str]:
         """Get list of all strategies with trades."""
@@ -501,12 +545,179 @@ class TradeDatabase:
             cursor.execute("SELECT DISTINCT symbol FROM trades ORDER BY symbol")
             return [row[0] for row in cursor.fetchall()]
     
-    def delete_all_trades(self):
-        """Delete all trades (use with caution!)."""
+    # ==================== MARKET DATA METHODS ====================
+
+    def insert_market_data(self, df: pd.DataFrame, symbol: str, timeframe: str):
+        """
+        Insert market data (OHLCV) into the database.
+        
+        Args:
+            df: DataFrame with datetime index and columns [open, high, low, close, volume]
+            symbol: Trading pair symbol (e.g., 'BTC')
+            timeframe: Timeframe string (e.g., '1h')
+        """
+        if df.empty:
+            return
+
+        # Prepare list of tuples for batch insert
+        data_to_insert = []
+        for timestamp, row in df.iterrows():
+            # Handle string or datetime timestamps
+            ts_str = timestamp.isoformat() if hasattr(timestamp, 'isoformat') else str(timestamp)
+            
+            data_to_insert.append((
+                symbol,
+                timeframe,
+                ts_str,
+                float(row['open']),
+                float(row['high']),
+                float(row['low']),
+                float(row['close']),
+                float(row['volume'])
+            ))
+
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("DELETE FROM trades")
-            cursor.execute("DELETE FROM equity_snapshots")
-            cursor.execute("DELETE FROM daily_pnl")
-            self.logger.warning("All trades deleted from database")
+            # USE OR REPLACE to update existing candles if re-fetched
+            cursor.executemany("""
+                INSERT OR REPLACE INTO market_data 
+                (symbol, timeframe, timestamp, open, high, low, close, volume)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, data_to_insert)
+            
+            self.logger.info(f"Inserted {len(data_to_insert)} candles for {symbol} {timeframe}")
 
+    def get_market_data(self, symbol: str, timeframe: str, 
+                       start_date: Optional[datetime] = None, 
+                       end_date: Optional[datetime] = None) -> pd.DataFrame:
+        """
+        Retrieve market data as a Pandas DataFrame.
+        """
+        query = """
+            SELECT timestamp, open, high, low, close, volume 
+            FROM market_data 
+            WHERE symbol = ? AND timeframe = ?
+        """
+        params = [symbol, timeframe]
+        
+        if start_date:
+            query += " AND timestamp >= ?"
+            params.append(start_date.isoformat())
+        if end_date:
+            query += " AND timestamp <= ?"
+            params.append(end_date.isoformat())
+            
+        query += " ORDER BY timestamp ASC"
+
+        with self._get_connection() as conn:
+            # Load directly into DataFrame
+            df = pd.read_sql_query(
+                query, 
+                conn, 
+                params=params,
+                parse_dates=['timestamp'],
+                index_col='timestamp'
+            )
+            
+            return df
+            
+    def get_available_data_range(self, symbol: str, timeframe: str) -> Tuple[Optional[datetime], Optional[datetime]]:
+        """Get the start and end timestamp for available data."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT MIN(timestamp), MAX(timestamp) 
+                FROM market_data 
+                WHERE symbol = ? AND timeframe = ?
+            """, (symbol, timeframe))
+            
+            row = cursor.fetchone()
+            if row and row[0] and row[1]:
+                # Parse strings to datetime
+                try:
+                    start = datetime.fromisoformat(row[0])
+                    end = datetime.fromisoformat(row[1])
+                    return start, end
+                except ValueError:
+                    return None, None
+            return None, None
+
+    def get_market_data_symbols(self, timeframe: str) -> List[str]:
+        """Get list of symbols that have data for this timeframe."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT DISTINCT symbol FROM market_data WHERE timeframe = ?
+            """, (timeframe,))
+            return [row[0] for row in cursor.fetchall()]
+
+
+    def insert_funding_rates(self, df: pd.DataFrame, symbol: str):
+        """
+        Insert funding rates into the database.
+        
+        Args:
+            df: DataFrame with datetime index and 'funding' column
+            symbol: Trading symbol
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            
+            data_to_insert = []
+            for timestamp, row in df.iterrows():
+                # Timestamp is the index
+                ts = timestamp.strftime('%Y-%m-%d %H:%M:%S') if isinstance(timestamp, pd.Timestamp) else str(timestamp)
+                
+                # Check for funding rate column
+                rate = row.get('funding') or row.get('fundingRate')
+                if rate is not None:
+                     data_to_insert.append((symbol, ts, float(rate)))
+            
+            if not data_to_insert:
+                return 0
+                
+            cursor.executemany("""
+                INSERT OR REPLACE INTO funding_rates (symbol, timestamp, funding_rate)
+                VALUES (?, ?, ?)
+            """, data_to_insert)
+            
+            return len(data_to_insert)
+
+    def get_funding_rates(self, symbol: str, start_date: datetime = None, end_date: datetime = None) -> pd.DataFrame:
+        """
+        Get historical funding rates for a symbol.
+        
+        Args:
+            symbol: Trading symbol
+            start_date: Start datetime
+            end_date: End datetime
+            
+        Returns:
+            DataFrame with funding rates indexed by timestamp
+        """
+        query = "SELECT timestamp, funding_rate FROM funding_rates WHERE symbol = ?"
+        params = [symbol]
+        
+        if start_date:
+            query += " AND timestamp >= ?"
+            params.append(start_date)
+        
+        if end_date:
+            query += " AND timestamp <= ?"
+            params.append(end_date)
+            
+        query += " ORDER BY timestamp ASC"
+        
+        try:
+            with self._get_connection() as conn:
+                df = pd.read_sql_query(query, conn, params=params, parse_dates=['timestamp'])
+                
+            if df.empty:
+                return pd.DataFrame()
+                
+            df.set_index('timestamp', inplace=True)
+            return df
+            
+        except Exception as e:
+            self.logger.error(f"Error fetching funding rates for {symbol}: {e}")
+            return pd.DataFrame()

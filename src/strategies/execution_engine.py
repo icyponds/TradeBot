@@ -53,7 +53,7 @@ class ExecutionEngine:
         # Load persisted positions if available
         self.load_positions_from_file()
         
-    def execute_trade(self, symbol: str, signal: Dict[str, Any], current_price: float, strategy_name: str, ohlcv: pd.DataFrame, strategies_map: Dict[str, Any]):
+    def execute_trade(self, symbol: str, signal: Dict[str, Any], current_price: float, strategy_name: str, ohlcv: Dict[str, pd.DataFrame], strategies_map: Dict[str, Any]):
         """Execute a single-leg trade based on signal."""
         try:
             # Determine trade side
@@ -276,7 +276,7 @@ class ExecutionEngine:
         signal: Dict[str, Any], 
         current_price: float, 
         strategy_name: str, 
-        ohlcv: pd.DataFrame,
+        ohlcv: Dict[str, pd.DataFrame],
         calculate_signal_strength_fn
     ):
         """Handle multi-leg signals (entry or exit)."""
@@ -296,7 +296,7 @@ class ExecutionEngine:
         signal: Dict[str, Any],
         current_price: float,
         strategy_name: str,
-        ohlcv: pd.DataFrame,
+        ohlcv: Dict[str, pd.DataFrame],
         signal_strength: float
     ):
         """Execute a multi-leg position entry."""
@@ -586,11 +586,23 @@ class ExecutionEngine:
                 return position
         return None
         
-    def calculate_market_volatility(self, ohlcv: pd.DataFrame) -> float:
+    def calculate_market_volatility(self, ohlcv: Dict[str, pd.DataFrame]) -> float:
         """Calculate market volatility."""
-        if len(ohlcv) < 20:
+        # Use available timeframe, prefer '15m' or '1h'
+        for tf in ['15m', '1h', '4h', '1d']:
+            if tf in ohlcv and len(ohlcv[tf]) >= 20:
+                df = ohlcv[tf]
+                break
+        else:
+            # Fallback to any
+            if ohlcv:
+                df = next(iter(ohlcv.values()))
+            else:
+                return 0.5
+                
+        if len(df) < 20:
             return 0.5
-        returns = ohlcv['close'].pct_change().dropna()
+        returns = df['close'].pct_change().dropna()
         volatility = returns.std() * math.sqrt(252)
         return min(1.0, volatility)
 

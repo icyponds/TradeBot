@@ -11,13 +11,19 @@ class MockMarketAPI:
     Intercepts API calls and serves historical data/simulated execution.
     """
     
-    def __init__(self, config: Dict[str, Any], historical_data: Dict[str, pd.DataFrame]):
+    def __init__(self, config: Dict[str, Any], historical_data: Dict[str, Dict[str, pd.DataFrame]]):
         self.config = config
         self.logger = logging.getLogger(__name__)
         
         # Simulation State
         self.current_time = None  # Updated by BacktestEngine
+        # Structure: {symbol: {timeframe: DataFrame}}
+        # Simulation State
+        self.current_time = None  # Updated by BacktestEngine
+        # Structure: {symbol: {timeframe: DataFrame}}
         self.historical_data = historical_data
+        # Structure: {symbol: DataFrame(index=timestamp, columns=[funding])}
+        self.historical_funding = {}
         
         # Trading State
         self.orders = {}  # order_id -> order_dict
@@ -31,15 +37,43 @@ class MockMarketAPI:
         """Update the simulation time."""
         self.current_time = timestamp
         
-    def get_current_price(self, symbol: str) -> float:
-        """Get 'current' price from historical data."""
+    def _resolve_symbol(self, symbol: str) -> str:
+        """
+        Resolve symbol alias (e.g. BTC/USDC -> BTC_SPOT).
+        Backwards compatible with normal symbols.
+        """
+        if symbol.endswith('/USDC'):
+            # Check for _SPOT version
+            base = symbol.split('/')[0]
+            spot_sym = f"{base}_SPOT"
+            if spot_sym in self.historical_data:
+                return spot_sym
+        return symbol
+
+    def get_current_price(self, symbol: str) -> Optional[float]:
+        """Get 'current' price from historical data (uses 1h data by default)."""
         if not self.current_time:
             raise ValueError("Simulation time not set")
             
-        df = self.historical_data.get(symbol)
-        if df is None:
-            self.logger.warning(f"No historical data for {symbol}")
+        # Resolve symbol (handle Spot mapping)
+        target_symbol = self._resolve_symbol(symbol)
+            
+        # Default to 1h for price check, fallback to any available
+        symbol_data = self.historical_data.get(target_symbol)
+        if not symbol_data:
+            # Only warn if it's not a spot mapping that might not exist
+            if not symbol.endswith('/USDC'):
+                self.logger.warning(f"No historical data for {target_symbol}")
             return None
+            
+        # Try 1h first, then others
+        df = symbol_data.get('1h')
+        if df is None:
+            # Fallback to first available timeframe
+            if not symbol_data: # Check again in case symbol_data was empty
+                self.logger.warning(f"No historical data for {symbol} in any timeframe.")
+                return None
+            df = next(iter(symbol_data.values()))
             
         # Find row at or before current_time
         # Assumes df is indexed by datetime
@@ -57,9 +91,18 @@ class MockMarketAPI:
         """Get OHLCV history up to current_time."""
         if not self.current_time:
             return None
+        
+        # Resolve symbol
+        target_symbol = self._resolve_symbol(symbol)
+        
+        symbol_data = self.historical_data.get(target_symbol)
+        if not symbol_data:
+            return None
             
-        df = self.historical_data.get(symbol)
+        # Get specific timeframe
+        df = symbol_data.get(timeframe)
         if df is None:
+            # If requested timeframe missing, maybe warn? using None for now
             return None
             
         # Filter data up to current_time
@@ -150,21 +193,80 @@ class MockMarketAPI:
                 # Keeping it simple: if side matches, w-avg. If flip, reset.
                 pass
                 
+                new_size -= size
+                
+            # Calculate Realized PnL if reducing position
+            # Simply: (Exit Price - Entry Price) * CLOSED_SIZE * DIRECTION
+            # Direction: 1 for Long, -1 for Short
+            
+            # Determine if we are closing/reducing
+            if current_pos['size'] != 0:
+                # Check if we are reducing (same side but smaller magnitude, or flipping)
+                # For simplicity in mock: treat any 'fill' as closing the existing portion first
+                
+                # Logic:
+                # If Long (size > 0) and Selling (side=sell): Realize PnL
+                # If Short (size < 0) and Buying (side=buy): Realize PnL
+                
+                is_long = current_pos['size'] > 0
+                is_closing = (is_long and side.lower() == 'sell') or (not is_long and side.lower() == 'buy')
+                
+                if is_closing:
+                    # Amount closed is min(abs(current), size)
+                    closed_qty = min(abs(current_pos['size']), size)
+                    
+                    entry_price = current_pos['entry_price']
+                    price_diff = fill_price - entry_price
+                    
+                    # PnL = Diff * Qty * Direction
+                    # If Long, Direction = 1. If Short, Direction = -1.
+                    direction = 1 if is_long else -1
+                    pnl = price_diff * closed_qty * direction
+                    
+                    self.perp_balance['withdrawable'] += pnl
+                    # Return margin (simplified: assume margin was size/leverage * price)
+                    # We don't track isolated margin per pos in this simple mock perfectly, 
+                    # but we should release some 'margin_used' if we were tracking it.
+                    # For now, equity update via PnL is most important.
+                    
             self.positions[pos_key] = {
                 'symbol': symbol,
                 'size': new_size,
-                'entry_price': fill_price, # Simplified
+                'entry_price': fill_price if current_pos['size'] == 0 else current_pos['entry_price'], # Keep old entry if not fully closed/flipped? 
+                # Simplified: If flip, new entry is fill_price. If partial close, keep old entry.
+                # Just using fill_price for new positions or weighted avg could be better but complex.
+                # Let's keep simple: If direction changes (sign flip), take new price. Else keep old.
                 'side': 'long' if new_size > 0 else 'short' if new_size < 0 else 'neutral',
                 'mark_price': price
             }
             
+            # Fix Entry Price logic for partials vs flips
+            if current_pos['size'] != 0 and new_size != 0 and (current_pos['size'] * new_size > 0):
+                # Same direction (adding or partial close), keep entry price
+                # (Ideally Adding should update Weighted Avg, but sticking to simple for now)
+                self.positions[pos_key]['entry_price'] = current_pos['entry_price']
+            elif current_pos['size'] == 0 and new_size != 0:
+                 self.positions[pos_key]['entry_price'] = fill_price
+            elif (current_pos['size'] * new_size < 0):
+                 # Flip - remaining part is new pos
+                 self.positions[pos_key]['entry_price'] = fill_price
+            
         self.order_id_counter += 1
-        return {
+        order_id = f"mock_{self.order_id_counter}"
+        
+        result = {
             'status': 'filled',
             'filled_size': size,
             'avg_fill_price': fill_price,
-            'order_id': f"mock_{self.order_id_counter}"
+            'order_id': order_id,
+            'symbol': symbol,
+            'side': side,
+            'timestamp': self.current_time
         }
+        
+        self.orders[order_id] = result
+        
+        return result
 
     def get_positions(self) -> List[Dict[str, Any]]:
         return [
@@ -208,6 +310,7 @@ class MockMarketAPI:
     def get_asset_info(self) -> Dict[str, Any]:
         """Mock asset info."""
         universe = []
+        universe = []
         for symbol in self.historical_data.keys():
             # Get current price
             price = self.get_current_price(symbol) or 100.0
@@ -234,11 +337,31 @@ class MockMarketAPI:
     def is_data_available(self, symbol: str) -> bool:
         """Check if data is available for symbol."""
         # In backtest, we assume data availability if symbol is in historical data
-        return symbol in self.historical_data
+        return self._resolve_symbol(symbol) in self.historical_data
         
     def get_account_balance(self) -> Dict[str, Any]:
         """Mock account balance."""
-        equity = self.balances['USDC'] + self.perp_balance['withdrawable']
+        # Calculate Unrealized PnL
+        unrealized_pnl = 0.0
+        for p in self.positions.values():
+            if p['size'] == 0: continue
+            
+            # Update mark price if possible
+            current_price = self.get_current_price(p['symbol'])
+            if current_price:
+                p['mark_price'] = current_price
+            
+            diff = p['mark_price'] - p['entry_price']
+            # Long: profit if Mark > Entry (Diff > 0)
+            # Short: profit if Mark < Entry (Diff < 0) -> but Size is negative?
+            # Our positions storage uses signed size? 
+            # In execute_order: new_size -= size (for sell). So yes, signed.
+            # PnL = (Price - Entry) * Size?
+            # Long: (110 - 100) * 1 = 10. Correct.
+            # Short: (90 - 100) * -1 = -10 * -1 = 10. Correct.
+            unrealized_pnl += diff * p['size']
+
+        equity = self.balances['USDC'] + self.perp_balance['withdrawable'] + unrealized_pnl
         return {
              'total_equity': equity,
              'free_margin': self.perp_balance['withdrawable'],
@@ -262,7 +385,51 @@ class MockMarketAPI:
             'current_price': price,
             'mark_price': price,
             'index_price': price,
-            'funding_rate': 0.0001,
-            'open_interest': 1000000.0,
+            'funding_rate': self.get_funding_rate(symbol) or 0.0,
             'volume_24h': 10000000.0
         }
+
+    def set_funding_data(self, funding_data: Dict[str, pd.DataFrame]):
+        """Inject historical funding rates."""
+        self.historical_funding = funding_data
+
+    def get_funding_rate(self, symbol: str) -> Optional[float]:
+        """Get current funding rate from history."""
+        if not self.current_time:
+            return None
+            
+        df = self.historical_funding.get(symbol)
+        if df is None:
+            # Fallback for symbols without funding history (like Spot?)
+            return 0.0
+            
+        # Find row at or before current_time
+        try:
+            # Funding is hourly, so look for nearest prior value
+            idx = df.index.get_indexer([self.current_time], method='pad')[0]
+            if idx == -1:
+                return 0.0
+            return float(df.iloc[idx]['funding_rate'])
+        except Exception as e:
+            # self.logger.error(f"Error getting funding for {symbol}: {e}")
+            return 0.0
+
+    def get_funding_arb_eligible_symbols(self) -> List[Dict[str, Any]]:
+        """
+        Get list of symbols eligible for funding arbitrage (have both perp and spot).
+        For backtest, we check if we have data for both.
+        """
+        eligible = []
+        # Find all keys in historical_data that end with _SPOT
+        spot_symbols = {k for k in self.historical_data.keys() if k.endswith('_SPOT')}
+        
+        for spot_sym in spot_symbols:
+            base_perp = spot_sym.replace('_SPOT', '')
+            if base_perp in self.historical_data:
+                # We have both
+                eligible.append({
+                    'symbol': base_perp,
+                    'spot_symbol': f"{base_perp}/USDC", # Strategy expects this format
+                    'funding_rate': self.get_funding_rate(base_perp) or 0.0
+                })
+        return eligible

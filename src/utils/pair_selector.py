@@ -142,6 +142,18 @@ class DynamicPairSelector:
         self.optimal_volatility_max = volatility_config.get('optimal_max', 0.08)  # 8% daily
         self.volatility_lookback_days = volatility_config.get('lookback_days', 14)
         
+        # Cluster parameters
+        cluster_config = selection_config.get('cluster_selection', {})
+        self.cluster_enabled = cluster_config.get('enabled', False)
+        self.cluster_k = cluster_config.get('k_clusters', 7)
+        self.cluster_lookback = cluster_config.get('lookback_days', 30)
+        
+        if self.cluster_enabled:
+            from src.utils.cluster_manager import ClusterManager
+            self.cluster_manager = ClusterManager(self.market_api)
+        else:
+            self.cluster_manager = None
+            
         # Diversification parameters
         diversification_config = selection_config.get('diversification', {})
         self.max_correlation = diversification_config.get('max_correlation', 0.7)
@@ -1051,8 +1063,17 @@ class DynamicPairSelector:
         # Rate limits: ~1200 weight/min, OHLCV ~1-2 weight each
         # Safe rate: 30-40 requests per minute = ~1.5-2 seconds between requests
         # =====================================================================
-        RATE_LIMIT_DELAY = 1.5  # seconds between OHLCV fetches (~40/min)
-        MAX_INITIAL_LOAD = 15   # Load top 15 assets initially (~25 seconds)
+        # Check for backtest mode or overrides in config
+        is_backtest = self.config.get('backtesting', {}).get('enabled', False) or self.config.get('mode') == 'backtest'
+        
+        if is_backtest:
+            # In backtest, load everything instantly
+            RATE_LIMIT_DELAY = 0.0
+            MAX_INITIAL_LOAD = 1000 # Effectively infinite
+            self.logger.info("Backtest mode detected: Disabling rate limits and initial load caps")
+        else:
+            RATE_LIMIT_DELAY = 1.5  # seconds between OHLCV fetches (~40/min)
+            MAX_INITIAL_LOAD = 15   # Load top 15 assets initially (~25 seconds)
         
         # Note: No max_pairs limit - all assets passing quality filters are traded
         loaded_symbols = set()  # Track what we've loaded
@@ -1185,6 +1206,73 @@ class DynamicPairSelector:
         # =====================================================================
         selected_pairs = []
         pairs_metadata = {}
+        
+        # Rank by score desc
+        all_metrics.sort(key=lambda m: m.composite_score, reverse=True)
+        scored_pairs = [{'symbol': m.symbol, 'score': m.composite_score, 'metrics': m} for m in all_metrics]
+        
+        max_pairs = self._get_max_pairs_to_trade()
+        
+        if self.cluster_enabled and self.cluster_manager and len(scored_pairs) > max_pairs:
+             # CLUSTERED SELECTION
+             selected_symbols = self._select_clustered_pairs(scored_pairs, max_pairs)
+        else:
+             # STANDARD TOP-N SELECTION
+             selected_symbols = [p['symbol'] for p in scored_pairs[:max_pairs]]
+        
+        selected_pairs = selected_symbols
+        
+        for p in scored_pairs:
+            if p['symbol'] in selected_pairs:
+                pairs_metadata[p['symbol']] = {
+                    'score': p['score'],
+                    'metrics': p['metrics']
+                }
+                
+        return selected_pairs, pairs_metadata
+
+    def _select_clustered_pairs(self, scored_pairs: List[Dict[str, Any]], n: int) -> List[str]:
+        """
+        Select n pairs ensuring diversification across clusters.
+        """
+        symbols = [p['symbol'] for p in scored_pairs]
+        symbol_to_score = {p['symbol']: p for p in scored_pairs}
+        
+        # 1. Cluster
+        try:
+            clusters = self.cluster_manager.cluster_assets(
+                symbols, 
+                n_clusters=self.cluster_k, 
+                lookback_days=self.cluster_lookback
+            )
+        except Exception as e:
+            self.logger.error(f"Clustering failed, falling back to top-N: {e}")
+            return [p['symbol'] for p in scored_pairs[:n]]
+        
+        # 2. Organize by cluster
+        cluster_queues = {}
+        for cid, cluster_symbols in clusters.items():
+            # Sort symbols in this cluster by score desc
+            sorted_syms = sorted(cluster_symbols, key=lambda s: symbol_to_score[s]['score'], reverse=True)
+            cluster_queues[cid] = sorted_syms
+            
+        # 3. Round Robin Selection
+        selected = []
+        cluster_ids = sorted(cluster_queues.keys())
+        
+        while len(selected) < n and any(cluster_queues.values()):
+            progress_made = False
+            for cid in cluster_ids:
+                if len(selected) >= n:
+                    break
+                queue = cluster_queues[cid]
+                if queue:
+                    selected.append(queue.pop(0))
+                    progress_made = True
+            if not progress_made:
+                break
+                
+        return selected
         
         self.logger.info("=" * 60)
         self.logger.info("PAIR SELECTION RANKINGS (by volume + score)")

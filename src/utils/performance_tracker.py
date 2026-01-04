@@ -239,7 +239,13 @@ class PerformanceTracker:
         self.data_dir.mkdir(exist_ok=True)
         
         # Initialize SQLite database
-        db_path = self.data_dir / 'trades.db'
+        # Check config for override (e.g., for backtesting)
+        custom_db_path = self.config.get('persistence', {}).get('db_path')
+        if custom_db_path:
+            db_path = Path(custom_db_path)
+        else:
+            db_path = self.data_dir / 'trades.db'
+            
         self.db = TradeDatabase(str(db_path))
         
         # In-memory cache for current session

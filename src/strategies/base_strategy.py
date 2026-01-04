@@ -21,12 +21,14 @@ class BaseStrategy(ABC):
         '1h': 60, '4h': 240, '1d': 1440
     }
     
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], timeframe: str = None):
         """
         Initialize the base strategy.
         
         Args:
             config: Configuration dictionary
+            timeframe: Optional timeframe override (e.g. '15m', '1h'). 
+                       If None, uses PREFERRED_TIMEFRAME.
         """
         self.config = config
         self.logger = logging.getLogger(self.__class__.__name__)
@@ -35,8 +37,8 @@ class BaseStrategy(ABC):
         self.is_active = True
         self.trades = []
         
-        # Timeframe - use class-defined preferred timeframe
-        self.timeframe = self.PREFERRED_TIMEFRAME
+        # Timeframe - use override or class-defined preferred timeframe
+        self.timeframe = timeframe if timeframe else self.PREFERRED_TIMEFRAME
         self.ohlcv_limit = config['strategies']['ohlcv_limit']
     
     @property
@@ -46,24 +48,25 @@ class BaseStrategy(ABC):
         return minutes * 60
     
     @abstractmethod
-    def generate_signal(self, ohlcv: pd.DataFrame) -> Optional[Dict[str, Any]]:
+    def generate_signal(self, symbol: str, ohlcv: Dict[str, pd.DataFrame]) -> Optional[Dict[str, Any]]:
         """
-        Generate trading signal based on market data.
+        Generate trading signal based on market data across multiple timeframes.
         
         Args:
-            ohlcv: OHLCV data DataFrame
+            symbol: Symbol being analyzed
+            ohlcv: Dictionary mapping timeframe (e.g., '1h', '4h') to OHLCV DataFrame
             
         Returns:
             Signal dictionary or None if no signal
         """
         pass
 
-    def calculate_signal_strength(self, ohlcv: pd.DataFrame) -> float:
+    def calculate_signal_strength(self, ohlcv: Dict[str, pd.DataFrame]) -> float:
         """
         Calculate the strength of the trading signal.
         
         Args:
-            ohlcv: OHLCV data DataFrame
+            ohlcv: Dictionary mapping timeframe to OHLCV DataFrame
             
         Returns:
             Signal strength between 0.0 and 1.0
@@ -134,7 +137,7 @@ class BaseStrategy(ABC):
         # Subclasses should override for custom exit logic
         return False, None
     
-    def calculate_take_profit(self, entry_price: float, side: str, ohlcv: pd.DataFrame = None, 
+    def calculate_take_profit(self, entry_price: float, side: str, ohlcv: Dict[str, pd.DataFrame] = None, 
                             signal_strength: float = 1.0, market_volatility: float = 1.0) -> float:
         """
         Calculate take profit price based on strategy-specific logic.

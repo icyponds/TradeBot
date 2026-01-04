@@ -191,40 +191,44 @@ def load_config() -> Dict[str, Any]:
         
         # Strategy Configuration
         "strategies": {
-            "enabled": os.getenv("ENABLED_STRATEGIES", "stat_arb,funding_rate_arbitrage,ou_mean_reversion,momentum_factor,moving_average,rsi,bollinger_band,supertrend,vwap").split(","),
-            # Note: timeframe is now auto-selected per strategy (see each strategy class)
+            "enabled": os.getenv("ENABLED_STRATEGIES", "stat_arb,funding_rate_arbitrage,ou_mean_reversion,momentum_factor").split(","),
+            # Dynamic Timeframe Architecture: Define specific strategy instances
+            # If 'instances' is defined, it overrides 'enabled' list for instantiation
+            "instances": [
+                # Parallel Strategy Execution:
+                # We run multiple instances of the same strategy on different timeframes.
+                # The StrategySelector will dynamically weight these based on live performance,
+                # effectively finding the "best" timeframe for current market conditions.
+
+                # Statistical Arbitrage (15m vs 1h)
+                {"type": "stat_arb", "name": "stat_arb_15m", "timeframe": "15m"},
+                {"type": "stat_arb", "name": "stat_arb_1h",  "timeframe": "1h"},
+
+                # OU Mean Reversion (15m vs 1h)
+                {"type": "ou_mean_reversion", "name": "ou_mean_reversion_15m", "timeframe": "15m"},
+                {"type": "ou_mean_reversion", "name": "ou_mean_reversion_1h",  "timeframe": "1h"},
+                
+                # Momentum (4h vs 1d)
+                {"type": "momentum_factor", "name": "momentum_4h", "timeframe": "4h"},
+                {"type": "momentum_factor", "name": "momentum_1d", "timeframe": "1d"},
+
+                # Funding Rate Arb (1h) - strictly optimal at 1h (8h funding / 8)
+                {"type": "funding_rate_arbitrage", "name": "funding_arb_1h", "timeframe": "1h"},
+                
+                # Volatility Breakout (1h)
+                {"type": "volatility_breakout", "name": "vol_breakout_1h", "timeframe": "1h"},
+                
+                # Adaptive Grid (15m)
+                {"type": "adaptive_grid", "name": "adaptive_grid_15m", "timeframe": "15m"},
+                
+                # Sentiment ML (1h)
+                {"type": "sentiment_ml", "name": "sentiment_ml_1h", "timeframe": "1h"},
+                
+                # Liquidation Hunter (5m)
+                {"type": "liquidation_hunter", "name": "liquidation_hunter_5m", "timeframe": "5m"},
+            ],
+            # Note: timeframe is now auto-selected per strategy instance
             "ohlcv_limit": int(os.getenv("OHLCV_LIMIT", "100")),
-            "moving_average": {
-                "short_period": int(os.getenv("MA_SHORT_PERIOD", "5")),
-                "long_period": int(os.getenv("MA_LONG_PERIOD", "10")),
-                "trend_strength_multiplier": float(os.getenv("MA_TREND_STRENGTH_MULTIPLIER", "10")),
-                "volatility_cap": float(os.getenv("MA_VOLATILITY_CAP", "2.0")),
-                "base_take_profit_percentage": float(os.getenv("MA_BASE_TAKE_PROFIT_PERCENTAGE", "0.06")),
-                "trend_adjustment_max": float(os.getenv("MA_TREND_ADJUSTMENT_MAX", "0.5")),
-                "volatility_adjustment_max": float(os.getenv("MA_VOLATILITY_ADJUSTMENT_MAX", "0.3")),
-                "take_profit_min": float(os.getenv("MA_TAKE_PROFIT_MIN", "0.02")),
-                "take_profit_max": float(os.getenv("MA_TAKE_PROFIT_MAX", "0.15")),
-            },
-            "rsi": {
-                "period": int(os.getenv("RSI_PERIOD", "14")),
-                "overbought": float(os.getenv("RSI_OVERBOUGHT", "70")),
-                "oversold": float(os.getenv("RSI_OVERSOLD", "30")),
-            },
-            "bollinger_band": {
-                "period": int(os.getenv("BB_PERIOD", "20")),
-                "std_dev": float(os.getenv("BB_STD_DEV", "2.0")),
-                "kc_mult": float(os.getenv("BB_KC_MULT", "1.5")),
-            },
-            "supertrend": {
-                "atr_period": int(os.getenv("SUPERTREND_ATR_PERIOD", "10")),
-                "multiplier": float(os.getenv("SUPERTREND_MULTIPLIER", "3.0")),
-            },
-            "vwap": {
-                "std_dev_mult": float(os.getenv("VWAP_STD_DEV_MULT", "2.0")),
-                "rsi_period": int(os.getenv("VWAP_RSI_PERIOD", "14")),
-                "rsi_overbought": float(os.getenv("VWAP_RSI_OVERBOUGHT", "70")),
-                "rsi_oversold": float(os.getenv("VWAP_RSI_OVERSOLD", "30")),
-            },
             "stat_arb": {
                 "z_score_threshold": float(os.getenv("STAT_ARB_Z_SCORE_THRESHOLD", "2.0")),
                 "window_size": int(os.getenv("STAT_ARB_WINDOW_SIZE", "100")),
@@ -281,6 +285,35 @@ def load_config() -> Dict[str, Any]:
                 "extreme_return_threshold": float(os.getenv("MOMENTUM_EXTREME_THRESHOLD", "0.5")),
                 "cache_ttl_hours": int(os.getenv("MOMENTUM_CACHE_TTL_HOURS", "1")),
             },
+            
+            # Volatility Breakout Strategy
+            "volatility_breakout": {
+                "bb_length": int(os.getenv("VB_BB_LENGTH", "20")),
+                "bb_std": float(os.getenv("VB_BB_STD", "2.0")),
+                "squeeze_threshold": float(os.getenv("VB_SQUEEZE_THRESHOLD", "0.10")),
+                "atr_length": int(os.getenv("VB_ATR_LENGTH", "14")),
+                "atr_multiplier_sl": float(os.getenv("VB_ATR_MULT_SL", "2.0")),
+                "atr_multiplier_tp": float(os.getenv("VB_ATR_MULT_TP", "4.0")),
+            },
+            
+            # Adaptive Grid Strategy
+            "adaptive_grid": {
+                "ema_period": int(os.getenv("GRID_EMA_PERIOD", "50")),
+                "atr_period": int(os.getenv("GRID_ATR_PERIOD", "14")),
+                "grid_spacing_atr": float(os.getenv("GRID_SPACING_ATR", "1.5")),
+            },
+            
+            # Sentiment ML Strategy
+            "sentiment_ml": {
+                "sentiment_threshold": float(os.getenv("SENTIMENT_THRESHOLD", "2.0")),
+                "normalization_lookback": int(os.getenv("SENTIMENT_LOOKBACK", "168")),
+            },
+            
+            # Liquidation Hunter Strategy
+            "liquidation_hunter": {
+                "window": int(os.getenv("LH_WINDOW", "20")),
+                "std_dev_threshold": float(os.getenv("LH_STD_DEV_THRESHOLD", "3.0")),
+            },
         },
         
         # Logging Configuration
@@ -293,12 +326,20 @@ def load_config() -> Dict[str, Any]:
             "max_log_age_days": int(os.getenv("MAX_LOG_AGE_DAYS", "7")),
             "max_file_size_mb": int(os.getenv("MAX_LOG_FILE_SIZE_MB", "50")),
         },
+
+        # Persistence Configuration (optional)
+        # NOTE: Backtests override this to write results to `data/backtest_results.db`.
+        "persistence": {
+            "db_path": (os.getenv("PERSISTENCE_DB_PATH", "").strip() or None),
+        },
         
         # Backtesting Configuration
         "backtesting": {
             "enabled": os.getenv("BACKTESTING_ENABLED", "false").lower() == "true",
             "start_date": os.getenv("BACKTEST_START_DATE", "2024-01-01"),
             "end_date": os.getenv("BACKTEST_END_DATE", "2024-12-31"),
+            "results_db_path": os.getenv("BACKTEST_RESULTS_DB_PATH", "data/backtest_results.db"),
+            "reset_results_db": os.getenv("BACKTEST_RESET_RESULTS_DB", "true").lower() == "true",
         },
         
         # Order Management Configuration
@@ -332,6 +373,13 @@ def load_config() -> Dict[str, Any]:
                 "historical_performance": float(os.getenv("PAIR_WEIGHT_HISTORICAL", "0.15")),
             },
             
+            # Clustering for advanced diversification (Phase 10)
+            "cluster_selection": {
+                "enabled": os.getenv("CLUSTER_SELECTION_ENABLED", "true").lower() == "true",
+                "k_clusters": int(os.getenv("CLUSTER_K", "5")),
+                "lookback_days": int(os.getenv("CLUSTER_LOOKBACK", "30")),
+            },
+            
             # Volatility parameters (optimal daily volatility range)
             "volatility": {
                 "optimal_min": float(os.getenv("PAIR_VOL_OPTIMAL_MIN", "0.02")),  # 2%
@@ -347,14 +395,6 @@ def load_config() -> Dict[str, Any]:
         },
         
         # RSI Strategy Configuration
-        "rsi_strategy": {
-            "oversold_threshold": float(os.getenv("RSI_OVERSOLD_THRESHOLD", "30")),
-            "overbought_threshold": float(os.getenv("RSI_OVERBOUGHT_THRESHOLD", "70")),
-            "neutral_threshold": float(os.getenv("RSI_NEUTRAL_THRESHOLD", "60")),
-            "factor_oversold": float(os.getenv("RSI_FACTOR_OVERSOLD", "1.3")),
-            "factor_overbought": float(os.getenv("RSI_FACTOR_OVERBOUGHT", "0.7")),
-            "volatility_adjustment_max": float(os.getenv("RSI_VOLATILITY_ADJUSTMENT_MAX", "0.3")),
-        },
         
     }
     

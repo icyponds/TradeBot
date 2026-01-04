@@ -27,16 +27,15 @@ from src.models.trade import Trade, Position, MultiLegPosition, PositionLeg
 
 # Strategy imports - only used when enabled in config
 STRATEGY_CLASSES = {
-    # Legacy strategies (kept for experimentation/backwards-compat)
-    'moving_average': ('legacy.moving_average_strategy', 'MovingAverageStrategy'),
-    'rsi': ('legacy.rsi_strategy', 'RSIStrategy'),
-    'bollinger_band': ('legacy.bollinger_band_strategy', 'BollingerBandSqueezeStrategy'),
-    'supertrend': ('legacy.supertrend_strategy', 'SupertrendStrategy'),
-    'vwap': ('legacy.vwap_strategy', 'VWAPStrategy'),
+    # Advanced Strategies
     'stat_arb': ('statistical_arbitrage_strategy', 'StatisticalArbitrageStrategy'),
     'funding_rate_arbitrage': ('funding_rate_arbitrage_strategy', 'FundingRateArbitrageStrategy'),
     'ou_mean_reversion': ('ou_mean_reversion_strategy', 'OUMeanReversionStrategy'),
     'momentum_factor': ('momentum_factor_strategy', 'MomentumFactorStrategy'),
+    'volatility_breakout': ('volatility_breakout_strategy', 'VolatilityBreakoutStrategy'),
+    'adaptive_grid': ('adaptive_grid_strategy', 'AdaptiveGridStrategy'),
+    'sentiment_ml': ('sentiment_ml_strategy', 'SentimentMLStrategy'),
+    'liquidation_hunter': ('liquidation_hunter_strategy', 'LiquidationHunterStrategy'),
 }
 
 
@@ -349,43 +348,64 @@ class StrategyManager:
         return HyperliquidAPI(self.config)
     
     def _initialize_strategies(self):
-        """Initialize only enabled trading strategies."""
+        """Initialize strategies based on instances configuration."""
         import importlib
         
-        enabled_strategies = self.config['strategies']['enabled']
+        # Support for Phase 6 Multi-Instance Architecture
+        instances_config = self.config['strategies'].get('instances')
+        
+        if instances_config:
+            # New path: Instantiate specific instances
+            strategy_definitions = instances_config
+        else:
+            # Legacy path: Instantiate from enabled list (backward compatibility)
+            # Create a "default instance" for each enabled strategy type
+            enabled_strategies = self.config['strategies']['enabled']
+            strategy_definitions = []
+            for strategy_type in enabled_strategies:
+                strategy_type = strategy_type.strip()
+                if strategy_type:
+                    strategy_definitions.append({
+                        "type": strategy_type, 
+                        "name": strategy_type, # Use type as name for legacy behavior
+                        "timeframe": None      # Use default preferred timeframe
+                    })
+
         strategies = {}
         
-        for strategy_name in enabled_strategies:
-            strategy_name = strategy_name.strip()
-            if strategy_name not in STRATEGY_CLASSES:
-                self.logger.warning(f"Unknown strategy: {strategy_name}")
+        for strategy_def in strategy_definitions:
+            strategy_type = strategy_def['type']
+            instance_name = strategy_def.get('name', strategy_type)
+            timeframe = strategy_def.get('timeframe')
+
+            strategy_type = strategy_type.strip()
+            if strategy_type not in STRATEGY_CLASSES:
+                self.logger.warning(f"Unknown strategy type: {strategy_type}")
                 continue
             
-            module_name, class_name = STRATEGY_CLASSES[strategy_name]
+            module_name, class_name = STRATEGY_CLASSES[strategy_type]
             
             try:
                 # Dynamically import the strategy module
                 module = importlib.import_module(f'.{module_name}', package='src.strategies')
                 strategy_class = getattr(module, class_name)
                 
-                # Some strategies require additional arguments
-                if strategy_name == 'stat_arb':
-                    strategies[strategy_name] = strategy_class(
-                        self.config, self.market_api, self.correlation_manager
+                # Instantiate with injected dependencies and TIMEFRAME
+                if strategy_type == 'stat_arb':
+                    strategies[instance_name] = strategy_class(
+                        self.config, self.market_api, self.correlation_manager, timeframe=timeframe
                     )
-                elif strategy_name in ('funding_rate_arbitrage', 'momentum_factor'):
-                    # These strategies accept optional market_api
-                    strategies[strategy_name] = strategy_class(
-                        self.config, self.market_api
+                elif strategy_type in ('funding_rate_arbitrage', 'momentum_factor'):
+                    strategies[instance_name] = strategy_class(
+                        self.config, self.market_api, timeframe=timeframe
                     )
                 else:
-                    # Standard strategies only take config
-                    strategies[strategy_name] = strategy_class(self.config)
+                    strategies[instance_name] = strategy_class(self.config, timeframe=timeframe)
                 
-                self.logger.info(f"Initialized strategy: {strategy_name}")
+                self.logger.info(f"Initialized strategy instance: {instance_name} ({strategy_type}) on {strategies[instance_name].timeframe}")
                 
             except Exception as e:
-                self.logger.error(f"Failed to initialize strategy {strategy_name}: {e}")
+                self.logger.error(f"Failed to initialize strategy {instance_name}: {e}")
         
         return strategies
     
@@ -655,15 +675,20 @@ class StrategyManager:
         except Exception as e:
             self.logger.error(f"Error monitoring pending orders: {e}")
 
-    def run_trading_cycle(self) -> bool:
+    def run_trading_cycle(self, current_time: float = None) -> bool:
         """
         Run a single iteration of the trading logic.
+        
+        Args:
+            current_time: Optional timestamp (unix seconds) for backtesting. 
+                         If None, uses time.time().
         
         Returns:
             bool: True if trading logic ran (pairs analyzed), False if skipped (no pairs)
         """
         try:
-            current_time = time.time()
+            if current_time is None:
+                current_time = time.time()
 
             # Update regime and change-point gating from market proxy (once per cycle)
             self._maybe_update_regime_and_changepoint()
@@ -865,7 +890,7 @@ class StrategyManager:
                 self.logger.debug(f"Insufficient data for {symbol}, skipping")
                 return
             
-            # Get current price (timeframe doesn't matter for current price)
+            # Get current price
             market_data = self.market_api.get_market_data(symbol)
             if not market_data:
                 self.logger.warning(f"Could not get market data for {symbol}")
@@ -873,36 +898,52 @@ class StrategyManager:
             
             current_price = market_data['current_price']
             
+            # Fetch data for all timeframes
+            ohlcv_dict = {}
+            # Standard set of timeframes to fetch
+            target_timeframes = ['15m', '1h', '4h', '1d']
+            
+            has_sufficient_data = False
+            for tf in target_timeframes:
+                # Use a reasonable limit
+                df = self.market_api.get_ohlcv(symbol, tf, self.ohlcv_limit)
+                if df is not None and len(df) >= 20:
+                    ohlcv_dict[tf] = df
+                    has_sufficient_data = True
+            
+            if not has_sufficient_data:
+                self.logger.debug(f"Insufficient OHLCV data for {symbol} (checked {target_timeframes})")
+                return
+
             # Collect all signals from all strategies for this symbol
             collected_signals = []
             
             for strategy_name, strategy in self.strategies.items():
-                # Handle special strategies that don't participate in conflict resolution
-                if strategy_name == 'funding_rate_arbitrage':
+                strategy_class_name = strategy.__class__.__name__
+            
+                # Handle special strategies
+                if strategy_class_name == 'FundingRateArbitrageStrategy':
                     # Funding rate arb is multi-leg and doesn't conflict with single-leg strategies
-                    ohlcv = self.market_api.get_ohlcv(symbol, strategy.timeframe, self.ohlcv_limit)
-                    if ohlcv is not None:
-                        self._execute_strategy(symbol, strategy_name, strategy, ohlcv, current_price)
+                    # It uses funding rates, but we pass full context
+                    self._execute_strategy(symbol, strategy_name, strategy, ohlcv_dict, current_price)
                     continue
                 
-                if strategy_name == 'momentum_factor':
+                if strategy_class_name == 'MomentumFactorStrategy':
                     # Momentum is handled separately in _run_portfolio_strategies
                     continue
                 
-                # Get OHLCV data for this strategy's timeframe
-                ohlcv = self.market_api.get_ohlcv(symbol, strategy.timeframe, self.ohlcv_limit)
-                if ohlcv is None or len(ohlcv) < 20:  # Need at least 20 candles for analysis
-                    self.logger.debug(f"Insufficient {strategy.timeframe} OHLCV data for {symbol}/{strategy_name}")
-                    continue
+                # Check if strategy's preferred timeframe is available
+                # If not, we might skip or let strategy handle fallback
+                # BaseStrategy logic usually handles fallback or returns None
                 
                 # Generate signal without executing
-                signal = self._generate_signal_for_strategy(symbol, strategy_name, strategy, ohlcv, current_price)
+                signal = self._generate_signal_for_strategy(symbol, strategy_name, strategy, ohlcv_dict, current_price)
                 if signal:
                     collected_signals.append({
                         'strategy_name': strategy_name,
                         'strategy': strategy,
                         'signal': signal,
-                        'ohlcv': ohlcv,
+                        'ohlcv': ohlcv_dict,
                         'current_price': current_price
                     })
             
@@ -915,7 +956,7 @@ class StrategyManager:
         except Exception as e:
             self.logger.error(f"Error analyzing {symbol}: {e}")
     
-    def _generate_signal_for_strategy(self, symbol: str, strategy_name: str, strategy, ohlcv: pd.DataFrame, current_price: float) -> Optional[Dict[str, Any]]:
+    def _generate_signal_for_strategy(self, symbol: str, strategy_name: str, strategy, ohlcv: Dict[str, pd.DataFrame], current_price: float) -> Optional[Dict[str, Any]]:
         """Generate a signal from a strategy without executing it."""
         try:
             # Gate new entries for selected strategies during change-point cooldown
@@ -939,7 +980,8 @@ class StrategyManager:
             if strategy_name == 'ou_mean_reversion':
                 signal = strategy.generate_signal_for_symbol(symbol, ohlcv)
             else:
-                signal = strategy.generate_signal(ohlcv)
+                # MTF strategies now accept symbol and ohlcv dict
+                signal = strategy.generate_signal(symbol, ohlcv)
             
             if signal:
                 # Get strategy weight
@@ -1131,56 +1173,65 @@ class StrategyManager:
         These strategies analyze ALL symbols at once rather than per-symbol.
         """
         try:
-            # Momentum Factor Strategy
-            if 'momentum_factor' in self.strategies:
-                momentum_strategy = self.strategies['momentum_factor']
-                
-                if not self.strategy_selector.is_strategy_enabled('momentum_factor'):
-                    return
-                
-                # Generate portfolio-level signals
-                signals = momentum_strategy.generate_portfolio_signals(trading_pairs)
-                
-                if signals:
-                    self.logger.info(f"Momentum strategy generated {len(signals)} rebalance signals")
+            # Iterate through all strategies to find Momentum strategies
+            for strategy_name, strategy in self.strategies.items():
+                if strategy.__class__.__name__ == 'MomentumFactorStrategy':
+                    momentum_strategy = strategy
                     
-                    for signal in signals:
-                        symbol = signal.get('symbol')
-                        action = signal.get('signal')  # 'buy' or 'sell'
-                        reason = signal.get('reason', '')
+                    if not self.strategy_selector.is_strategy_enabled(strategy_name):
+                        continue
+                    
+                    # Generate portfolio-level signals
+                    signals = momentum_strategy.generate_portfolio_signals(trading_pairs)
+                    
+                    if signals:
+                        self.logger.info(f"Momentum strategy ({strategy_name}) generated {len(signals)} rebalance signals")
                         
-                        self.logger.info(f"Momentum signal: {action.upper()} {symbol} - {reason}")
-                        
-                        # Execute the signal
-                        # Get current price
-                        market_data = self.market_api.get_market_data(symbol)
-                        if not market_data:
-                            continue
-                        
-                        current_price = market_data['current_price']
-                        
-                        # Get OHLCV for position sizing calculations
-                        ohlcv = self.market_api.get_ohlcv(symbol, momentum_strategy.timeframe, self.ohlcv_limit)
-                        if ohlcv is None:
-                            continue
-                        
-                        # Check if we should execute
-                        should_execute = self._should_execute_signal(
-                            symbol, signal, current_price, ohlcv, 'momentum_factor'
-                        )
-                        
-                        if should_execute:
-                            # Apply regime-aware strategy weight to signal strength (if present) for sizing.
-                            # Momentum signals may not include signal_strength; sizing will fallback to internal strength calc.
-                            eff_w = self._get_effective_strategy_weight('momentum_factor')
-                            if 'signal_strength' in signal:
-                                signal['signal_strength'] *= eff_w
-                            self._execute_trade(symbol, signal, current_price, 'momentum_factor', ohlcv)
+                        for signal in signals:
+                            symbol = signal.get('symbol')
+                            action = signal.get('signal')  # 'buy' or 'sell'
+                            reason = signal.get('reason', '')
                             
+                            self.logger.info(f"Momentum signal: {action.upper()} {symbol} - {reason}")
+                            
+                            # Execute the signal
+                            # Get current price
+                            market_data = self.market_api.get_market_data(symbol)
+                            if not market_data:
+                                continue
+                            
+                            current_price = market_data['current_price']
+                            
+                            # Get OHLCV for position sizing calculations
+                            # Fetch all timeframes
+                            ohlcv_dict = {}
+                            target_timeframes = ['15m', '1h', '4h', '1d']
+                            for tf in target_timeframes:
+                                 df = self.market_api.get_ohlcv(symbol, tf, self.ohlcv_limit)
+                                 if df is not None:
+                                     ohlcv_dict[tf] = df
+                            
+                            if not ohlcv_dict:
+                                self.logger.debug(f"Insufficient OHLCV data for {symbol} (momentum sizing)")
+                                continue
+                            
+                            # Check if we should execute
+                            should_execute = self._should_execute_signal(
+                                symbol, signal, current_price, ohlcv_dict, strategy_name
+                            )
+                            
+                            if should_execute:
+                                # Apply regime-aware strategy weight to signal strength (if present) for sizing.
+                                # Momentum signals may not include signal_strength; sizing will fallback to internal strength calc.
+                                eff_w = self._get_effective_strategy_weight(strategy_name)
+                                if 'signal_strength' in signal:
+                                    signal['signal_strength'] *= eff_w
+                                self._execute_trade(symbol, signal, current_price, strategy_name, ohlcv_dict)
+                        
         except Exception as e:
             self.logger.error(f"Error running portfolio strategies: {e}")
     
-    def _execute_strategy(self, symbol: str, strategy_name: str, strategy, ohlcv: pd.DataFrame, current_price: float):
+    def _execute_strategy(self, symbol: str, strategy_name: str, strategy, ohlcv: Dict[str, pd.DataFrame], current_price: float):
         """Execute a single strategy."""
         try:
             # Gate new entries for selected strategies during change-point cooldown
@@ -1198,23 +1249,31 @@ class StrategyManager:
             
             # Generate signal based on strategy type
             signal = None
+            strategy_class = strategy.__class__.__name__
             
-            if strategy_name == 'stat_arb':
+            if strategy_class == 'StatisticalArbitrageStrategy':
                 # Stat Arb needs special handling to fetch correlated pair data
                 signal = strategy.generate_signal_with_symbol(symbol, ohlcv)
-            elif strategy_name == 'funding_rate_arbitrage':
+            elif strategy_class == 'FundingRateArbitrageStrategy':
                 # Funding Rate Arbitrage needs funding rate data and multi-leg position context
                 signal = self._generate_funding_arb_signal(symbol, strategy)
-            elif strategy_name == 'ou_mean_reversion':
+            elif strategy_class == 'OUMeanReversionStrategy':
                 # OU Mean Reversion needs symbol context for parameter caching
                 signal = strategy.generate_signal_for_symbol(symbol, ohlcv)
-            elif strategy_name == 'momentum_factor':
+            elif strategy_class == 'MomentumFactorStrategy':
                 # Momentum is a cross-sectional strategy that ranks all symbols
                 # It can't generate per-symbol signals - needs portfolio-level rebalancing
                 # TODO: Implement periodic momentum rebalancing via generate_portfolio_signals
                 return
             else:
-                signal = strategy.generate_signal(ohlcv)
+                # Get preferred timeframe data
+                tf = getattr(strategy, 'timeframe', '1h')
+                # Extract specific dataframe from dict
+                strategy_ohlcv = ohlcv.get(tf)
+                if strategy_ohlcv is not None:
+                    signal = strategy.generate_signal(strategy_ohlcv)
+                else:
+                     return
             
             if not signal:
                 return
@@ -1295,7 +1354,7 @@ class StrategyManager:
         return None
     
     def _handle_multi_leg_signal(self, symbol: str, signal: Dict[str, Any], current_price: float, 
-                                strategy_name: str, ohlcv: pd.DataFrame):
+                                strategy_name: str, ohlcv: Dict[str, pd.DataFrame]):
         """Handle multi-leg trade signal."""
         self.execution_engine.handle_multi_leg_signal(
             symbol, signal, current_price, strategy_name, ohlcv, 
@@ -1311,7 +1370,7 @@ class StrategyManager:
         self.execution_engine.check_liquidation_risks(self.strategies)
 
     def _should_execute_signal(self, symbol: str, signal: Dict[str, Any], current_price: float, 
-                              ohlcv: pd.DataFrame, strategy_name: str) -> bool:
+                              ohlcv: Dict[str, pd.DataFrame], strategy_name: str) -> bool:
         """Determine if we should execute a trading signal."""
         # Check if we already have a position
         if symbol in self.positions:
@@ -1325,7 +1384,18 @@ class StrategyManager:
         
         # Calculate signal strength and volatility
         signal_strength = self.strategies[strategy_name].calculate_signal_strength(ohlcv)
-        market_volatility = self._calculate_market_volatility(ohlcv)
+        
+        # Volatility calc - extract preferred dataframe or use one
+        # Use strategy's timeframe if possible, or fallback
+        strategy = self.strategies.get(strategy_name)
+        if strategy and hasattr(strategy, 'timeframe') and strategy.timeframe in ohlcv:
+            vol_df = ohlcv[strategy.timeframe]
+        elif ohlcv:
+            vol_df = next(iter(ohlcv.values()))
+        else:
+            vol_df = pd.DataFrame()
+            
+        market_volatility = self._calculate_market_volatility(vol_df)
         
         # Check position limit before proceeding
         if not self._should_execute_with_position_limit(symbol, signal, signal_strength):
@@ -1370,7 +1440,7 @@ class StrategyManager:
         
         return True
     
-    def _execute_trade(self, symbol: str, signal: Dict[str, Any], current_price: float, strategy_name: str, ohlcv: pd.DataFrame):
+    def _execute_trade(self, symbol: str, signal: Dict[str, Any], current_price: float, strategy_name: str, ohlcv: Dict[str, pd.DataFrame]):
         """Execute a trade based on signal."""
         # Delegate to execution engine
         self.execution_engine.execute_trade(symbol, signal, current_price, strategy_name, ohlcv, self.strategies)

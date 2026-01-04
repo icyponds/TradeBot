@@ -37,25 +37,56 @@ def run_smoke_test():
     
     # 1. Config
     config = load_config()
-    # Force enable one legacy strategy for testing
-    config['strategies']['enabled'] = ['moving_average']
+    # Use default strategy instances from settings.py (StatArb, FundingArb, etc.)
+    # config['strategies']['enabled'] = ['moving_average']
+    
+    # 5. Enable Backtest Mode for PairSelector (load all assets instantly)
+    config['mode'] = 'backtest'
+    config['backtesting'] = {'enabled': True}
     
     # 2. Data
-    start_date = datetime(2024, 1, 1)
-    end_date = datetime(2024, 1, 7)
+    # 2. Data
+    # If using DB, we pass None to engine and it loads it
+    # But we need to know start/end date.
     
-    symbol = "ETH"  # Use simple symbol to match universe name
+    # Let's peek at DB range if available
+    from src.utils.trade_database import TradeDatabase
+    db = TradeDatabase()
     
-    data = {}
-    data[symbol] = generate_synthetic_data(symbol, start_date, end_date)
+    # Default to last 30 days if no data found
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=30)
     
+    # Try to find common range from loaded symbols
+    symbols = db.get_market_data_symbols('1h')
+    if symbols:
+        print(f"Found {len(symbols)} symbols in DB: {symbols[:5]}...")
+        # Get range for first symbol
+        s_start, s_end = db.get_available_data_range(symbols[0], '1h')
+        if s_start and s_end:
+            start_date = s_start
+            end_date = s_end
+            print(f"Simulating DB range: {start_date} to {end_date}")
+    else:
+        print("No data in DB. Loading from CSVs as fallback...")
+        # ... logic to load CSVs if needed ...
+        # (Original CSV loading logic removed for brevity as we move to DB)
+        pass
+
     # 3. Engine
-    engine = BacktestEngine(config, data)
+    # Initialize with None to trigger DB load
+    # Configure separate backtest DB
+    db_path = os.path.join('data', 'backtest_results.db')
+    if os.path.exists(db_path):
+        os.remove(db_path)  # Clear previous results
+        print(f"Cleared previous backtest DB: {db_path}")
+        
+    config['persistence'] = {'db_path': 'data/backtest_results.db'}
+    engine = BacktestEngine(config, historical_data=None)
     
-    # Patch PairSelector to return our symbol associated with engine's strategy manager
-    # Or rely on config['trading']['symbols'] if dynamic is false.
-    config['trading']['dynamic_pair_selection'] = False
-    config['trading']['symbols'] = [symbol]
+    # Configure symbols
+    config['trading']['dynamic_pair_selection'] = True # Allow selector to pick from available
+    config['trading']['symbols'] = symbols # Limit to what we have
     
     # Increase log level
     import logging
@@ -69,4 +100,6 @@ def run_smoke_test():
     print(f"Orders: {report['total_orders']}")
 
 if __name__ == "__main__":
+    # Ensure DB directory exists
+    os.makedirs('data', exist_ok=True)
     run_smoke_test()

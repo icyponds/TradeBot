@@ -2374,6 +2374,24 @@ class HyperliquidAPI:
         except Exception as e:
             self.logger.error(f"Error getting funding rates: {e}")
             return {}
+            
+    def get_funding_history(self, symbol: str, start_time_ms: int, end_time_ms: int) -> List[Dict[str, Any]]:
+        """
+        Get funding history for a symbol.
+        
+        Args:
+            symbol: Trading symbol
+            start_time_ms: Start time in milliseconds
+            end_time_ms: End time in milliseconds
+            
+        Returns:
+            List of funding rate records
+        """
+        try:
+            return self.info.funding_history(symbol, start_time_ms, end_time_ms)
+        except Exception as e:
+            self.logger.error(f"Error getting funding history for {symbol}: {e}")
+            return []
     
     # =========================================================================
     # HIP-3 PERPS
