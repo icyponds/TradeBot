@@ -78,11 +78,20 @@ class MockMarketAPI:
         # Find row at or before current_time
         # Assumes df is indexed by datetime
         try:
-            # Efficient lookup for sorted index
-            idx = df.index.get_indexer([self.current_time], method='pad')[0]
-            if idx == -1:
+            # Efficient lookup: Use get_ohlcv to reuse strictly-past logic
+            # This ensures we get the Close of the previous completed candle (e.g. 09:00 candle at 10:00)
+            # which represents the price at 10:00.
+            
+            # Use '1h' (or whatever is passed) history, get last 1
+            # But we are inside get_current_price which doesn't take timeframe.
+            # We already have 'df' from 1h logic above.
+            
+            # Simple manual check:
+            mask = df.index < self.current_time
+            if not mask.any():
                 return None
-            return float(df.iloc[idx]['close'])
+            last_valid_idx = df.index[mask][-1]
+            return float(df.loc[last_valid_idx]['close'])
         except Exception as e:
             self.logger.error(f"Error getting price for {symbol}: {e}")
             return None
@@ -105,8 +114,9 @@ class MockMarketAPI:
             # If requested timeframe missing, maybe warn? using None for now
             return None
             
-        # Filter data up to current_time
-        mask = df.index <= self.current_time
+        # Filter data strictly before current_time to avoid look-ahead bias
+        # (Assuming Open Time convention: row at 10:00 contains data for 10:00-11:00)
+        mask = df.index < self.current_time
         filtered_df = df.loc[mask].tail(limit)
         
         if filtered_df.empty:
@@ -405,11 +415,14 @@ class MockMarketAPI:
             
         # Find row at or before current_time
         try:
-            # Funding is hourly, so look for nearest prior value
-            idx = df.index.get_indexer([self.current_time], method='pad')[0]
-            if idx == -1:
+            # Funding is hourly, so look for nearest prior value strictly before current time
+            # For funding, the timestamp usually represents when it is paid/known.
+            # So we should be able to see the value AT current_time.
+            mask = df.index <= self.current_time
+            if not mask.any():
                 return 0.0
-            return float(df.iloc[idx]['funding_rate'])
+            last_valid_idx = df.index[mask][-1]
+            return float(df.loc[last_valid_idx]['funding_rate'])
         except Exception as e:
             # self.logger.error(f"Error getting funding for {symbol}: {e}")
             return 0.0

@@ -36,6 +36,7 @@ STRATEGY_CLASSES = {
     'adaptive_grid': ('adaptive_grid_strategy', 'AdaptiveGridStrategy'),
     'sentiment_ml': ('sentiment_ml_strategy', 'SentimentMLStrategy'),
     'liquidation_hunter': ('liquidation_hunter_strategy', 'LiquidationHunterStrategy'),
+    'cross_sectional_momentum': ('cross_sectional_momentum_strategy', 'CrossSectionalMomentumStrategy'),
 }
 
 
@@ -689,6 +690,9 @@ class StrategyManager:
         try:
             if current_time is None:
                 current_time = time.time()
+                current_datetime = datetime.now()
+            else:
+                current_datetime = datetime.fromtimestamp(current_time)
 
             # Update regime and change-point gating from market proxy (once per cycle)
             self._maybe_update_regime_and_changepoint()
@@ -713,7 +717,8 @@ class StrategyManager:
                     emergency_portfolio_loss_pct, 
                     self.total_positions_closed, 
                     self.emergency_stops_triggered, 
-                    self.last_emergency_check
+                    self.last_emergency_check,
+                    timestamp=current_datetime
                 )
                 self.last_position_monitoring = current_time
             
@@ -750,10 +755,10 @@ class StrategyManager:
                 # Check running flag inside loop to support clean shutdown
                 if not self.is_running:
                     break
-                self._analyze_symbol(symbol)
+                self._analyze_symbol(symbol, timestamp=current_datetime)
             
             # Run cross-sectional strategies (portfolio-level)
-            self._run_portfolio_strategies(trading_pairs)
+            self._run_portfolio_strategies(trading_pairs, timestamp=current_datetime)
             
             # Update position prices and display PnL
             self.update_position_prices()
@@ -879,7 +884,12 @@ class StrategyManager:
         except Exception as e:
             self.logger.error(f"Error handling position update: {e}")
     
-    def _analyze_symbol(self, symbol: str):
+    def _analyze_symbol(self, symbol: str, timestamp: datetime = None):
+        """Analyze a single symbol for trading opportunities."""
+        # ... logic ...
+        # Need to see more context to replace correctly.
+        # Implied signature update.
+        pass # Placeholder for replace logic, see below blocks for specific calls
         """Analyze a single symbol and execute strategies with per-strategy timeframes."""
         try:
             # Subscribe to real-time data for this symbol
@@ -950,8 +960,10 @@ class StrategyManager:
             # Resolve conflicts and execute the winning signal
             if collected_signals:
                 winning_signal = self._resolve_signal_conflicts(symbol, collected_signals)
+            if collected_signals:
+                winning_signal = self._resolve_signal_conflicts(symbol, collected_signals)
                 if winning_signal:
-                    self._execute_resolved_signal(symbol, winning_signal)
+                    self._execute_resolved_signal(symbol, winning_signal, timestamp=timestamp)
                 
         except Exception as e:
             self.logger.error(f"Error analyzing {symbol}: {e}")
@@ -1144,7 +1156,7 @@ class StrategyManager:
             self.logger.debug(f"Strategy exploration decision failed: {e}")
             return winner
     
-    def _execute_resolved_signal(self, symbol: str, signal_data: Dict):
+    def _execute_resolved_signal(self, symbol: str, signal_data: Dict, timestamp: datetime = None):
         """Execute a resolved signal after conflict resolution."""
         strategy_name = signal_data['strategy_name']
         strategy = signal_data['strategy']
@@ -1156,7 +1168,7 @@ class StrategyManager:
         
         # Check if this is a multi-leg signal
         if signal.get('signal_type') == 'multi_leg':
-            self._handle_multi_leg_signal(symbol, signal, current_price, strategy_name, ohlcv)
+            self._handle_multi_leg_signal(symbol, signal, current_price, strategy_name, ohlcv, timestamp=timestamp)
             return
         
         # Get strategy weight from selector
@@ -1186,11 +1198,12 @@ class StrategyManager:
                 signal['signal_strength'] *= strategy_weight
             
             self.logger.info(f"Executing {strategy_name} trade for {symbol} (weight: {strategy_weight:.2f})")
-            self._execute_trade(symbol, signal, current_price, strategy_name, ohlcv)
+            self._execute_trade(symbol, signal, current_price, strategy_name, ohlcv, timestamp=timestamp)
         else:
             self.logger.info(f"Skipping {strategy_name} signal for {symbol} - conditions not met")
     
-    def _run_portfolio_strategies(self, trading_pairs: List[str]):
+    def _run_portfolio_strategies(self, trading_pairs: List[str], timestamp: datetime = None):
+        """Run portfolio-level strategies."""
         """
         Run cross-sectional/portfolio-level strategies.
         
@@ -1250,7 +1263,7 @@ class StrategyManager:
                                 eff_w = self._get_effective_strategy_weight(strategy_name)
                                 if 'signal_strength' in signal:
                                     signal['signal_strength'] *= eff_w
-                                self._execute_trade(symbol, signal, current_price, strategy_name, ohlcv_dict)
+                                self._execute_trade(symbol, signal, current_price, strategy_name, ohlcv_dict, timestamp=timestamp)
                         
         except Exception as e:
             self.logger.error(f"Error running portfolio strategies: {e}")
@@ -1324,7 +1337,7 @@ class StrategyManager:
                     signal['signal_strength'] *= strategy_weight
                 
                 self.logger.info(f"Executing {strategy_name} trade for {symbol} (weight: {strategy_weight:.2f})")
-                self._execute_trade(symbol, signal, current_price, strategy_name, ohlcv)
+                self._execute_trade(symbol, signal, current_price, strategy_name, ohlcv, timestamp=timestamp)
             else:
                 self.logger.info(f"Skipping {strategy_name} signal for {symbol} - conditions not met")
                 
@@ -1378,11 +1391,13 @@ class StrategyManager:
         return None
     
     def _handle_multi_leg_signal(self, symbol: str, signal: Dict[str, Any], current_price: float, 
-                                strategy_name: str, ohlcv: Dict[str, pd.DataFrame]):
+                                strategy_name: str, ohlcv: Dict[str, pd.DataFrame], timestamp: datetime = None):
         """Handle multi-leg trade signal."""
         self.execution_engine.handle_multi_leg_signal(
             symbol, signal, current_price, strategy_name, ohlcv, 
-            self.strategies[strategy_name].calculate_signal_strength
+            self.strategies[strategy_name].calculate_signal_strength,
+            self.strategies,
+            timestamp=timestamp
         )
     
     def _get_leg_price(self, symbol: str, market_type: str) -> Optional[float]:
@@ -1464,14 +1479,14 @@ class StrategyManager:
         
         return True
     
-    def _execute_trade(self, symbol: str, signal: Dict[str, Any], current_price: float, strategy_name: str, ohlcv: Dict[str, pd.DataFrame]):
+    def _execute_trade(self, symbol: str, signal: Dict[str, Any], current_price: float, strategy_name: str, ohlcv: Dict[str, pd.DataFrame], timestamp: datetime = None):
         """Execute a trade based on signal."""
         # Delegate to execution engine
-        self.execution_engine.execute_trade(symbol, signal, current_price, strategy_name, ohlcv, self.strategies)
+        self.execution_engine.execute_trade(symbol, signal, current_price, strategy_name, ohlcv, self.strategies, timestamp=timestamp)
     
-    def close_position(self, symbol: str, reason: str = "manual") -> bool:
+    def close_position(self, symbol: str, reason: str = "manual", timestamp: datetime = None) -> bool:
         """Close a position and record it."""
-        return self.execution_engine.close_position(symbol, reason)
+        return self.execution_engine.close_position(symbol, reason, timestamp=timestamp)
 
     def get_performance_summary(self) -> Dict[str, Any]:
         """Get comprehensive performance summary from performance tracker."""
@@ -2175,8 +2190,11 @@ class StrategyManager:
         except Exception as e:
             self.logger.error(f"Error cleaning up open orders: {e}") 
 
-    def _monitor_and_close_positions(self, emergency_threshold: float,
-                                   total_closed: int, emergency_stops: int, last_emergency_check: int):
+    def _monitor_and_close_positions(self, emergency_portfolio_loss_pct: float, 
+                                   total_positions_closed: int, 
+                                   emergency_stops_triggered: int, 
+                                   last_emergency_check: float,
+                                   timestamp: datetime = None):
         """Monitor positions and close them if they meet closure criteria."""
         try:
             current_time = time.time()
@@ -2196,7 +2214,7 @@ class StrategyManager:
             
             # Close positions
             for symbol, reason in positions_to_close:
-                if self.close_position(symbol, reason):
+                if self.close_position(symbol, reason, timestamp=timestamp):
                     total_closed += 1
             
             # Emergency stop check (every 30 seconds)

@@ -107,35 +107,49 @@ def fetch_history_for_symbol(api: HyperliquidAPI, db: TradeDatabase, symbol: str
         while current_end_ms > final_start_ms:
             current_start_ms = max(final_start_ms, current_end_ms - chunk_ms)
             
-            try:
-                candles = api.info.candles_snapshot(target, timeframe, current_start_ms, current_end_ms)
-                
-                if candles:
-                    data = []
-                    for c in candles:
-                        data.append({
-                            'timestamp': pd.to_datetime(c['t'], unit='ms'),
-                            'open': float(c['o']),
-                            'high': float(c['h']),
-                            'low': float(c['l']),
-                            'close': float(c['c']),
-                            'volume': float(c['v']),
-                        })
+            # Retry loop for rate limits
+            max_retries = 5
+            for attempt in range(max_retries):
+                try:
+                    candles = api.info.candles_snapshot(target, timeframe, current_start_ms, current_end_ms)
                     
-                    df = pd.DataFrame(data)
-                    df.set_index('timestamp', inplace=True)
+                    if candles:
+                        data = []
+                        for c in candles:
+                            data.append({
+                                'timestamp': pd.to_datetime(c['t'], unit='ms'),
+                                'open': float(c['o']),
+                                'high': float(c['h']),
+                                'low': float(c['l']),
+                                'close': float(c['c']),
+                                'volume': float(c['v']),
+                            })
+                        
+                        df = pd.DataFrame(data)
+                        df.set_index('timestamp', inplace=True)
+                        
+                        # Insert into DB
+                        db.insert_market_data(df, store_as, timeframe)
+                        total_candles += len(df)
                     
-                    # Insert into DB
-                    db.insert_market_data(df, store_as, timeframe)
-                    total_candles += len(df)
-                    # logger.info(f"[{symbol} {timeframe}] Inserted {len(df)} candles")
-                
-            except Exception as e:
-                logger.error(f"[{symbol} {timeframe}] Error fetching chunk: {e}")
-                time.sleep(1)
+                    # Success - break retry loop
+                    break
+                    
+                except Exception as e:
+                    err_str = str(e)
+                    if "429" in err_str:
+                        wait_time = 2 ** (attempt + 2) # 4, 8, 16, 32, 64
+                        logger.warning(f"[{symbol} {timeframe}] Rate limit (429). Backing off {wait_time}s...")
+                        time.sleep(wait_time)
+                    else:
+                        logger.error(f"[{symbol} {timeframe}] Error fetching chunk: {e}")
+                        time.sleep(1)
+                        if attempt == max_retries - 1:
+                            logger.error(f"[{symbol} {timeframe}] Max retries reached. Skipping chunk.")
                 
             current_end_ms = current_start_ms - 1
-            time.sleep(0.1)
+            # Standard throttle between chunks
+            time.sleep(0.5)
             
         logger.info(f"[{symbol}] Completed {timeframe}. Total: {total_candles}")
 
@@ -158,30 +172,44 @@ def fetch_funding_history(api: HyperliquidAPI, db: TradeDatabase, symbol: str, d
     while current_end_ms > final_start_ms:
         current_start_ms = max(final_start_ms, current_end_ms - chunk_ms)
         
-        try:
-            history = api.get_funding_history(symbol, current_start_ms, current_end_ms)
-            
-            if history:
-                data = []
-                for h in history:
-                    data.append({
-                        'timestamp': pd.to_datetime(h['time'], unit='ms'),
-                        'funding': float(h['fundingRate'])
-                    })
+        # Retry loop for rate limits
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                history = api.get_funding_history(symbol, current_start_ms, current_end_ms)
                 
-                df = pd.DataFrame(data)
-                df.set_index('timestamp', inplace=True)
+                if history:
+                    data = []
+                    for h in history:
+                        data.append({
+                            'timestamp': pd.to_datetime(h['time'], unit='ms'),
+                            'funding': float(h['fundingRate'])
+                        })
+                    
+                    df = pd.DataFrame(data)
+                    df.set_index('timestamp', inplace=True)
+                    
+                    # Insert into DB
+                    count = db.insert_funding_rates(df, symbol)
+                    total_records += count
                 
-                # Insert into DB
-                count = db.insert_funding_rates(df, symbol)
-                total_records += count
-                
-        except Exception as e:
-            logger.error(f"[{symbol}] Error fetching funding chunk: {e}")
-            time.sleep(1)
-            
+                # Success
+                break
+                    
+            except Exception as e:
+                err_str = str(e)
+                if "429" in err_str:
+                    wait_time = 2 ** (attempt + 2) # 4, 8, 16, 32, 64
+                    logger.warning(f"[{symbol} Funding] Rate limit (429). Backing off {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"[{symbol}] Error fetching funding chunk: {e}")
+                    time.sleep(1)
+                    if attempt == max_retries - 1:
+                        logger.error(f"[{symbol}] Max retries reached. Skipping chunk.")
+        
         current_end_ms = current_start_ms - 1
-        time.sleep(0.1)
+        time.sleep(0.5)
         
     logger.info(f"[{symbol}] Completed Funding History. Total: {total_records}")
 
@@ -190,15 +218,21 @@ def run_ingestion():
     api = HyperliquidAPI(config)
     db = TradeDatabase()
     
-    logger.info("Identifying Top 50 Assets...")
-    top_assets = get_top_assets(api, limit=50)
-    logger.info(f"Assets to ingest: {top_assets}")
+    # 1. Get Top 100 Assets
+    logger.info("Identifying Top 100 Assets...")
+    top_assets = get_top_assets(api, limit=100)
     
-    # Process assets (Sequential for safety, or ThreadPool?)
-    # API instance is shared, but `info` calls might be thread-safe enough? 
-    # Let's do sequential to avoid rate limits since we are doing heavy fetching.
+    # 2. Get All Mapped Assets (Spot & Perp pairs) to ensure Funding Arb coverage
+    # Even if they are not in Top 100
+    mapped_assets = list(api.PERP_TO_SPOT_MAPPING.keys())
     
-    for symbol in top_assets:
+    # Merge unique assets
+    assets_to_ingest = sorted(list(set(top_assets + mapped_assets)))
+    
+    logger.info(f"Assets to ingest ({len(assets_to_ingest)} total): {assets_to_ingest}")
+    
+    # Process assets (Sequential to avoid rate limits)
+    for symbol in assets_to_ingest:
         # 1. Fetch PERP Candles
         fetch_history_for_symbol(api, db, symbol, days=90)
         

@@ -24,6 +24,8 @@ import numpy as np
 import pandas as pd
 from dataclasses import dataclass, field
 from enum import Enum
+from src.utils.statistics import adfuller, engle_granger
+
 
 
 class SelectionMode(Enum):
@@ -304,7 +306,7 @@ class DynamicPairSelector:
             return 0.5, 0.0
     
     def _calculate_strategy_fit_score(self, symbol: str, asset: Dict[str, Any],
-                                       volatility: float) -> Tuple[float, float, float]:
+                                       volatility: float, btc_history: Optional[pd.Series] = None) -> Tuple[float, float, float]:
         """
         Calculate how well an asset fits the active trading strategies.
         
@@ -338,22 +340,62 @@ class DynamicPairSelector:
                         # Z-score > 2 = good mean reversion opportunity
                         mean_reversion_score = min(1.0, z_score / 3.0)
             
+            # Calculate Cointegration/Stationarity
+            cointegration_score = 0.5
+            stationarity_score = 0.5
+            
+            # Check CorrelationManager for specific cointegrated pairs
+            if self.correlation_manager:
+                c_result = self.correlation_manager.get_cointegration_result(symbol)
+                if c_result and c_result.is_cointegrated:
+                    cointegration_score = 1.0
+                    # self.logger.debug(f"Boosted cointegration score for {symbol} (paired with {c_result.symbol_b})")
+            
+            # Fallback/Supplemental: Check vs BTC (Market Leader Benchmark)
+            # Only if not already found by CorrelationManager
+            if cointegration_score < 1.0 and prices is not None and len(prices) > 30:
+                try:
+                    # 1. Stationarity (ADF Test)
+                    ts_t, ts_p = adfuller(prices)
+                    if ts_p < 0.05:
+                        stationarity_score = 1.0
+                    elif ts_p < 0.20:
+                        stationarity_score = 0.8
+                    
+                    # 2. Cointegration vs BTC
+                    if btc_history is not None and len(btc_history) > 30 and symbol != 'BTC':
+                        # Align series
+                        aligned_df = pd.DataFrame({'a': prices, 'b': btc_history}).dropna()
+                        if len(aligned_df) > 30:
+                            c_t, c_p, _ = engle_granger(aligned_df['a'], aligned_df['b'])
+                            if c_p < 0.05:
+                                cointegration_score = 1.0
+                            elif c_p < 0.10:
+                                cointegration_score = 0.8
+                except Exception:
+                    pass
+
+            # Boost scores based on stats
+            # If stationary, massive boost to mean reversion
+            if stationarity_score > 0.5:
+                mean_reversion_score = max(mean_reversion_score, stationarity_score)
+            
             # Get active strategies and their types
             active_strategies = self._get_active_strategy_types()
             
             # Weight by active strategy types
             if not active_strategies:
                 # No strategy info - use balanced score
-                strategy_fit_score = (momentum_score + mean_reversion_score) / 2
+                strategy_fit_score = (momentum_score + mean_reversion_score + cointegration_score) / 3
             else:
                 momentum_weight = 0.0
                 mean_rev_weight = 0.0
                 arb_weight = 0.0
                 
                 for strategy_type in active_strategies:
-                    if strategy_type in ['momentum_factor', 'supertrend', 'moving_average']:
+                    if strategy_type in ['momentum_factor', 'supertrend', 'moving_average', 'cross_sectional_momentum']:
                         momentum_weight += 1
-                    elif strategy_type in ['ou_mean_reversion', 'vwap', 'rsi', 'bollinger_band']:
+                    elif strategy_type in ['ou_mean_reversion', 'vwap', 'rsi', 'bollinger_band', 'adaptive_grid', 'liquidation_hunter']:
                         mean_rev_weight += 1
                     elif strategy_type in ['stat_arb', 'funding_rate_arbitrage']:
                         arb_weight += 1
@@ -366,8 +408,11 @@ class DynamicPairSelector:
                 else:
                     momentum_weight = mean_rev_weight = arb_weight = 1/3
                 
-                # For arb strategies, prefer liquid assets with reasonable volatility
-                arb_score = self._calculate_liquidity_score(asset) * 0.7 + (1 - volatility / 0.1) * 0.3
+                # For arb strategies, prefer liquid assets with reasonable volatility AND Cointegration
+                # Arb score = Liquidity(40%) + Volatility(20%) + Cointegration(40%)
+                arb_score = self._calculate_liquidity_score(asset) * 0.4 + \
+                           (1 - volatility / 0.1) * 0.2 + \
+                           cointegration_score * 0.4
                 
                 strategy_fit_score = (
                     momentum_score * momentum_weight +
@@ -569,7 +614,7 @@ class DynamicPairSelector:
         
         return []
     
-    def _calculate_asset_metrics(self, asset: Dict[str, Any]) -> Optional[AssetMetrics]:
+    def _calculate_asset_metrics(self, asset: Dict[str, Any], btc_history: Optional[pd.Series] = None) -> Optional[AssetMetrics]:
         """
         Calculate metrics for a single asset.
         
@@ -603,7 +648,7 @@ class DynamicPairSelector:
             metrics.volatility_score, metrics.volatility = self._calculate_volatility_score(symbol, asset)
             (metrics.strategy_fit_score, 
              metrics.momentum_score, 
-             metrics.mean_reversion_score) = self._calculate_strategy_fit_score(symbol, asset, metrics.volatility)
+             metrics.mean_reversion_score) = self._calculate_strategy_fit_score(symbol, asset, metrics.volatility, btc_history)
             metrics.historical_perf_score, metrics.sharpe_ratio = self._calculate_historical_performance_score(symbol)
             
             # Calculate composite score
@@ -708,9 +753,12 @@ class DynamicPairSelector:
             
             self.logger.info(f"Total: Scanning {len(all_assets)} available assets")
             
+            # Fetch BTC history once for cointegration checks
+            btc_history = self._get_price_history('BTC')
+            
             # Filter and rank assets
             eligible_pairs = self._filter_assets(all_assets)
-            selected_pairs, pairs_metadata = self._rank_and_select_pairs(eligible_pairs)
+            selected_pairs, pairs_metadata = self._rank_and_select_pairs(eligible_pairs, btc_history)
             
             # Update state (thread-safe)
             with self._pairs_lock:
@@ -839,6 +887,9 @@ class DynamicPairSelector:
         except Exception as e:
             self.logger.error(f"Error getting spot assets: {e}")
             return []
+    
+    
+
     
     def _filter_assets(self, universe: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
@@ -1013,7 +1064,7 @@ class DynamicPairSelector:
         except (ValueError, TypeError):
             return False
     
-    def _rank_and_select_pairs(self, eligible_assets: List[Dict[str, Any]]) -> tuple:
+    def _rank_and_select_pairs(self, eligible_assets: List[Dict[str, Any]], btc_history: Optional[pd.Series] = None) -> tuple:
         """
         Rank eligible assets using volume-based ordering with sequential data loading.
         
@@ -1156,6 +1207,16 @@ class DynamicPairSelector:
         # =====================================================================
         # STEP 3: Build correlation matrix and calculate metrics
         # =====================================================================
+        # Update Cointegrated Pairs if manager is available (using loaded assets)
+        if self.correlation_manager:
+            relevant_symbols = [a.get('name', '') for a in assets_with_data if a.get('name')]
+            if len(relevant_symbols) >= 2:
+                self.logger.info(f"Updating cointegration for {len(relevant_symbols)} loaded assets...")
+                try:
+                    self.correlation_manager.update_cointegrated_pairs(relevant_symbols)
+                except Exception as e:
+                    self.logger.warning(f"Failed to update cointegration: {e}")
+
         self._build_correlation_matrix()
         
         # Calculate metrics for loaded assets
@@ -1186,7 +1247,7 @@ class DynamicPairSelector:
             metrics.volatility_score, metrics.volatility = self._calculate_volatility_score(symbol, asset)
             (metrics.strategy_fit_score, 
              metrics.momentum_score, 
-             metrics.mean_reversion_score) = self._calculate_strategy_fit_score(symbol, asset, metrics.volatility)
+             metrics.mean_reversion_score) = self._calculate_strategy_fit_score(symbol, asset, metrics.volatility, btc_history)
             metrics.historical_perf_score, metrics.sharpe_ratio = self._calculate_historical_performance_score(symbol)
             
             # Store for later reference

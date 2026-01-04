@@ -53,9 +53,42 @@ class ExecutionEngine:
         # Load persisted positions if available
         self.load_positions_from_file()
         
-    def execute_trade(self, symbol: str, signal: Dict[str, Any], current_price: float, strategy_name: str, ohlcv: Dict[str, pd.DataFrame], strategies_map: Dict[str, Any]):
+    def check_slippage_tolerance(self, symbol: str, current_price: float, volatility: float) -> bool:
+        """
+        Check if market conditions are safe for execution (simulate slippage/spread check).
+        
+        Args:
+            symbol: Trading pair
+            current_price: Current market price
+            volatility: Current annualized volatility estimate
+            
+        Returns:
+            True if safe to trade, False if slippage risk is too high
+        """
+        try:
+            # 1. Volatility Trigger
+            # If volatility is extremely high (> 150% annualized), spreads effectively widen
+            # and execution becomes unpredictable.
+            MAX_VOLATILITY = 1.50 # 150% annualized
+            if volatility > MAX_VOLATILITY:
+                return False
+                
+            # 2. Simulated Spread Check (Backtest proxy)
+            # In live trading, we would check order book depth here.
+            # In backtest/sim, we block trades if price is essentially zero or invalid
+            if current_price <= 0:
+                return False
+                
+            return True
+        except Exception as e:
+            self.logger.error(f"Error checking slippage for {symbol}: {e}")
+            return True # Fail open safely? Or close? Let's default to True to not block unless certain.
+
+    def execute_trade(self, symbol: str, signal: Dict[str, Any], current_price: float, strategy_name: str, ohlcv: Dict[str, pd.DataFrame], strategies_map: Dict[str, Any], timestamp: datetime = None):
         """Execute a single-leg trade based on signal."""
         try:
+            current_time = timestamp if timestamp else datetime.now()
+            
             # Determine trade side
             if signal['signal'] == 'buy':
                 side = 'buy'
@@ -64,6 +97,12 @@ class ExecutionEngine:
                 side = 'sell'
                 position_side = 'short'
             else:
+                return
+            
+            # Check slippage tolerance
+            market_volatility = signal.get('market_volatility', 0.0)
+            if not self.check_slippage_tolerance(symbol, current_price, market_volatility):
+                self.logger.warning(f"Slippage check failed for {symbol} (volatility={market_volatility:.4f})")
                 return
             
             # Get leverage and position details
@@ -159,7 +198,7 @@ class ExecutionEngine:
                     side=side,
                     size=fill_size,
                     price=fill_price,
-                    timestamp=datetime.now(),
+                    timestamp=current_time,
                     strategy=strategy_name,
                     order_id=order_id,
                 )
@@ -173,7 +212,7 @@ class ExecutionEngine:
                     side=position_side,
                     size=fill_size,
                     entry_price=fill_price,
-                    entry_time=datetime.now(),
+                    entry_time=current_time,
                     strategy=strategy_name,
                     stop_loss=stop_loss,
                     take_profit=take_profit,
@@ -206,11 +245,13 @@ class ExecutionEngine:
         except Exception as e:
             self.logger.error(f"Error executing trade for {symbol}: {e}")
     
-    def close_position(self, symbol: str, reason: str = "manual") -> bool:
+    def close_position(self, symbol: str, reason: str = "manual", timestamp: datetime = None) -> bool:
         """Close a position and record it."""
         if symbol not in self.positions:
             self.logger.warning(f"No position to close for {symbol}")
             return False
+            
+        current_time = timestamp if timestamp else datetime.now()
         
         try:
             position = self.positions[symbol]
@@ -243,7 +284,7 @@ class ExecutionEngine:
                     exit_price=exit_price,
                     size=filled_size,
                     entry_time=position.entry_time,
-                    exit_time=datetime.now(),
+                    exit_time=current_time,
                     capital_at_risk=position.capital_at_risk,
                     exit_reason=reason
                 )
@@ -277,7 +318,9 @@ class ExecutionEngine:
         current_price: float, 
         strategy_name: str, 
         ohlcv: Dict[str, pd.DataFrame],
-        calculate_signal_strength_fn
+        calculate_signal_strength_fn,
+        strategies_map: Dict[str, Any],
+        timestamp: datetime = None
     ):
         """Handle multi-leg signals (entry or exit)."""
         action = signal.get('action')
@@ -286,9 +329,9 @@ class ExecutionEngine:
             signal_strength = calculate_signal_strength_fn(ohlcv)
             # Position limit check logic would need to be moved or passed in
             # Assuming simplified flow for now or we will add the method
-            self.execute_multi_leg_entry(symbol, signal, current_price, strategy_name, ohlcv, signal_strength)
+            self.execute_multi_leg_entry(symbol, signal, current_price, strategy_name, ohlcv, signal_strength, timestamp)
         elif action == 'exit':
-            self.execute_multi_leg_exit(symbol, signal, strategy_name)
+            self.execute_multi_leg_exit(symbol, signal, strategy_name, strategies_map, timestamp)
     
     def execute_multi_leg_entry(
         self, 
@@ -297,10 +340,13 @@ class ExecutionEngine:
         current_price: float,
         strategy_name: str,
         ohlcv: Dict[str, pd.DataFrame],
-        signal_strength: float
+        signal_strength: float,
+        timestamp: datetime = None
     ):
         """Execute a multi-leg position entry."""
         try:
+            current_time = timestamp if timestamp else datetime.now()
+            
             if self._get_multi_leg_position_for_symbol(symbol):
                 self.logger.info(f"Already have multi-leg position for {symbol}, skipping")
                 return
@@ -450,11 +496,11 @@ class ExecutionEngine:
                     return
             
             # Create position
-            position_id = f"{strategy_name}_{symbol}_{int(datetime.now().timestamp() * 1000)}"
+            position_id = f"{strategy_name}_{symbol}_{int(current_time.timestamp() * 1000)}"
             multi_leg_position = MultiLegPosition(
                 position_id=position_id,
                 strategy=strategy_name,
-                entry_time=datetime.now(),
+                entry_time=current_time,
                 legs=executed_legs,
                 capital_at_risk=margin_required,
                 metadata=signal.get('metadata', {}),
@@ -468,9 +514,11 @@ class ExecutionEngine:
         except Exception as e:
             self.logger.error(f"Error executing multi-leg entry for {symbol}: {e}")
             
-    def execute_multi_leg_exit(self, symbol: str, signal: Dict[str, Any], strategy_name: str, strategies_map: Dict[str, Any]):
+    def execute_multi_leg_exit(self, symbol: str, signal: Dict[str, Any], strategy_name: str, strategies_map: Dict[str, Any], timestamp: datetime = None):
         """Execute multi-leg exit."""
         try:
+            current_time = timestamp if timestamp else datetime.now()
+            
             position = self._get_multi_leg_position_for_symbol(symbol)
             if not position:
                 return
@@ -508,7 +556,7 @@ class ExecutionEngine:
                 leg_pnl = price_diff * result['filled_size']
                 total_pnl += leg_pnl
 
-            exit_time = datetime.now()
+            exit_time = current_time
 
             # For funding rate arbitrage we store realized PnL as funding payments only (delta-neutral)
             # and represent side as 'delta_neutral' in the DB.

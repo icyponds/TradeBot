@@ -120,6 +120,9 @@ class SentimentMLStrategy(BaseStrategy):
         Assumption: High Volume + High Positive Return = Hype (High Sentiment).
                    High Volume + High Negative Return = FUD (Low Sentiment).
         """
+        if 'volume' not in ohlcv.columns:
+            return None
+            
         closes = ohlcv['close']
         volumes = ohlcv['volume']
         

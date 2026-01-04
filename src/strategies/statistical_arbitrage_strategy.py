@@ -9,6 +9,7 @@ import logging
 from typing import Dict, Any, Optional, List, Tuple, TYPE_CHECKING
 import pandas as pd
 import numpy as np
+from datetime import datetime, timedelta
 
 if TYPE_CHECKING:
     from src.models.trade import Position
@@ -48,6 +49,7 @@ class StatisticalArbitrageStrategy(BaseStrategy):
         # Window sizes
         self.window_size = stat_arb_config.get('window_size', 100)
         self.zscore_lookback = coint_config.get('lookback_period', 20)
+        self.max_holding_hours = stat_arb_config.get('max_holding_hours', 120) # Default 5 days
         
         # Cointegration parameters
         self.adf_pvalue_threshold = coint_config.get('adf_pvalue_threshold', 0.05)
@@ -287,39 +289,84 @@ class StatisticalArbitrageStrategy(BaseStrategy):
 
     def calculate_take_profit(self, entry_price: float, side: str, ohlcv: Dict[str, pd.DataFrame] = None,
                              signal_strength: float = 1.0, market_volatility: float = 1.0) -> float:
-        """Calculate take profit (expected mean reversion)."""
-        base_tp_pct = 0.03
-        adjusted_tp = max(0.02, min(0.10, base_tp_pct * signal_strength))
-        if side == 'buy':
-            return entry_price * (1 + adjusted_tp)
-        else:
-            return entry_price * (1 - adjusted_tp)
-
+        """
+        Disable fixed Take Profit. 
+        Exit is managed by Z-Score convergence in should_exit().
+        """
+        return 0.0 # Disabled
+        
     def calculate_stop_loss(self, entry_price: float, side: str, 
-                           signal_context: Dict[str, Any] = None) -> float:
-        """Calculate stop loss based on Z-score deviation."""
-        base_sl_pct = 0.05
-        if signal_context:
-            z_score = signal_context.get('z_score')
-            z_score = abs(z_score) if z_score is not None else 2.0
-            stop_z = z_score * 1.5
-            base_sl_pct = max(0.03, min(0.10, stop_z * 0.025))
-        if side == 'buy':
-            return entry_price * (1 - base_sl_pct)
-        else:
-            return entry_price * (1 + base_sl_pct)
+                            signal_context: Dict[str, Any] = None) -> float:
+        """
+        Disable fixed Stop Loss.
+        Exit is managed by Z-Score divergence (> 4.0) in should_exit().
+        """
+        return 0.0 # Disabled
 
     def should_exit(self, position: Any, current_price: float, 
                    current_data: Dict[str, Any] = None) -> Tuple[bool, Optional[str]]:
-        """Determine if position should exit (mean reversion complete)."""
+        """Determine if position should exit (mean reversion complete or logic break)."""
         if current_data is None:
             return False, None
+            
         symbol = getattr(position, 'symbol', None)
-        if not symbol or symbol not in self.active_spreads:
+        # Note: StrategyManager might pass just the symbol name if checking globally, 
+        # but here we need to know WHICH spread this position belongs to.
+        # This implementation assumes we can map symbol -> spread.
+        # For multi-leg, StrategyManager handles the legs. 
+        # If this is called per-leg, we need to know the pair.
+        
+        # Simplified Check:
+        # In this architecture, generating_signal/active_spreads manages the state.
+        # We need to find the pair this symbol is part of.
+        
+        active_pair_key = None
+        for pair_key, data in self.active_spreads.items():
+            sym_a, sym_b = pair_key.split('/')
+            if symbol == sym_a or symbol == sym_b:
+                active_pair_key = pair_key
+                break
+        
+        if not active_pair_key:
             return False, None
+            
+        # We need the CURRENT Z-Score. 
+        # The logic in generate_signal calculates it. 
+        # Ideally, we should recalculate it here or have it passed in current_data.
+        # If current_data represents the ticker data, we can't easily calc spread without the other leg.
+        
+        # Strategy: Rely on generate_signal to produce 'close' signals based on Z-score, 
+        # OR use the 'z_score' passed in if available. 
+        
+        # If 'z_score' is passed in current_data (from StrategyManager's analysis loop):
         z_score = current_data.get('z_score')
-        if z_score is not None and abs(z_score) < self.zscore_exit:
-            return True, f"spread_mean_reversion_complete (z={z_score:.2f})"
+        
+        if z_score is not None:
+            # 1. Take Profit: Mean Reversion
+            if abs(z_score) < self.z_score_exit:
+                return True, f"spread_mean_reversion_complete (z={z_score:.2f})"
+            
+            # 2. Stop Loss: Regime Break / Divergence
+            # If Z-score expands beyond 4.0, the correlation is likely broken.
+            if abs(z_score) > 4.0:
+                return True, f"spread_regime_break_stop (z={z_score:.2f})"
+                
+        # 3. Max Hold Time Limit (Safety)
+        # Prevents holding losing positions indefinitely (Survivor Bias)
+        if hasattr(position, 'entry_time') and position.entry_time:
+            entry_time = position.entry_time
+            if isinstance(entry_time, str):
+                entry_time = pd.to_datetime(entry_time)
+            
+            # Simple datetime subtraction (ensure both are naive or aware)
+            # In backtest/bot, typically naive local time or UTC
+            try:
+                time_held = datetime.now() - entry_time
+                if time_held > timedelta(hours=self.max_holding_hours):
+                    return True, f"max_holding_time_exceeded ({time_held})"
+            except Exception as e:
+                self.logger.warning(f"Error checking max hold time: {e}")
+
         return False, None
 
     def get_trailing_stop_config(self) -> Dict[str, Any]:

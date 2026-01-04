@@ -232,6 +232,7 @@ def load_config() -> Dict[str, Any]:
                     else []
                 ),
                 {"type": "stat_arb", "name": "stat_arb_1h",  "timeframe": "1h"},
+                {"type": "stat_arb", "name": "stat_arb_4h",  "timeframe": "4h"},
 
                 # OU Mean Reversion (15m vs 1h)
                 {"type": "ou_mean_reversion", "name": "ou_mean_reversion_15m", "timeframe": "15m"},
@@ -255,9 +256,12 @@ def load_config() -> Dict[str, Any]:
                 
                 # Liquidation Hunter (5m)
                 {"type": "liquidation_hunter", "name": "liquidation_hunter_5m", "timeframe": "5m"},
+
+                # Cross-Sectional Momentum (1h)
+                {"type": "cross_sectional_momentum", "name": "csm_1h", "timeframe": "1h"},
             ],
             # Note: timeframe is now auto-selected per strategy instance
-            "ohlcv_limit": int(os.getenv("OHLCV_LIMIT", "100")),
+            "ohlcv_limit": int(os.getenv("OHLCV_LIMIT", "300")), # Increased for EMA200
             "stat_arb": {
                 "z_score_threshold": float(os.getenv("STAT_ARB_Z_SCORE_THRESHOLD", "2.0")),
                 "window_size": int(os.getenv("STAT_ARB_WINDOW_SIZE", "100")),
@@ -280,13 +284,13 @@ def load_config() -> Dict[str, Any]:
             
             # Funding Rate Arbitrage Strategy
             "funding_rate_arbitrage": {
-                "entry_threshold": float(os.getenv("FR_ARB_ENTRY_THRESHOLD", "0.00005")),  # 0.005% per 8h = 5.5% APR
-                "exit_threshold": float(os.getenv("FR_ARB_EXIT_THRESHOLD", "0.00002")),    # 0.002% per 8h
+                "entry_threshold": float(os.getenv("FR_ARB_ENTRY_THRESHOLD", "0.00002")),  # Lowered to ~17.5% APR
+                "exit_threshold": float(os.getenv("FR_ARB_EXIT_THRESHOLD", "0.00001")),    # Lowered slightly
                 "max_position_pct": float(os.getenv("FR_ARB_MAX_POSITION_PCT", "20")),
                 "min_holding_periods": int(os.getenv("FR_ARB_MIN_HOLDING_PERIODS", "1")),
                 "rebalance_threshold": float(os.getenv("FR_ARB_REBALANCE_THRESHOLD", "0.02")),
                 "funding_history_periods": int(os.getenv("FR_ARB_HISTORY_PERIODS", "24")),
-                "min_consistent_periods": int(os.getenv("FR_ARB_MIN_CONSISTENT_PERIODS", "3")),
+                "min_consistent_periods": int(os.getenv("FR_ARB_MIN_CONSISTENT_PERIODS", "1")), # Reduced to capture spikes
             },
             
             # Ornstein-Uhlenbeck Mean Reversion Strategy
@@ -329,7 +333,7 @@ def load_config() -> Dict[str, Any]:
             "adaptive_grid": {
                 "ema_period": int(os.getenv("GRID_EMA_PERIOD", "50")),
                 "atr_period": int(os.getenv("GRID_ATR_PERIOD", "14")),
-                "grid_spacing_atr": float(os.getenv("GRID_SPACING_ATR", "1.5")),
+                "grid_spacing_atr": float(os.getenv("GRID_SPACING_ATR", "2.5")), # Increased from 1.5 to reduce churn
             },
             
             # Sentiment ML Strategy
@@ -342,6 +346,14 @@ def load_config() -> Dict[str, Any]:
             "liquidation_hunter": {
                 "window": int(os.getenv("LH_WINDOW", "20")),
                 "std_dev_threshold": float(os.getenv("LH_STD_DEV_THRESHOLD", "3.0")),
+            },
+            
+            # Cross-Sectional Momentum Strategy
+            "cross_sectional_momentum": {
+                "lookback_period": 168,     # 7 days (was 24h)
+                "top_n_percent": 0.15,      # Top 15% (Increased allocation (Scale Up))
+                "bottom_n_percent": 0.15,   # Bottom 15%
+                "rebalance_interval": 24,   # Daily (was 4h)
             },
         },
         

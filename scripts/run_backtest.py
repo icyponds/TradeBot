@@ -32,45 +32,54 @@ def generate_synthetic_data(symbol, start_date, end_date, freq='1h'):
     
     return df
 
-def run_smoke_test():
+def run_smoke_test(days=None, start_str=None, end_str=None):
     print("Running Backtest Smoke Test...")
     
     # 1. Config
     config = load_config()
-    # Use default strategy instances from settings.py (StatArb, FundingArb, etc.)
-    # config['strategies']['enabled'] = ['moving_average']
     
     # 5. Enable Backtest Mode for PairSelector (load all assets instantly)
     config['mode'] = 'backtest'
     config['backtesting'] = {'enabled': True}
     
     # 2. Data
-    # 2. Data
-    # If using DB, we pass None to engine and it loads it
-    # But we need to know start/end date.
-    
-    # Let's peek at DB range if available
     from src.utils.trade_database import TradeDatabase
     db = TradeDatabase()
     
-    # Default to last 30 days if no data found
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=30)
-    
-    # Try to find common range from loaded symbols
+    # Try to find common range from loaded symbols if not manually specified
     symbols = db.get_market_data_symbols('1h')
+    
+    # Determine default end_date from DB if available, otherwise now()
+    default_end = datetime.now()
+    default_start = default_end - timedelta(days=90)
+    
     if symbols:
-        print(f"Found {len(symbols)} symbols in DB: {symbols[:5]}...")
-        # Get range for first symbol
+        # Get range for first symbol (assuming somewhat synchronized)
         s_start, s_end = db.get_available_data_range(symbols[0], '1h')
-        if s_start and s_end:
-            start_date = s_start
-            end_date = s_end
-            print(f"Simulating DB range: {start_date} to {end_date}")
-    else:
+        if s_end:
+            default_end = s_end
+        if s_start:
+            default_start = s_start
+            
+    # Parse Arguments or use Defaults
+    end_date = default_end
+    if end_str:
+        end_date = datetime.strptime(end_str, "%Y-%m-%d")
+        
+    start_date = default_start
+    if start_str:
+        start_date = datetime.strptime(start_str, "%Y-%m-%d")
+    elif days:
+        # If days specified, anchor from the DETERMINED end_date (DB tip or now)
+        start_date = end_date - timedelta(days=days)
+    
+    if symbols:
+        print(f"Found {len(symbols)} symbols in DB. Using range from {symbols[0]}...")
+    
+    print(f"Simulating: {start_date} to {end_date}")
+
+    if not symbols:
         print("No data in DB. Loading from CSVs as fallback...")
-        # ... logic to load CSVs if needed ...
-        # (Original CSV loading logic removed for brevity as we move to DB)
         pass
 
     # 3. Engine
@@ -99,7 +108,18 @@ def run_smoke_test():
     print(f"Total Equity: {report['total_equity']}")
     print(f"Orders: {report['total_orders']}")
 
+
 if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Run Strategy Backtest')
+    parser.add_argument('--days', type=int, help='Number of days to run (default: auto-detect)')
+    parser.add_argument('--start', type=str, help='Start date (YYYY-MM-DD)')
+    parser.add_argument('--end', type=str, help='End date (YYYY-MM-DD)')
+    
+    args = parser.parse_args()
+    
     # Ensure DB directory exists
     os.makedirs('data', exist_ok=True)
-    run_smoke_test()
+    
+    run_smoke_test(days=args.days, start_str=args.start, end_str=args.end)

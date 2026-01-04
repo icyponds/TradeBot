@@ -169,14 +169,36 @@ class BacktestEngine:
         trades = self.mock_api.orders
         positions = self.mock_api.positions
         
-        # Calculate simplistic PnL
-        # This is very basic; a real engine would track equity curve per step
+        # Calculate Realized Balance (Cash)
         spot_balance = self.mock_api.get_spot_balance('USDC')
         perp_balance = self.mock_api.get_perp_balance()['withdrawable']
-        total_equity = spot_balance + perp_balance
+        realized_equity = spot_balance + perp_balance
+        
+        # Calculate Unrealized PnL from Open Positions
+        unrealized_pnl = 0.0
+        
+        for symbol, position in positions.items():
+            current_price = self.mock_api.get_current_price(symbol)
+            if not current_price:
+                continue
+                
+            entry_price = position['entry_price']
+            size = position['size']
+            side = position['side']  # 'long' or 'short'
+            
+            if side == 'long':
+                pnl = (current_price - entry_price) * size
+            else:
+                pnl = (entry_price - current_price) * size
+                
+            unrealized_pnl += pnl
+            
+        total_equity = realized_equity + unrealized_pnl
         
         report = {
             'total_equity': total_equity,
+            'realized_equity': realized_equity,
+            'unrealized_pnl': unrealized_pnl,
             'positions_open': len(positions),
             'total_orders': len(trades),
             'spot_balance': spot_balance,

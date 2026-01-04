@@ -31,11 +31,12 @@ class LiquidationHunterStrategy(BaseStrategy):
         super().__init__(config, timeframe)
         
         # Strategy parameters
-        lh_config = config.get('strategies', {}).get('liquidation_hunter', {})
+        hunter_config = config.get('strategies', {}).get('liquidation_hunter', {})
         
         # Outlier Detection settings
-        self.bollinger_window = lh_config.get('window', 20)
-        self.std_dev_threshold = lh_config.get('std_dev_threshold', 3.0)  # 3 Sigma = ~99.7% prob
+        self.bollinger_window = hunter_config.get('window', 20)
+        self.std_dev_threshold = hunter_config.get('std_dev_threshold', 3.5) # Tuned from 3.0 to 3.5
+        self.stop_loss_pct = hunter_config.get('stop_loss_pct', 0.02)  # 3 Sigma = ~99.7% prob
         
         # Exit settings
         self.mean_reversion_exit = True

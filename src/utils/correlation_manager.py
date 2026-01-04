@@ -21,6 +21,9 @@ try:
 except ImportError:
     STATSMODELS_AVAILABLE = False
 
+from src.utils.statistics import engle_granger as custom_engle_granger
+
+
 
 @dataclass
 class CointegrationResult:
@@ -310,10 +313,10 @@ class CorrelationManager:
     
     def _fallback_cointegration_test(self, prices_a: pd.Series, prices_b: pd.Series,
                                     symbol_a: str, symbol_b: str) -> CointegrationResult:
-        """Fallback method when statsmodels is not available."""
+        """Fallback method utilizing custom Engle-Granger implementation without statsmodels."""
         aligned = pd.DataFrame({'a': prices_a, 'b': prices_b}).dropna()
         
-        if len(aligned) < 10:
+        if len(aligned) < 30:
             return CointegrationResult(
                 symbol_a=symbol_a, symbol_b=symbol_b,
                 is_cointegrated=False, p_value=1.0,
@@ -321,32 +324,35 @@ class CorrelationManager:
                 correlation=0.0, spread_mean=0.0, spread_std=1.0
             )
         
+        # Use custom implementation
+        t_stat, p_value, beta = custom_engle_granger(aligned['a'], aligned['b'])
+        
         y = aligned['a'].values
         x = aligned['b'].values
         
-        # Simple correlation
+        # Simple correlation for metadata
         correlation = np.corrcoef(y, x)[0, 1]
         
-        # Simple hedge ratio (ratio of means or regression)
-        hedge_ratio = np.mean(y) / np.mean(x) if np.mean(x) != 0 else 1.0
-        
         # Calculate spread
-        spread = y - hedge_ratio * x
+        spread = y - beta * x
         spread_mean = np.mean(spread)
         spread_std = np.std(spread)
         
-        # Use correlation as a proxy for cointegration
-        is_cointegrated = abs(correlation) > 0.8
+        # Estimate half-life
+        half_life = self._calculate_half_life(spread)
+        
+        is_cointegrated = p_value < 0.05
         
         return CointegrationResult(
             symbol_a=symbol_a, symbol_b=symbol_b,
             is_cointegrated=is_cointegrated,
-            p_value=1 - abs(correlation),  # Proxy
-            hedge_ratio=hedge_ratio,
-            half_life=None,
+            p_value=p_value,
+            hedge_ratio=beta,
+            half_life=half_life,
             correlation=correlation,
             spread_mean=spread_mean,
             spread_std=spread_std,
+            adf_statistic=t_stat
         )
     
     def _calculate_half_life(self, spread: np.ndarray) -> float:
