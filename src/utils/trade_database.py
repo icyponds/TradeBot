@@ -99,32 +99,14 @@ class TradeDatabase:
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS equity_snapshots (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    total_equity REAL NOT NULL,
-                    available_margin REAL NOT NULL,
-                    used_margin REAL NOT NULL,
-                    pnl_24h REAL DEFAULT 0.0,
-                    open_positions INTEGER DEFAULT 0
+                    timestamp TIMESTAMP NOT NULL,
+                    equity REAL NOT NULL,
+                    pnl REAL NOT NULL,
+                    trade_id INTEGER,
+                    trade_symbol TEXT,
+                    FOREIGN KEY (trade_id) REFERENCES trades(id)
                 )
             """)
-            
-            # Create market_candles table for incremental loading
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS market_candles (
-                    symbol TEXT NOT NULL,
-                    timeframe TEXT NOT NULL,
-                    timestamp INTEGER NOT NULL,
-                    open REAL NOT NULL,
-                    high REAL NOT NULL,
-                    low REAL NOT NULL,
-                    close REAL NOT NULL,
-                    volume REAL NOT NULL,
-                    PRIMARY KEY (symbol, timeframe, timestamp)
-                )
-            """)
-            
-            # Create indexes
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_candles_lookup ON market_candles(symbol, timeframe, timestamp DESC)")
             
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_equity_timestamp ON equity_snapshots(timestamp)")
             
@@ -244,9 +226,9 @@ class TradeDatabase:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT INTO equity_snapshots (total_equity, available_margin, used_margin, pnl_24h, open_positions)
+                INSERT INTO equity_snapshots (timestamp, equity, pnl, trade_id, trade_symbol)
                 VALUES (?, ?, ?, ?, ?)
-            """, (equity, equity, 0.0, pnl, 0))
+            """, (datetime.now().isoformat(), equity, pnl, trade_id, trade_symbol))
     
     def get_all_trades(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
         """Get all trades, optionally limited."""
@@ -739,103 +721,3 @@ class TradeDatabase:
         except Exception as e:
             self.logger.error(f"Error fetching funding rates for {symbol}: {e}")
             return pd.DataFrame()
-
-    def get_latest_candle_time(self, symbol: str, timeframe: str) -> Optional[int]:
-        """
-        Get timestamp of the most recent candle for a symbol/timeframe.
-        
-        Returns:
-            Timestamp in milliseconds or None if no data exists.
-        """
-        try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("""
-                    SELECT MAX(timestamp) as last_ts 
-                    FROM market_candles 
-                    WHERE symbol = ? AND timeframe = ?
-                """, (symbol, timeframe))
-                row = cursor.fetchone()
-                return row['last_ts'] if row and row['last_ts'] else None
-        except Exception as e:
-            self.logger.error(f"Error checking latest candle for {symbol}: {e}")
-            return None
-
-    def save_candles(self, symbol: str, timeframe: str, candles: List[Dict[str, Any]]):
-        """
-        Save new candles to the database.
-        
-        Args:
-            symbol: Trading symbol
-            timeframe: Candle timeframe (e.g. '1h')
-            candles: List of candle dicts with keys: time (s or ms), open, high, low, close, volume
-        """
-        if not candles:
-            return
-
-        try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                
-                data_to_insert = []
-                for c in candles:
-                    # Normalize timestamp to milliseconds
-                    ts = c.get('time') or c.get('t')
-                    if ts < 10000000000:  # Seconds detection (heuristic)
-                        ts *= 1000
-                    
-                    data_to_insert.append((
-                        symbol,
-                        timeframe,
-                        int(ts),
-                        float(c.get('open') or c.get('o')),
-                        float(c.get('high') or c.get('h')),
-                        float(c.get('low') or c.get('l')),
-                        float(c.get('close') or c.get('c')),
-                        float(c.get('volume') or c.get('v'))
-                    ))
-                
-                # Use INSERT OR IGNORE to handle overlaps
-                cursor.executemany("""
-                    INSERT OR IGNORE INTO market_candles 
-                    (symbol, timeframe, timestamp, open, high, low, close, volume)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, data_to_insert)
-        except Exception as e:
-            self.logger.error(f"Error saving candles for {symbol}: {e}")
-
-    def get_candles(self, symbol: str, timeframe: str, limit: int = 100) -> List[Dict[str, Any]]:
-        """
-        Retrieve recent candles from database.
-        
-        Returns:
-            List of dictionaries compliant with API format.
-        """
-        try:
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
-                # Get the last N candles
-                cursor.execute("""
-                    SELECT timestamp, open, high, low, close, volume
-                    FROM (
-                        SELECT * FROM market_candles
-                        WHERE symbol = ? AND timeframe = ?
-                        ORDER BY timestamp DESC
-                        LIMIT ?
-                    )
-                    ORDER BY timestamp ASC
-                """, (symbol, timeframe, limit))
-                
-                rows = cursor.fetchall()
-                
-                return [{
-                    'time': row['timestamp'] // 1000, # Return as seconds for consistency with existing app
-                    'open': row['open'],
-                    'high': row['high'],
-                    'low': row['low'],
-                    'close': row['close'],
-                    'volume': row['volume']
-                } for row in rows]
-        except Exception as e:
-            self.logger.error(f"Error retrieving candles for {symbol}: {e}")
-            return []

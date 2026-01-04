@@ -126,8 +126,8 @@ def main():
         _strategy_manager = StrategyManager(config)
         
         # Enable incremental market data loading via database
-        if hasattr(_strategy_manager, 'market_api') and hasattr(_strategy_manager, 'trade_db'):
-            _strategy_manager.market_api.market_db = _strategy_manager.trade_db
+        if hasattr(_strategy_manager, 'performance_tracker') and hasattr(_strategy_manager.performance_tracker, 'db'):
+            _strategy_manager.market_api.market_db = _strategy_manager.performance_tracker.db
             logger.info("Enabled incremental market data loading (database-backed)")
         
         # Test API connection

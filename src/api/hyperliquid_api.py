@@ -1207,56 +1207,77 @@ class HyperliquidAPI:
             end_time = int(time.time() * 1000)
             
             # Check for cached data in database
-            bars = []
-            db_latest_ts = None
+            df = None
             if self.market_db:
-                db_latest_ts = self.market_db.get_latest_candle_time(symbol, timeframe)
+                try:
+                    df = self.market_db.get_market_data(symbol, timeframe)
+                    if not df.empty:
+                        # Get latest timestamp from cached data
+                        latest_ts = df.index.max()
+                        gap_start_dt = latest_ts + pd.Timedelta(milliseconds=interval_ms)
+                        now = pd.Timestamp.now()
+                        
+                        if gap_start_dt < now:
+                            # Fetch only the gap
+                            gap_start_ms = int(gap_start_dt.timestamp() * 1000)
+                            self.logger.debug(f"Gap-fill for {symbol} {timeframe}: fetching from {gap_start_dt}")
+                            candles = self.info.candles_snapshot(api_symbol, timeframe, gap_start_ms, end_time)
+                            if candles:
+                                new_bars = [{
+                                    'time': c['t'] // 1000,
+                                    'open': float(c['o']),
+                                    'high': float(c['h']),
+                                    'low': float(c['l']),
+                                    'close': float(c['c']),
+                                    'volume': float(c['v']),
+                                } for c in candles]
+                                new_df = pd.DataFrame(new_bars)
+                                new_df['timestamp'] = pd.to_datetime(new_df['time'], unit='s')
+                                new_df.set_index('timestamp', inplace=True)
+                                self.market_db.insert_market_data(new_df, symbol, timeframe)
+                                # Merge with existing
+                                df = pd.concat([df, new_df]).drop_duplicates()
+                        
+                        # Return from cache
+                        bars = [{
+                            'time': int(ts.timestamp()),
+                            'open': row['open'],
+                            'high': row['high'],
+                            'low': row['low'],
+                            'close': row['close'],
+                            'volume': row['volume'],
+                        } for ts, row in df.tail(limit).iterrows()]
+                        
+                        self.ohlcv_cache.seed(symbol, timeframe, bars, maxlen=max(limit, 300))
+                        return df.tail(limit)
+                except Exception as e:
+                    self.logger.debug(f"Cache miss for {symbol} {timeframe}: {e}")
             
-            if db_latest_ts:
-                # Gap-fill: Only fetch data newer than what we have
-                gap_start = db_latest_ts + interval_ms
-                if gap_start < end_time:
-                    self.logger.debug(f"Gap-fill for {symbol} {timeframe}: {(end_time - gap_start) // interval_ms} candles")
-                    candles = self.info.candles_snapshot(api_symbol, timeframe, gap_start, end_time)
-                    if candles:
-                        new_bars = [{
-                            'time': c['t'] // 1000,
-                            'open': float(c['o']),
-                            'high': float(c['h']),
-                            'low': float(c['l']),
-                            'close': float(c['c']),
-                            'volume': float(c['v']),
-                        } for c in candles]
-                        # Save new candles to database
-                        self.market_db.save_candles(symbol, timeframe, new_bars)
-                        self.logger.debug(f"Saved {len(new_bars)} new candles for {symbol} {timeframe}")
-                
-                # Load from database
-                bars = self.market_db.get_candles(symbol, timeframe, limit)
-            else:
-                # Full fetch (no cached data)
-                start_time = end_time - (limit * interval_ms)
-                candles = self.info.candles_snapshot(api_symbol, timeframe, start_time, end_time)
-                if not candles:
-                    return None
-                
-                bars = [{
-                    'time': c['t'] // 1000,
-                    'open': float(c['o']),
-                    'high': float(c['h']),
-                    'low': float(c['l']),
-                    'close': float(c['c']),
-                    'volume': float(c['v']),
-                } for c in candles]
-                
-                # Save to database for future restarts
-                if self.market_db:
-                    self.market_db.save_candles(symbol, timeframe, bars)
-                    self.logger.debug(f"Cached {len(bars)} candles for {symbol} {timeframe}")
-            
-            if not bars:
+            # Full fetch (no cached data or cache error)
+            start_time = end_time - (limit * interval_ms)
+            candles = self.info.candles_snapshot(api_symbol, timeframe, start_time, end_time)
+            if not candles:
                 return None
-                
+            
+            bars = [{
+                'time': c['t'] // 1000,
+                'open': float(c['o']),
+                'high': float(c['h']),
+                'low': float(c['l']),
+                'close': float(c['c']),
+                'volume': float(c['v']),
+            } for c in candles]
+            
+            # Save to database for future restarts
+            if self.market_db:
+                try:
+                    df = pd.DataFrame(bars)
+                    df['timestamp'] = pd.to_datetime(df['time'], unit='s')
+                    df.set_index('timestamp', inplace=True)
+                    self.market_db.insert_market_data(df, symbol, timeframe)
+                except Exception as e:
+                    self.logger.debug(f"Failed to cache {symbol} {timeframe}: {e}")
+            
             # Seed in-memory cache
             self.ohlcv_cache.seed(symbol, timeframe, bars, maxlen=max(limit, 300))
             df = pd.DataFrame(bars)
