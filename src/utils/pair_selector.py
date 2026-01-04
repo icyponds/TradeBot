@@ -104,6 +104,10 @@ class DynamicPairSelector:
         self.correlation_manager = correlation_manager
         self.logger = logging.getLogger(__name__)
         
+        # Concurrency control
+        self._pairs_lock = threading.Lock()
+        self._backfill_lock = threading.Lock()
+        
         # Trading configuration
         self.dynamic_selection = config['trading']['dynamic_pair_selection']
         self.min_open_interest = config['trading']['min_open_interest']
@@ -727,7 +731,7 @@ class DynamicPairSelector:
         if not self.dynamic_selection:
             self.logger.info("Dynamic pair selection is disabled")
             return []
-        
+            
         try:
             all_assets = []
             
@@ -1404,20 +1408,22 @@ class DynamicPairSelector:
         
         return time_since_scan >= scan_interval
     
-    def get_current_pairs(self) -> List[str]:
+    def get_current_pairs(self, trigger_rescan: bool = True) -> List[str]:
         """
         Get currently selected trading pairs.
         
-        Data fetching runs independently in a background thread.
-        This method returns immediately with whatever pairs are available.
+        Args:
+            trigger_rescan: Whether to trigger a rescan if the interval has passed.
+                          Set to False for read-only access (e.g. dashboard).
         
-        Returns a COPY of the list to prevent race conditions with the
-        background fetcher that may add new pairs concurrently.
+        Data fetching runs independently in a background thread.
+        This method returns immediately with whatever pairs are available,
+        unless trigger_rescan is True and the interval has expired.
         
         Returns:
             List of current trading pairs (copy, safe to iterate)
         """
-        if self.should_rescan():
+        if trigger_rescan and self.should_rescan():
             return self.scan_and_select_pairs()
         
         # Return a copy to prevent race condition with background thread

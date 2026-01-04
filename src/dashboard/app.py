@@ -348,7 +348,7 @@ def _get_summary_data() -> Dict[str, Any]:
             },
             'bot_status': {
                 'is_running': _strategy_manager.is_running,
-                'selected_pairs': len(_strategy_manager.pair_selector.get_current_pairs()) if _strategy_manager.pair_selector else 0,
+                'selected_pairs': len(_strategy_manager.pair_selector.get_current_pairs(trigger_rescan=False)) if _strategy_manager.pair_selector else 0,
                 'active_strategies': len([s for s in _strategy_manager.strategies.keys()]),
             }
         }
