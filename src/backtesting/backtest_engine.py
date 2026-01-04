@@ -50,6 +50,16 @@ class BacktestEngine:
         # Initialize Strategy Manager with injected Mock API
         self.strategy_manager = StrategyManager(config, market_api=self.mock_api)
 
+        # Phase-1: ensure PerformanceTracker has a sensible initial equity baseline in backtests.
+        # BacktestEngine does not call StrategyManager.start(), so we must initialize portfolio + tracker here.
+        try:
+            self.strategy_manager.portfolio_manager.update_portfolio_info(self.mock_api)
+            eq = float((self.mock_api.get_account_balance() or {}).get("total_equity", 0.0) or 0.0)
+            if eq > 0:
+                self.strategy_manager.performance_tracker.set_initial_equity(eq)
+        except Exception as e:
+            self.logger.warning(f"Failed to initialize backtest equity baseline: {e}")
+
         # Optional: clear prior backtest results so analysis only reflects this run
         if bool(backtest_cfg.get("reset_results_db", True)):
             try:

@@ -17,6 +17,10 @@ def load_config() -> Dict[str, Any]:
     Returns:
         Dict containing configuration settings
     """
+    # Phase-1: disable the 15m stat-arb instance by default (too much churn / fees).
+    # Can be re-enabled explicitly for research/backtests.
+    enable_stat_arb_15m = os.getenv("ENABLE_STAT_ARB_15M", "false").lower() == "true"
+
     config = {
         # Hyperliquid API Configuration
         "api": {
@@ -175,6 +179,19 @@ def load_config() -> Dict[str, Any]:
                 # (Normal trades size/check against available_capital * (1 - reserve_capital_pct))
                 "reserve_capital_pct": float(os.getenv("STRATEGY_EXPLORATION_RESERVE_PCT", "0.10")),
             },
+
+            # Phase-1: cost-aware entry gating for mean-reversion/stat-arb strategies.
+            # Enforce a minimum additional Z-score over the strategy's entry threshold so we avoid
+            # churning near the boundary where fees/slippage dominate.
+            "entry_hurdles": {
+                "enabled": os.getenv("ENTRY_HURDLES_ENABLED", "true").lower() == "true",
+                "zscore_buffer": float(os.getenv("ENTRY_HURDLE_ZSCORE_BUFFER", "0.30")),
+                "apply_to": [
+                    s.strip()
+                    for s in os.getenv("ENTRY_HURDLE_APPLY_TO", "ou_mean_reversion,stat_arb").split(",")
+                    if s.strip()
+                ],
+            },
         },
         
         # Leverage Management Configuration
@@ -186,6 +203,14 @@ def load_config() -> Dict[str, Any]:
             "max_leverage": float(os.getenv("LEVERAGE_MAX", "5.0")),  # Reduced from 10.0 for safety
             "ma_strategy_adjustment": float(os.getenv("LEVERAGE_MA_STRATEGY_ADJUSTMENT", "1.1")),
             "rsi_strategy_adjustment": float(os.getenv("LEVERAGE_RSI_STRATEGY_ADJUSTMENT", "0.9")),
+
+            # Phase-1: budget-vs-ceiling sizing. Caps define the ceiling; base_risk_pct defines the average.
+            "base_risk_per_trade_pct": float(os.getenv("BASE_RISK_PER_TRADE_PCT", "0.50")),
+            "min_risk_multiplier": float(os.getenv("MIN_RISK_MULTIPLIER", "0.25")),
+            "max_risk_multiplier": float(os.getenv("MAX_RISK_MULTIPLIER", "4.00")),
+            # Apply a mild volatility scaling to margin-at-risk (in addition to leverage adjustment).
+            # g(vol) = (1/(1+max(vol,0)))^power
+            "vol_risk_scale_power": float(os.getenv("VOL_RISK_SCALE_POWER", "0.50")),
         },
         
         # Strategy Configuration
@@ -200,7 +225,12 @@ def load_config() -> Dict[str, Any]:
                 # effectively finding the "best" timeframe for current market conditions.
 
                 # Statistical Arbitrage (15m vs 1h)
-                {"type": "stat_arb", "name": "stat_arb_15m", "timeframe": "15m"},
+                # NOTE: stat_arb_15m is disabled by default; set ENABLE_STAT_ARB_15M=true to include it.
+                *(
+                    [{"type": "stat_arb", "name": "stat_arb_15m", "timeframe": "15m"}]
+                    if enable_stat_arb_15m
+                    else []
+                ),
                 {"type": "stat_arb", "name": "stat_arb_1h",  "timeframe": "1h"},
 
                 # OU Mean Reversion (15m vs 1h)

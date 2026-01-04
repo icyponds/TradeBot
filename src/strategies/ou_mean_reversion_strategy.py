@@ -219,11 +219,13 @@ class OUMeanReversionStrategy(BaseStrategy):
         if signal == 'hold':
             return None
         
+        is_entry = "OU Entry:" in reason
         return {
             'signal': signal,
             'reason': reason,
             'price': current_price,
             'strategy': 'ou_mean_reversion',
+            'action': 'open' if is_entry else 'close',
             'zscore': zscore,
             'mu': ou_params.mu,
             'theta': ou_params.theta,

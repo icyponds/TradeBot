@@ -1,38 +1,27 @@
 # TradeBot Profitability Improvement Research + Recommendations (2026-01-04)
 
 ## Executive summary
-Your 90-day backtest produced **~$105 PnL on ~$60K starting equity (~0.175% total return, ~0.71% annualized)**, which looks bad **on total equity**.
-
-However, the bot’s **risk deployment is extremely low**:
-- Logs show **capital at risk ~$615** with ~13 positions (≈ **~1%** of $60K) and **$50 max position size** per position in practice.
-- If you only deploy ~1% of equity, even a decent “edge” will look tiny on total equity.
+With percentage-based sizing (no USD caps), a 90-day backtest run produced **-$8,460.38 PnL on 192 trades** with profit factor **~0.887**.
 
 So the main levers are:
 1) **Fix/validate backtest realism + accounting** (so we can trust results),
 2) **Stop running losing strategy variants** (the backtest already shows large negative contributors),
-3) **Increase capital utilization intelligently** (vol targeting / risk parity / Kelly-like sizing),
-4) Add **new strategies that diversify return streams**, not just more mean reversion variants.
+3) **Improve strategy edge net of costs** (reduce churn, add cost-aware hurdles, improve pair selection/hedging),
+4) **Tune portfolio sizing intelligently** (risk/vol targeting, correlation-aware allocation),
+5) Add **new strategies that diversify return streams**, not just more mean reversion variants.
 
 ---
 
 ## What the current backtest is telling us (high signal)
-From the backtest performance report (end of run):
-- Total trades: **2657**
-- Total PnL: **$105.05**
-- Win rate: **~45.1%**
-- Profit factor: **~1.01** (barely above break-even)
-- Biggest per-strategy drivers (from the printed breakdown):
-  - **adaptive_grid_15m**: strongly positive PnL but very high turnover (many trades)
-  - **stat_arb_15m**: **large negative PnL** (dominant loser)
-  - **stat_arb_1h**: positive PnL
-  - **vol_breakout_1h**: positive PnL
-  - **momentum_4h**: negative but tiny sample (3 trades)
-  - **ou_mean_reversion**: tiny sample
+From the percentage-sized backtest run:
+- Total trades: **192**
+- Total PnL: **-$8,460.38**
+- Profit factor: **~0.887**
 
-Interpretation:
+Interpretation (high-level):
 - You already have at least **one losing “fast stat-arb” variant** that likely needs higher hurdles / different pair selection / different timeframe.
-- Your “edge” is currently too small **net of churn** (PF ~ 1.01).
-- The bot is likely under-allocated (low $ at risk), making total-return look terrible.
+- The overall strategy mix does **not** have a robust positive edge at realistic sizing yet.
+- The trade count can drop sharply when sizing increases because portfolio/position limits bind sooner and more entries are skipped; this is expected behavior but must be managed intentionally.
 
 ---
 
@@ -199,7 +188,44 @@ Data needed:
 ---
 
 # Capital utilization: why return looks “terrible” and how to improve it safely
-Given current sizing (~$50 per position), the bot is effectively running at **very low exposure** relative to equity.
+Position sizing is now **percentage-based**:
+- `MAX_POSITION_SIZE_PERCENTAGE` caps **margin-at-risk per position** as a % of equity.
+- `MAX_POSITIONS_PERCENTAGE` caps **total margin-at-risk** across all positions as a % of equity.
+
+This is the correct direction (no brittle USD caps), but it also means strategy weaknesses show up immediately at scale.
+
+## Key recommendation: make “average position size” smaller than the cap
+Right now, a common failure mode is sizing that often hits the **max cap** per trade. This reduces the tradeable universe and can amplify drawdowns.
+
+The cap should be a **safety ceiling**, not the default trade size. The default trade size should be a separate “budget”, and only rare high-confidence trades should approach the ceiling.
+
+### Implement “budget vs ceiling” sizing
+Use three layers:
+1) **Global ceilings (safety)**:
+   - `MAX_POSITION_SIZE_PERCENTAGE` (per-position ceiling)
+   - `MAX_POSITIONS_PERCENTAGE` (portfolio ceiling)
+2) **Default budget (average trade size)**:
+   - Add a *base risk per trade* percentage (e.g., `BASE_RISK_PER_TRADE_PCT`), which defines the typical margin-at-risk per trade.
+3) **Confidence/edge scaling (strategy-driven)**:
+   - Strategies should output a calibrated confidence / signal strength.
+   - Convert it into a multiplier so most trades are small, and only high-confidence trades get larger (still under the ceiling).
+
+### Suggested sizing formula (conceptual)
+Let equity be \(E\). Compute:
+\[
+\text{margin} = \min\Big(E \cdot \text{MAX\_POS\_PCT},\ E \cdot \text{BASE\_RISK\_PCT} \cdot f(\text{confidence}) \cdot g(\text{vol}) \cdot h(\text{regime}) \cdot k(\text{corr})\Big)
+\]
+Then enforce per-position ceiling:
+\[
+\text{margin} \le E \cdot \text{MAX\_POSITION\_SIZE\_PERCENTAGE}
+\]
+
+Practical defaults:
+- `BASE_RISK_PER_TRADE_PCT`: **0.25%–1.0%**
+- `MAX_RISK_MULTIPLIER`: **2×–5×**
+- Confidence mapping: convex (e.g., \(f(c)=0.25 + (c^2)\cdot(\text{MAX\_MULT}-0.25)\)) so most trades stay small.
+- Vol targeting: reduce size in high volatility (to stabilize risk contribution).
+- Regime/correlation overlays: reduce size when the portfolio is already concentrated or when regime uncertainty is high.
 
 Recommendations:
 - **Add a portfolio-level target risk**:
@@ -234,9 +260,10 @@ This is as important as adding strategies.
 # Prioritized roadmap (what I’d do next)
 
 ## Phase 1 (fast wins, 1–2 days)
-- Disable/raise hurdle for **stat_arb_15m** (largest negative contributor).
-- Add basic **fee hurdle** to all MR/stat-arb entries.
-- Fix backtest equity curve initialization so drawdown metrics are trustworthy.
+- ✅ **Disable `stat_arb_15m` by default** (can be re-enabled for research via config/env).
+- ✅ Add a basic **entry hurdle** for MR/stat-arb entries (require an additional Z-score buffer over the strategy’s entry threshold to reduce churn near the boundary where costs dominate).
+- ✅ Implement **“budget vs ceiling” position sizing** (base risk per trade + confidence scaling; caps remain as safety ceilings).
+- ✅ Fix **backtest equity baseline initialization** so drawdown metrics are based on a sensible starting equity (BacktestEngine now sets initial equity without requiring `StrategyManager.start()`).
 
 ## Phase 2 (core alpha improvements, ~1 week)
 - Implement **cointegration + Kalman hedge ratio** for stat-arb (replace correlation pairs).

@@ -124,7 +124,7 @@ class LeverageManager:
         # Calculate dynamic leverage
         leverage = self.calculate_dynamic_leverage(symbol, strategy_name, signal_strength, market_volatility, current_price)
         
-        # Get maximum position size from portfolio manager if available
+        # Get maximum position size from portfolio manager if available (ceiling)
         if self.portfolio_manager:
             max_position_size = self.portfolio_manager.calculate_max_position_size(symbol)
             self.logger.info(f"Portfolio-based max position size for {symbol}: ${max_position_size:.2f}")
@@ -138,8 +138,32 @@ class LeverageManager:
                 f"(available_capital=${available_capital:.2f}, max_pos_pct={max_pos_pct:.2f}%)"
             )
         
-        # Calculate maximum capital at risk per trade
-        max_risk_per_trade = max_position_size
+        # Phase-1: budget-vs-ceiling sizing.
+        # Compute a typical margin-at-risk ("budget") and only scale toward the ceiling for high confidence.
+        lm_cfg = self.config.get("leverage_management", {}) or {}
+        base_risk_pct = float(lm_cfg.get("base_risk_per_trade_pct", 0.50)) / 100.0
+        min_mult = float(lm_cfg.get("min_risk_multiplier", 0.25))
+        max_mult = float(lm_cfg.get("max_risk_multiplier", 4.00))
+        vol_pow = float(lm_cfg.get("vol_risk_scale_power", 0.50))
+
+        # Equity proxy
+        equity = getattr(self.portfolio_manager, "total_equity", 0.0) if self.portfolio_manager else 0.0
+        if not equity or equity <= 0:
+            equity = max(available_capital, 0.0)
+
+        # Confidence mapping: convex so most trades remain small.
+        c = max(0.0, min(1.0, float(signal_strength)))
+        confidence_mult = min_mult + (c * c) * (max_mult - min_mult)
+
+        # Mild volatility downscaling (separate from leverage adjustment).
+        v = max(0.0, float(market_volatility))
+        vol_mult = (1.0 / (1.0 + v)) ** max(0.0, vol_pow)
+        vol_mult = max(0.25, min(1.0, vol_mult))
+
+        budget_risk_per_trade = equity * base_risk_pct * confidence_mult * vol_mult
+
+        # Ceiling remains max_position_size; budget is the default.
+        max_risk_per_trade = min(max_position_size, budget_risk_per_trade)
         
         # Calculate position size based on capital at risk
         # With leverage, the position value = capital_at_risk * leverage
@@ -180,6 +204,10 @@ class LeverageManager:
         
         self.logger.info(f"Position calculation for {symbol}: size={position_size:.4f}, margin=${margin_required:.2f}, leverage={leverage:.1f}x")
         self.logger.info(f"  - Max position size: ${max_position_size:.2f}")
+        self.logger.info(
+            f"  - Budget risk: ${budget_risk_per_trade:.2f} (base_risk_pct={base_risk_pct*100:.2f}%, "
+            f"conf_mult={confidence_mult:.2f}, vol_mult={vol_mult:.2f})"
+        )
         self.logger.info(f"  - Available capital: ${available_capital:.2f}")
         self.logger.info(f"  - Position value: ${position_value:.2f}")
         

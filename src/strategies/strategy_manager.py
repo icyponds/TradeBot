@@ -984,6 +984,30 @@ class StrategyManager:
                 signal = strategy.generate_signal(symbol, ohlcv)
             
             if signal:
+                # Phase-1: entry hurdle for MR/stat-arb to avoid churn around the boundary where costs dominate.
+                try:
+                    hurdle_cfg = (self.config.get("risk_management", {}) or {}).get("entry_hurdles", {}) or {}
+                    if hurdle_cfg.get("enabled", False) and signal.get("action") == "open":
+                        apply_to = set(hurdle_cfg.get("apply_to", []) or [])
+                        if any(strategy_name.startswith(prefix) for prefix in apply_to):
+                            z = signal.get("zscore")
+                            if z is None:
+                                z = signal.get("z_score")
+                            entry_thr = getattr(strategy, "zscore_entry", None)
+                            if entry_thr is None:
+                                entry_thr = getattr(strategy, "z_score_entry", None)
+                            buf = float(hurdle_cfg.get("zscore_buffer", 0.30))
+
+                            if z is not None and entry_thr is not None:
+                                if abs(float(z)) < (float(entry_thr) + buf):
+                                    self.logger.info(
+                                        f"Entry hurdle: skipping {strategy_name}/{symbol} (|z|={float(z):.2f} < "
+                                        f"{float(entry_thr):.2f}+{buf:.2f})"
+                                    )
+                                    return None
+                except Exception as e:
+                    self.logger.debug(f"Entry hurdle evaluation failed for {strategy_name}/{symbol}: {e}")
+
                 # Get strategy weight
                 strategy_weight = self._get_effective_strategy_weight(strategy_name)
                 signal['_strategy_weight'] = strategy_weight

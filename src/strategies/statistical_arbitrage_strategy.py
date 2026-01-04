@@ -196,11 +196,13 @@ class StatisticalArbitrageStrategy(BaseStrategy):
         if signal == 'hold':
             return None
         
+        is_entry = "Stat Arb Entry:" in reason
         return {
             'signal': signal,
             'reason': reason,
             'price': current_price_a,
             'strategy': 'stat_arb',
+            'action': 'open' if is_entry else 'close',
             'pair_symbol': symbol_b,
             'z_score': z_score,
             'hedge_ratio': hedge_ratio,
