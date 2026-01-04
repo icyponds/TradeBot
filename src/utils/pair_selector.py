@@ -1142,7 +1142,7 @@ class DynamicPairSelector:
                 continue
             
             # Stop initial loading after MAX_INITIAL_LOAD, queue rest for backfill
-            if len(loaded_symbols) >= MAX_INITIAL_LOAD:
+            if len(assets_with_data) >= MAX_INITIAL_LOAD:
                 # Queue remaining for staged backfill (thread-safe)
                 remaining = [a for a in sorted_by_volume[i:] if a.get('name', '') not in loaded_symbols]
                 with self._backfill_lock:
@@ -1156,7 +1156,7 @@ class DynamicPairSelector:
             
             # Load this asset's historical data
             try:
-                self.logger.info(f"  [{len(loaded_symbols)+1}/{MAX_INITIAL_LOAD}] Loading {symbol} ({market_type})...")
+                self.logger.info(f"  [{len(assets_with_data)+1}/{MAX_INITIAL_LOAD}] Loading {symbol} ({market_type})...")
                 self._get_price_history(symbol)
                 loaded_symbols.add(symbol)
                 assets_with_data.append(asset)
