@@ -32,7 +32,9 @@ def generate_synthetic_data(symbol, start_date, end_date, freq='1h'):
     
     return df
 
-def run_smoke_test(days=None, start_str=None, end_str=None):
+import random
+
+def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None):
     print("Running Backtest Smoke Test...")
     
     # 1. Config
@@ -53,25 +55,46 @@ def run_smoke_test(days=None, start_str=None, end_str=None):
     default_end = datetime.now()
     default_start = default_end - timedelta(days=90)
     
+    db_start = None
+    db_end = None
+
     if symbols:
         # Get range for first symbol (assuming somewhat synchronized)
-        s_start, s_end = db.get_available_data_range(symbols[0], '1h')
-        if s_end:
-            default_end = s_end
-        if s_start:
-            default_start = s_start
+        db_start, db_end = db.get_available_data_range(symbols[0], '1h')
+        if db_end:
+            default_end = db_end
+        if db_start:
+            default_start = db_start
             
-    # Parse Arguments or use Defaults
-    end_date = default_end
-    if end_str:
-        end_date = datetime.strptime(end_str, "%Y-%m-%d")
-        
-    start_date = default_start
-    if start_str:
-        start_date = datetime.strptime(start_str, "%Y-%m-%d")
-    elif days:
-        # If days specified, anchor from the DETERMINED end_date (DB tip or now)
-        start_date = end_date - timedelta(days=days)
+    # Random Window Logic
+    if random_window and db_start and db_end:
+        print(f"Randomly selecting {random_window} days within range {db_start} to {db_end}...")
+        total_duration = db_end - db_start
+        if total_duration.days <= random_window:
+             print(f"Warning: Not enough data ({total_duration.days}d) for requested random window ({random_window}d). Using full range.")
+             start_date = db_start
+             end_date = db_end
+        else:
+             # Buffer of 1 day to ensure full data availability
+             max_start_offset = (db_end - timedelta(days=random_window + 1)).timestamp()
+             min_start_offset = db_start.timestamp()
+             
+             random_start_ts = random.uniform(min_start_offset, max_start_offset)
+             start_date = datetime.fromtimestamp(random_start_ts)
+             end_date = start_date + timedelta(days=random_window)
+    else:
+        # Standard Logic
+        # Parse Arguments or use Defaults
+        end_date = default_end
+        if end_str:
+            end_date = datetime.strptime(end_str, "%Y-%m-%d")
+            
+        start_date = default_start
+        if start_str:
+            start_date = datetime.strptime(start_str, "%Y-%m-%d")
+        elif days:
+            # If days specified, anchor from the DETERMINED end_date (DB tip or now)
+            start_date = end_date - timedelta(days=days)
     
     if symbols:
         print(f"Found {len(symbols)} symbols in DB. Using range from {symbols[0]}...")
@@ -116,10 +139,16 @@ if __name__ == "__main__":
     parser.add_argument('--days', type=int, help='Number of days to run (default: auto-detect)')
     parser.add_argument('--start', type=str, help='Start date (YYYY-MM-DD)')
     parser.add_argument('--end', type=str, help='End date (YYYY-MM-DD)')
+    parser.add_argument('--random-window', type=int, help='Randomly select N days from available data')
     
     args = parser.parse_args()
     
     # Ensure DB directory exists
     os.makedirs('data', exist_ok=True)
     
-    run_smoke_test(days=args.days, start_str=args.start, end_str=args.end)
+    run_smoke_test(
+        days=args.days, 
+        start_str=args.start, 
+        end_str=args.end, 
+        random_window=args.random_window
+    )

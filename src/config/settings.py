@@ -257,8 +257,8 @@ def load_config() -> Dict[str, Any]:
                 # Liquidation Hunter (5m)
                 {"type": "liquidation_hunter", "name": "liquidation_hunter_5m", "timeframe": "5m"},
 
-                # Cross-Sectional Momentum (1h)
-                {"type": "cross_sectional_momentum", "name": "csm_1h", "timeframe": "1h"},
+                # Cross-Sectional Momentum (4h)
+                {"type": "cross_sectional_momentum", "name": "csm_4h", "timeframe": "4h"},
             ],
             # Note: timeframe is now auto-selected per strategy instance
             "ohlcv_limit": int(os.getenv("OHLCV_LIMIT", "300")), # Increased for EMA200
@@ -350,10 +350,10 @@ def load_config() -> Dict[str, Any]:
             
             # Cross-Sectional Momentum Strategy
             "cross_sectional_momentum": {
-                "lookback_period": 168,     # 7 days (was 24h)
-                "top_n_percent": 0.15,      # Top 15% (Increased allocation (Scale Up))
-                "bottom_n_percent": 0.15,   # Bottom 15%
-                "rebalance_interval": 24,   # Daily (was 4h)
+                "lookback_period": 12,     # 12 * 4h = 48 hours (2 days)
+                "top_n_percent": 0.15,
+                "bottom_n_percent": 0.15,
+                "rebalance_interval": 4,   # Rebalance every 4 hours
             },
         },
         
