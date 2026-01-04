@@ -129,9 +129,14 @@ class LeverageManager:
             max_position_size = self.portfolio_manager.calculate_max_position_size(symbol)
             self.logger.info(f"Portfolio-based max position size for {symbol}: ${max_position_size:.2f}")
         else:
-            # Fallback to fixed amount from config
-            max_position_size = self.config['trading']['max_position_size_usd']
-            self.logger.info(f"Config-based max position size for {symbol}: ${max_position_size:.2f}")
+            # No portfolio manager -> cannot compute equity-based limits reliably.
+            # Use available_capital-based percentage sizing as a conservative fallback.
+            max_pos_pct = float(self.config['trading'].get('max_position_size_percentage', 0.0))
+            max_position_size = max(0.0, available_capital * (max_pos_pct / 100.0))
+            self.logger.info(
+                f"Fallback max position size for {symbol}: ${max_position_size:.2f} "
+                f"(available_capital=${available_capital:.2f}, max_pos_pct={max_pos_pct:.2f}%)"
+            )
         
         # Calculate maximum capital at risk per trade
         max_risk_per_trade = max_position_size

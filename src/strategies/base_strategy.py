@@ -88,9 +88,9 @@ class BaseStrategy(ABC):
         # NOTE: Global "risk_percentage" sizing has been removed in favor of portfolio-based sizing
         # managed by `PortfolioManager` + account-based max loss enforcement in `StrategyManager`.
         # Here, `risk_amount` is treated as a USD cap for this position.
-        max_position_size_usd = float(self.config['trading']['max_position_size_usd'])
-        position_size_usd = min(float(risk_amount), max_position_size_usd)
-        return position_size_usd
+        # Strategies should not impose USD-denominated hard caps; sizing is handled via
+        # portfolio/percentage-based logic upstream (PortfolioManager + LeverageManager).
+        return float(risk_amount)
     
     def calculate_stop_loss(self, entry_price: float, side: str, 
                            signal_context: Dict[str, Any] = None) -> float:

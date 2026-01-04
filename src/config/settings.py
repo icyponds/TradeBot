@@ -96,7 +96,6 @@ def load_config() -> Dict[str, Any]:
             
             # Portfolio-based position sizing
             "use_portfolio_based_sizing": os.getenv("USE_PORTFOLIO_BASED_SIZING", "true").lower() == "true",
-            "max_position_size_usd": float(os.getenv("MAX_POSITION_SIZE_USD", "50")),  # Fallback max USD per position
             "max_position_size_percentage": float(os.getenv("MAX_POSITION_SIZE_PERCENTAGE", "10.0")),  # Max % of portfolio per position
             "max_positions_percentage": float(os.getenv("MAX_POSITIONS_PERCENTAGE", "80.0")),  # Max % of portfolio in all positions
             
@@ -424,9 +423,7 @@ def validate_config(config: Dict[str, Any]) -> bool:
             return False
         
         # Validate trading configuration
-        if config['trading']['max_position_size_usd'] <= 0:
-            print("ERROR: Max position size USD must be positive")
-            return False
+        # USD-denominated hard caps are intentionally not used; sizing is percentage-based.
         
         if config['trading']['max_position_size_percentage'] <= 0 or config['trading']['max_position_size_percentage'] > 100:
             print("ERROR: Max position size percentage must be between 0 and 100")

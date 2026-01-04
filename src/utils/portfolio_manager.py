@@ -22,7 +22,6 @@ class PortfolioManager:
         
         # Portfolio configuration
         self.use_portfolio_based_sizing = config['trading']['use_portfolio_based_sizing']
-        self.max_position_size_usd = config['trading']['max_position_size_usd']
         self.max_position_size_percentage = config['trading']['max_position_size_percentage']
         self.max_positions_percentage = config['trading']['max_positions_percentage']
         
@@ -87,14 +86,14 @@ class PortfolioManager:
             Maximum position size in USD
         """
         if not self.use_portfolio_based_sizing or self.total_equity <= 0:
-            # Fallback to fixed USD amount
-            return self.max_position_size_usd
+            # If portfolio sizing is disabled or equity is unknown, we cannot safely size.
+            # Callers should ensure portfolio info is updated.
+            return 0.0
         
         # Calculate percentage-based position size
         percentage_based_size = self.total_equity * (self.max_position_size_percentage / 100)
         
-        # Use the smaller of percentage-based or fixed USD amount
-        max_position_size = min(percentage_based_size, self.max_position_size_usd)
+        max_position_size = percentage_based_size
         
         self.logger.debug(f"Max position size for {symbol}: ${max_position_size:.2f} "
                          f"(portfolio: ${self.total_equity:.2f}, {self.max_position_size_percentage}%)")
@@ -160,7 +159,6 @@ class PortfolioManager:
             Dictionary with position size limits
         """
         return {
-            'max_position_size_usd': self.max_position_size_usd,
             'max_position_size_percentage': self.max_position_size_percentage,
             'current_max_position_size': self.calculate_max_position_size(),
             'max_positions_percentage': self.max_positions_percentage,

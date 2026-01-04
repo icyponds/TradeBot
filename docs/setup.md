@@ -51,7 +51,6 @@ Copy the `env.example` file to `.env` and configure the following variables:
 
 #### Portfolio-based Position Sizing
 - `USE_PORTFOLIO_BASED_SIZING`: Enable portfolio-based position sizing (default: true)
-- `MAX_POSITION_SIZE_USD`: Maximum USD per position (fallback, default: 50)
 - `MAX_POSITION_SIZE_PERCENTAGE`: Maximum percentage of portfolio per position (default: 10.0%)
 - `MAX_POSITIONS_PERCENTAGE`: Maximum percentage of portfolio in all positions (default: 80.0%)
 
@@ -85,7 +84,7 @@ The bot uses **capital at risk-based position sizing** instead of notional posit
 
 The bot implements comprehensive risk management based on capital at risk:
 
-1. **Per-position cap**: `MAX_POSITION_SIZE_USD` and `MAX_POSITION_SIZE_PERCENTAGE`
+1. **Per-position cap**: `MAX_POSITION_SIZE_PERCENTAGE`
 2. **Portfolio cap**: `MAX_POSITIONS_PERCENTAGE`
 3. **Max account loss per trade**: `MAX_ACCOUNT_LOSS_PER_TRADE` (default 3% of equity)
 4. **Emergency portfolio stop**: `EMERGENCY_PORTFOLIO_LOSS_PCT` closes all positions if portfolio loss exceeds threshold
