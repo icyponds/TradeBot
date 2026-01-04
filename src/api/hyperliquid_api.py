@@ -764,6 +764,9 @@ class HyperliquidAPI:
         # Order tracking
         self.order_tracker = OrderTracker()
         
+        # Market data persistence (optional, for incremental loading)
+        self.market_db = None  # Set externally via set_market_db()
+        
         # Real-time data storage
         self._price_data: Dict[str, deque] = defaultdict(lambda: deque(maxlen=1000))
         self._subscribed_symbols: set = set()
@@ -1202,23 +1205,59 @@ class HyperliquidAPI:
             }
             interval_ms = timeframe_ms.get(timeframe, 60 * 60 * 1000)
             end_time = int(time.time() * 1000)
-            start_time = end_time - (limit * interval_ms)
             
-            candles = self.info.candles_snapshot(api_symbol, timeframe, start_time, end_time)
-            if not candles:
-                return None
-            
+            # Check for cached data in database
             bars = []
-            for candle in candles:
-                bars.append({
-                    'time': candle['t'] // 1000,
-                    'open': float(candle['o']),
-                    'high': float(candle['h']),
-                    'low': float(candle['l']),
-                    'close': float(candle['c']),
-                    'volume': float(candle['v']),
-                })
-            # Seed cache using the original symbol (human-readable) as key
+            db_latest_ts = None
+            if self.market_db:
+                db_latest_ts = self.market_db.get_latest_candle_time(symbol, timeframe)
+            
+            if db_latest_ts:
+                # Gap-fill: Only fetch data newer than what we have
+                gap_start = db_latest_ts + interval_ms
+                if gap_start < end_time:
+                    self.logger.debug(f"Gap-fill for {symbol} {timeframe}: {(end_time - gap_start) // interval_ms} candles")
+                    candles = self.info.candles_snapshot(api_symbol, timeframe, gap_start, end_time)
+                    if candles:
+                        new_bars = [{
+                            'time': c['t'] // 1000,
+                            'open': float(c['o']),
+                            'high': float(c['h']),
+                            'low': float(c['l']),
+                            'close': float(c['c']),
+                            'volume': float(c['v']),
+                        } for c in candles]
+                        # Save new candles to database
+                        self.market_db.save_candles(symbol, timeframe, new_bars)
+                        self.logger.debug(f"Saved {len(new_bars)} new candles for {symbol} {timeframe}")
+                
+                # Load from database
+                bars = self.market_db.get_candles(symbol, timeframe, limit)
+            else:
+                # Full fetch (no cached data)
+                start_time = end_time - (limit * interval_ms)
+                candles = self.info.candles_snapshot(api_symbol, timeframe, start_time, end_time)
+                if not candles:
+                    return None
+                
+                bars = [{
+                    'time': c['t'] // 1000,
+                    'open': float(c['o']),
+                    'high': float(c['h']),
+                    'low': float(c['l']),
+                    'close': float(c['c']),
+                    'volume': float(c['v']),
+                } for c in candles]
+                
+                # Save to database for future restarts
+                if self.market_db:
+                    self.market_db.save_candles(symbol, timeframe, bars)
+                    self.logger.debug(f"Cached {len(bars)} candles for {symbol} {timeframe}")
+            
+            if not bars:
+                return None
+                
+            # Seed in-memory cache
             self.ohlcv_cache.seed(symbol, timeframe, bars, maxlen=max(limit, 300))
             df = pd.DataFrame(bars)
             df['timestamp'] = pd.to_datetime(df['time'], unit='s')
