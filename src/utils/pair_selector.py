@@ -781,6 +781,8 @@ class DynamicPairSelector:
             
         except Exception as e:
             self.logger.error(f"Error scanning and selecting pairs: {e}")
+            # Ensure we don't retry immediately in a tight loop
+            self.last_scan_time = datetime.now()
             return []
     
     def _get_native_perp_assets(self) -> List[Dict[str, Any]]:

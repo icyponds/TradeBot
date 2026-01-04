@@ -1016,6 +1016,33 @@ class HyperliquidAPI:
         
         # Last resort: REST call
         return self._get_price_from_rest(symbol)
+
+    @with_retry(max_attempts=3, base_delay=0.5)
+    def _get_bulk_market_data(self) -> Optional[Tuple[List[Any], List[Any]]]:
+        """
+        Get market data for all assets, cached for short duration.
+        Used to prevent N+1 API calls when iterating over symbols.
+        """
+        cache_key = "bulk_market_data"
+        cached = self.cache.get(cache_key)
+        if cached is not None:
+            return cached
+            
+        def _fetch():
+            meta_and_ctxs = self.info.meta_and_asset_ctxs()
+            if len(meta_and_ctxs) < 2:
+                return None
+            
+            universe = meta_and_ctxs[0]['universe']
+            asset_contexts = meta_and_ctxs[1]
+            
+            return universe, asset_contexts
+            
+        result = self._rate_limited_call(_fetch)
+        if result:
+            self.cache.set(cache_key, result, ttl=5.0)  # Cache bulk data for 5 seconds
+            
+        return result
     
     def _get_price_from_rest(self, symbol: str) -> Optional[float]:
         """Get price via REST API (fallback)."""
