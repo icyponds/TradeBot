@@ -174,6 +174,29 @@ class LeverageManager:
         
         # Calculate position size based on capital at risk
         position_value = max_risk_per_trade * leverage
+        
+        # Force minimum order value to meet exchange requirements ($10 minimum)
+        # We use $12 to give a safe buffer against price fluctuations
+        MIN_ORDER_VALUE = 12.0
+        if position_value < MIN_ORDER_VALUE and position_value > 0:
+            original_value = position_value
+            position_value = MIN_ORDER_VALUE
+            # Recalculate margin required for the bumped size
+            max_risk_per_trade = position_value / leverage
+            
+            # Check if we have enough capital
+            if max_risk_per_trade > available_capital:
+                self.logger.warning(
+                    f"Cannot bump {symbol} to min value ${MIN_ORDER_VALUE}: "
+                    f"Requires ${max_risk_per_trade:.2f} margin, have ${available_capital:.2f}"
+                )
+                return 0.0, 0.0, leverage
+                
+            self.logger.info(
+                f"Bumped position size for {symbol} from ${original_value:.2f} to ${position_value:.2f} "
+                f"(min order value)"
+            )
+
         position_size = position_value / current_price
         
         # The margin required is the actual capital at risk

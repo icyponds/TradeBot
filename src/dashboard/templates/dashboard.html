@@ -934,6 +934,23 @@
             }
         }
 
+        // Format date time
+        function formatDateTime(timeStr) {
+            if (!timeStr) return '--';
+            try {
+                const date = new Date(timeStr);
+                return date.toLocaleString('en-US', { 
+                    month: 'short', 
+                    day: 'numeric',
+                    hour: '2-digit', 
+                    minute: '2-digit',
+                    second: '2-digit'
+                });
+            } catch {
+                return '--';
+            }
+        }
+
         // Format exit reason
         function formatExitReason(reason) {
             if (!reason) return 'Unknown';
