@@ -103,3 +103,26 @@ class TestStrategyManager:
         # Verify side effects
         assert strategy_manager.total_positions_closed == 1
         strategy_manager.close_position.assert_called_with('BTC', 'take_profit', timestamp=ANY)
+
+    def test_close_all_positions(self, strategy_manager):
+        """Test close_all_positions iterates correctly."""
+        # Setup positions on the execution engine directly
+        strategy_manager.execution_engine.positions = {
+            'BTC': MagicMock(),
+            'ETH': MagicMock()
+        }
+        
+        # Test 1: Normal closure
+        strategy_manager.close_all_positions(reason="shutdown")
+        
+        assert strategy_manager.execution_engine.close_position.call_count == 2
+        strategy_manager.execution_engine.close_position.assert_any_call('BTC', reason='shutdown')
+        strategy_manager.execution_engine.close_position.assert_any_call('ETH', reason='shutdown')
+        
+        # Test 2: Error handling during loop
+        strategy_manager.execution_engine.close_position.side_effect = [Exception("Error closing BTC"), True]
+        strategy_manager.close_all_positions(reason="emergency")
+        
+        # Should still try to close ETH after BTC fails
+        assert strategy_manager.execution_engine.close_position.call_count == 4 # 2 from prev + 2 new
+
