@@ -190,7 +190,7 @@ class GaussianHMM3:
         for t in range(T - 2, -1, -1):
             log_beta[t] = logsumexp(logA + logB[t + 1][None, :] + log_beta[t + 1][None, :], axis=1)
 
-        ll = float(logsumexp(log_alpha[-1]))
+        ll = float(logsumexp(log_alpha[-1]).item())
         return log_alpha, log_beta, ll
 
 

@@ -125,15 +125,6 @@ class TradeDatabase:
             
             # Create indexes
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_candles_lookup ON market_candles(symbol, timeframe, timestamp DESC)")
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TIMESTAMP NOT NULL,
-                    equity REAL NOT NULL,
-                    pnl REAL NOT NULL,
-                    trade_id INTEGER,
-                    trade_symbol TEXT,
-                    FOREIGN KEY (trade_id) REFERENCES trades(id)
-                )
-            """)
             
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_equity_timestamp ON equity_snapshots(timestamp)")
             
@@ -253,9 +244,9 @@ class TradeDatabase:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT INTO equity_snapshots (timestamp, equity, pnl, trade_id, trade_symbol)
+                INSERT INTO equity_snapshots (total_equity, available_margin, used_margin, pnl_24h, open_positions)
                 VALUES (?, ?, ?, ?, ?)
-            """, (datetime.now().isoformat(), equity, pnl, trade_id, trade_symbol))
+            """, (equity, equity, 0.0, pnl, 0))
     
     def get_all_trades(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
         """Get all trades, optionally limited."""
