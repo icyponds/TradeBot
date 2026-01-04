@@ -1214,6 +1214,32 @@ class StrategyManager:
                         signal["signal_strength"] = float(signal["signal_strength"]) * scale
                 except Exception:
                     pass
+            
+            # Safety Clamp: Ensure final position value meets exchange minimum ($10)
+            # This handles cases where exploration scaling reduced the size below requirements
+            # or if any other adjustment shrank it
+            try:
+                current_size = float(signal.get("size", 0))
+                current_value = current_size * current_price
+                MIN_ORDER_VALUE = 12.0
+                
+                if current_value > 0 and current_value < MIN_ORDER_VALUE:
+                    original_val = current_value
+                    signal["size"] = MIN_ORDER_VALUE / current_price
+                    
+                    # Update margin proportional to the size increase to maintain leverage
+                    if "margin_required" in signal:
+                        leverage = float(signal.get("leverage", 1.0))
+                        # Safety check for zero leverage
+                        if leverage <= 0: leverage = 1.0
+                        signal["margin_required"] = MIN_ORDER_VALUE / leverage
+                        
+                    self.logger.info(
+                        f"Safety clamp: Re-bumped trade for {symbol} from ${original_val:.2f} to ${MIN_ORDER_VALUE:.2f} "
+                        f"(after scaling)"
+                    )
+            except Exception as e:
+                self.logger.error(f"Error in safety clamp for {symbol}: {e}")
 
             # Apply strategy weight to the signal strength for position sizing
             if 'signal_strength' in signal:
