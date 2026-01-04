@@ -215,7 +215,7 @@ def load_config() -> Dict[str, Any]:
         
         # Strategy Configuration
         "strategies": {
-            "enabled": os.getenv("ENABLED_STRATEGIES", "stat_arb,funding_rate_arbitrage,ou_mean_reversion,momentum_factor").split(","),
+            "enabled": os.getenv("ENABLED_STRATEGIES", "stat_arb,funding_rate_arbitrage,ou_mean_reversion").split(","),
             # Dynamic Timeframe Architecture: Define specific strategy instances
             # If 'instances' is defined, it overrides 'enabled' list for instantiation
             "instances": [
@@ -238,10 +238,6 @@ def load_config() -> Dict[str, Any]:
                 {"type": "ou_mean_reversion", "name": "ou_mean_reversion_15m", "timeframe": "15m"},
                 {"type": "ou_mean_reversion", "name": "ou_mean_reversion_1h",  "timeframe": "1h"},
                 
-                # Momentum (4h vs 1d)
-                {"type": "momentum_factor", "name": "momentum_4h", "timeframe": "4h"},
-                {"type": "momentum_factor", "name": "momentum_1d", "timeframe": "1d"},
-
                 # Funding Rate Arb (1h) - strictly optimal at 1h (8h funding / 8)
                 {"type": "funding_rate_arbitrage", "name": "funding_arb_1h", "timeframe": "1h"},
                 
@@ -305,19 +301,7 @@ def load_config() -> Dict[str, Any]:
                 "cache_ttl_hours": int(os.getenv("OU_CACHE_TTL_HOURS", "4")),
             },
             
-            # Cross-Sectional Momentum Factor Strategy
-            "momentum_factor": {
-                "lookback_days": int(os.getenv("MOMENTUM_LOOKBACK_DAYS", "7")),
-                "top_n": int(os.getenv("MOMENTUM_TOP_N", "3")),
-                "bottom_n": int(os.getenv("MOMENTUM_BOTTOM_N", "3")),
-                "rebalance_hours": int(os.getenv("MOMENTUM_REBALANCE_HOURS", "168")),  # Weekly
-                "min_assets": int(os.getenv("MOMENTUM_MIN_ASSETS", "10")),
-                "min_data_points": int(os.getenv("MOMENTUM_MIN_DATA_POINTS", "24")),
-                "min_volume_filter": float(os.getenv("MOMENTUM_MIN_VOLUME", "100000")),
-                "exclude_extreme_returns": os.getenv("MOMENTUM_EXCLUDE_EXTREME", "true").lower() == "true",
-                "extreme_return_threshold": float(os.getenv("MOMENTUM_EXTREME_THRESHOLD", "0.5")),
-                "cache_ttl_hours": int(os.getenv("MOMENTUM_CACHE_TTL_HOURS", "1")),
-            },
+
             
             # Volatility Breakout Strategy
             "volatility_breakout": {

@@ -6,7 +6,7 @@ from .strategy_selector import StrategySelector
 from .statistical_arbitrage_strategy import StatisticalArbitrageStrategy
 from .funding_rate_arbitrage_strategy import FundingRateArbitrageStrategy
 from .ou_mean_reversion_strategy import OUMeanReversionStrategy
-from .momentum_factor_strategy import MomentumFactorStrategy
+
 
 __all__ = [
     'BaseStrategy',
@@ -15,5 +15,5 @@ __all__ = [
     'StatisticalArbitrageStrategy',
     'FundingRateArbitrageStrategy',
     'OUMeanReversionStrategy',
-    'MomentumFactorStrategy',
+
 ]

@@ -31,7 +31,6 @@ STRATEGY_CLASSES = {
     'stat_arb': ('statistical_arbitrage_strategy', 'StatisticalArbitrageStrategy'),
     'funding_rate_arbitrage': ('funding_rate_arbitrage_strategy', 'FundingRateArbitrageStrategy'),
     'ou_mean_reversion': ('ou_mean_reversion_strategy', 'OUMeanReversionStrategy'),
-    'momentum_factor': ('momentum_factor_strategy', 'MomentumFactorStrategy'),
     'volatility_breakout': ('volatility_breakout_strategy', 'VolatilityBreakoutStrategy'),
     'adaptive_grid': ('adaptive_grid_strategy', 'AdaptiveGridStrategy'),
     'sentiment_ml': ('sentiment_ml_strategy', 'SentimentMLStrategy'),
@@ -396,7 +395,7 @@ class StrategyManager:
                     strategies[instance_name] = strategy_class(
                         self.config, self.market_api, self.correlation_manager, timeframe=timeframe
                     )
-                elif strategy_type in ('funding_rate_arbitrage', 'momentum_factor'):
+                elif strategy_type == 'funding_rate_arbitrage':
                     strategies[instance_name] = strategy_class(
                         self.config, self.market_api, timeframe=timeframe
                     )
@@ -715,9 +714,6 @@ class StrategyManager:
                 self.logger.debug(f"Running position monitoring check ({len(self.positions)} positions)")
                 self._monitor_and_close_positions(
                     emergency_portfolio_loss_pct, 
-                    self.total_positions_closed, 
-                    self.emergency_stops_triggered, 
-                    self.last_emergency_check,
                     timestamp=current_datetime
                 )
                 self.last_position_monitoring = current_time
@@ -757,8 +753,7 @@ class StrategyManager:
                     break
                 self._analyze_symbol(symbol, timestamp=current_datetime)
             
-            # Run cross-sectional strategies (portfolio-level)
-            self._run_portfolio_strategies(trading_pairs, timestamp=current_datetime)
+
             
             # Update position prices and display PnL
             self.update_position_prices()
@@ -1202,71 +1197,7 @@ class StrategyManager:
         else:
             self.logger.info(f"Skipping {strategy_name} signal for {symbol} - conditions not met")
     
-    def _run_portfolio_strategies(self, trading_pairs: List[str], timestamp: datetime = None):
-        """Run portfolio-level strategies."""
-        """
-        Run cross-sectional/portfolio-level strategies.
-        
-        These strategies analyze ALL symbols at once rather than per-symbol.
-        """
-        try:
-            # Iterate through all strategies to find Momentum strategies
-            for strategy_name, strategy in self.strategies.items():
-                if strategy.__class__.__name__ == 'MomentumFactorStrategy':
-                    momentum_strategy = strategy
-                    
-                    if not self.strategy_selector.is_strategy_enabled(strategy_name):
-                        continue
-                    
-                    # Generate portfolio-level signals
-                    signals = momentum_strategy.generate_portfolio_signals(trading_pairs)
-                    
-                    if signals:
-                        self.logger.info(f"Momentum strategy ({strategy_name}) generated {len(signals)} rebalance signals")
-                        
-                        for signal in signals:
-                            symbol = signal.get('symbol')
-                            action = signal.get('signal')  # 'buy' or 'sell'
-                            reason = signal.get('reason', '')
-                            
-                            self.logger.info(f"Momentum signal: {action.upper()} {symbol} - {reason}")
-                            
-                            # Execute the signal
-                            # Get current price
-                            market_data = self.market_api.get_market_data(symbol)
-                            if not market_data:
-                                continue
-                            
-                            current_price = market_data['current_price']
-                            
-                            # Get OHLCV for position sizing calculations
-                            # Fetch all timeframes
-                            ohlcv_dict = {}
-                            target_timeframes = ['15m', '1h', '4h', '1d']
-                            for tf in target_timeframes:
-                                 df = self.market_api.get_ohlcv(symbol, tf, self.ohlcv_limit)
-                                 if df is not None:
-                                     ohlcv_dict[tf] = df
-                            
-                            if not ohlcv_dict:
-                                self.logger.debug(f"Insufficient OHLCV data for {symbol} (momentum sizing)")
-                                continue
-                            
-                            # Check if we should execute
-                            should_execute = self._should_execute_signal(
-                                symbol, signal, current_price, ohlcv_dict, strategy_name
-                            )
-                            
-                            if should_execute:
-                                # Apply regime-aware strategy weight to signal strength (if present) for sizing.
-                                # Momentum signals may not include signal_strength; sizing will fallback to internal strength calc.
-                                eff_w = self._get_effective_strategy_weight(strategy_name)
-                                if 'signal_strength' in signal:
-                                    signal['signal_strength'] *= eff_w
-                                self._execute_trade(symbol, signal, current_price, strategy_name, ohlcv_dict, timestamp=timestamp)
-                        
-        except Exception as e:
-            self.logger.error(f"Error running portfolio strategies: {e}")
+
     
     def _execute_strategy(self, symbol: str, strategy_name: str, strategy, ohlcv: Dict[str, pd.DataFrame], current_price: float):
         """Execute a single strategy."""
@@ -1297,11 +1228,6 @@ class StrategyManager:
             elif strategy_class == 'OUMeanReversionStrategy':
                 # OU Mean Reversion needs symbol context for parameter caching
                 signal = strategy.generate_signal_for_symbol(symbol, ohlcv)
-            elif strategy_class == 'MomentumFactorStrategy':
-                # Momentum is a cross-sectional strategy that ranks all symbols
-                # It can't generate per-symbol signals - needs portfolio-level rebalancing
-                # TODO: Implement periodic momentum rebalancing via generate_portfolio_signals
-                return
             else:
                 # Get preferred timeframe data
                 tf = getattr(strategy, 'timeframe', '1h')
@@ -2190,11 +2116,7 @@ class StrategyManager:
         except Exception as e:
             self.logger.error(f"Error cleaning up open orders: {e}") 
 
-    def _monitor_and_close_positions(self, emergency_portfolio_loss_pct: float, 
-                                   total_positions_closed: int, 
-                                   emergency_stops_triggered: int, 
-                                   last_emergency_check: float,
-                                   timestamp: datetime = None):
+    def _monitor_and_close_positions(self, emergency_portfolio_loss_pct: float, timestamp: datetime = None):
         """Monitor positions and close them if they meet closure criteria."""
         try:
             current_time = time.time()
@@ -2215,16 +2137,17 @@ class StrategyManager:
             # Close positions
             for symbol, reason in positions_to_close:
                 if self.close_position(symbol, reason, timestamp=timestamp):
-                    total_closed += 1
+                    self.total_positions_closed += 1
             
             # Emergency stop check (every 30 seconds)
-            if current_time - last_emergency_check >= 30:
-                if self._check_emergency_stop(emergency_threshold):
-                    emergency_stops += 1
+            if current_time - self.last_emergency_check >= 30:
+                # Calculate current portfolio loss percentage
+                if self._check_emergency_stop(emergency_portfolio_loss_pct):
+                    self.emergency_stops_triggered += 1
                     self.logger.error("🚨 EMERGENCY STOP TRIGGERED - Closing all positions!")
                     self.close_all_positions("emergency_stop")
                     return
-                last_emergency_check = current_time
+                self.last_emergency_check = current_time
             
             # Log monitoring summary if positions were closed
             if positions_to_close:
