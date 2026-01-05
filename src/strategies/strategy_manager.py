@@ -1574,7 +1574,17 @@ class StrategyManager:
                 return False
         
         # Calculate signal strength and volatility
-        signal_strength = self.strategies[strategy_name].calculate_signal_strength(ohlcv)
+        base_strength = self.strategies[strategy_name].calculate_signal_strength(ohlcv)
+        
+        # Apply history-based modifier from strategy selector
+        # (Boosts winning strategies, penalizes losing ones)
+        if hasattr(self.strategy_selector, 'get_signal_strength_modifier'):
+            strength_modifier = self.strategy_selector.get_signal_strength_modifier(strategy_name)
+            signal_strength = base_strength * strength_modifier
+            if strength_modifier != 1.0:
+                self.logger.info(f"applied signal strength modifier for {strategy_name}: {strength_modifier:.2f} (base: {base_strength:.2f} -> {signal_strength:.2f})")
+        else:
+            signal_strength = base_strength
         
         # Volatility calc - extract preferred dataframe or use one
         # Use strategy's timeframe if possible, or fallback

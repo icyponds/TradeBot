@@ -1,6 +1,8 @@
 import pytest
 from unittest.mock import MagicMock, patch
-from src.strategies.strategy_selector import StrategySelector
+from src.strategies.strategy_selector import StrategySelector, StrategyRanking, MarketRegime, StrategyPerformanceWindow
+from collections import deque
+from datetime import datetime
 
 class TestStrategySelector:
 
@@ -23,6 +25,49 @@ class TestStrategySelector:
         # Store mock tracker on instance for tests to access
         selector.performance_tracker = mock_tracker 
         return selector
+
+    def test_get_signal_strength_modifier_no_history(self, strategy_selector):
+        """Test modifier returns 1.0 when no history exists."""
+        modifier = strategy_selector.get_signal_strength_modifier("test_strategy")
+        assert modifier == 1.0
+
+    def test_get_signal_strength_modifier_insufficient_data(self, strategy_selector):
+        """Test modifier returns 1.0 when < 3 trades exist."""
+        strategy_selector.performance_windows["test_strategy"] = StrategyPerformanceWindow()
+        # Add 2 trades (1 win, 1 loss)
+        strategy_selector.performance_windows["test_strategy"].add_return(0.01, datetime.now(), MarketRegime.UNKNOWN)
+        strategy_selector.performance_windows["test_strategy"].add_return(-0.01, datetime.now(), MarketRegime.UNKNOWN)
+        
+        modifier = strategy_selector.get_signal_strength_modifier("test_strategy")
+        assert modifier == 1.0
+
+    def test_get_signal_strength_modifier_low_win_rate(self, strategy_selector):
+        """Test modifier penalizes low win rate (< 30%)."""
+        strategy_selector.performance_windows["test_strategy"] = StrategyPerformanceWindow()
+        
+        # Add 10 trades: 2 wins, 8 losses (20% win rate)
+        # Expected: 0.5 + (0.2 * 1.0) = 0.7
+        for _ in range(2):
+            strategy_selector.performance_windows["test_strategy"].add_return(0.01, datetime.now(), MarketRegime.UNKNOWN)
+        for _ in range(8):
+            strategy_selector.performance_windows["test_strategy"].add_return(-0.01, datetime.now(), MarketRegime.UNKNOWN)
+            
+        modifier = strategy_selector.get_signal_strength_modifier("test_strategy")
+        assert modifier == 0.7
+
+    def test_get_signal_strength_modifier_high_win_rate(self, strategy_selector):
+        """Test modifier boosts high win rate (> 70%)."""
+        strategy_selector.performance_windows["test_strategy"] = StrategyPerformanceWindow()
+        
+        # Add 10 trades: 8 wins, 2 losses (80% win rate)
+        # Expected: 0.5 + (0.8 * 1.0) = 1.3
+        for _ in range(8):
+            strategy_selector.performance_windows["test_strategy"].add_return(0.01, datetime.now(), MarketRegime.UNKNOWN)
+        for _ in range(2):
+            strategy_selector.performance_windows["test_strategy"].add_return(-0.01, datetime.now(), MarketRegime.UNKNOWN)
+            
+        modifier = strategy_selector.get_signal_strength_modifier("test_strategy")
+        assert modifier == 1.3
 
     def test_initialization(self, strategy_selector):
         """Test initialization matches config."""

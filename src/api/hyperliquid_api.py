@@ -1719,7 +1719,7 @@ class HyperliquidAPI:
             if result.get('status') == 'ok':
                 self.logger.info(f"Successfully transferred ${amount:.2f} to perp account")
                 # Invalidate cache
-                self.cache.delete("account_balance")
+                self.cache.invalidate("account_balance")
                 return True
             else:
                 self.logger.error(f"Transfer failed: {result}")
@@ -1752,7 +1752,7 @@ class HyperliquidAPI:
             if result.get('status') == 'ok':
                 self.logger.info(f"Successfully transferred ${amount:.2f} to spot account")
                 # Invalidate cache
-                self.cache.delete("account_balance")
+                self.cache.invalidate("account_balance")
                 return True
             else:
                 self.logger.error(f"Transfer failed: {result}")
@@ -1783,7 +1783,7 @@ class HyperliquidAPI:
             
             if result.get('status') == 'ok':
                 self.logger.info(f"Successfully updated margin for {symbol}")
-                self.cache.delete("positions")
+                self.cache.invalidate("positions")
                 return True
             else:
                 self.logger.error(f"Margin update failed: {result}")

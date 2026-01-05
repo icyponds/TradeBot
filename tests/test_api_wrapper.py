@@ -104,3 +104,63 @@ class TestHyperliquidAPI:
              
              api_client.health_monitor.status = api_client.health_monitor.status.UNHEALTHY
              assert api_client.health_monitor.is_healthy() is False
+
+    def test_ensure_perp_funds_sufficient_balance(self, api_client):
+        """Test ensure_perp_funds returns True when perp balance is sufficient."""
+        api_client.get_perp_balance = MagicMock(return_value={'withdrawable': 100.0})
+        
+        result = api_client.ensure_perp_funds(50.0)
+        
+        assert result is True
+        # Should not attempt transfer
+        api_client.get_perp_balance.assert_called_once()
+
+    def test_ensure_perp_funds_needs_transfer(self, api_client):
+        """Test ensure_perp_funds transfers from spot when perp is insufficient."""
+        api_client.get_perp_balance = MagicMock(return_value={'withdrawable': 30.0})
+        api_client.get_spot_balance = MagicMock(return_value=50.0)
+        api_client.transfer_usd_to_perp = MagicMock(return_value=True)
+        
+        result = api_client.ensure_perp_funds(50.0)
+        
+        assert result is True
+        # Should transfer the shortfall (50 - 30 = 20)
+        api_client.transfer_usd_to_perp.assert_called_once_with(20.0)
+
+    def test_ensure_perp_funds_insufficient_combined(self, api_client):
+        """Test ensure_perp_funds returns False when combined funds are insufficient."""
+        api_client.get_perp_balance = MagicMock(return_value={'withdrawable': 10.0})
+        api_client.get_spot_balance = MagicMock(return_value=5.0)
+        
+        result = api_client.ensure_perp_funds(50.0)
+        
+        assert result is False
+
+    def test_ensure_spot_funds_sufficient_balance(self, api_client):
+        """Test ensure_spot_funds returns True when spot balance is sufficient."""
+        api_client.get_spot_balance = MagicMock(return_value=100.0)
+        
+        result = api_client.ensure_spot_funds(50.0)
+        
+        assert result is True
+
+    def test_ensure_spot_funds_needs_transfer(self, api_client):
+        """Test ensure_spot_funds transfers from perp when spot is insufficient."""
+        api_client.get_spot_balance = MagicMock(return_value=20.0)
+        api_client.get_perp_balance = MagicMock(return_value={'withdrawable': 50.0})
+        api_client.transfer_usd_to_spot = MagicMock(return_value=True)
+        
+        result = api_client.ensure_spot_funds(50.0)
+        
+        assert result is True
+        # Should transfer the shortfall (50 - 20 = 30)
+        api_client.transfer_usd_to_spot.assert_called_once_with(30.0)
+
+    def test_ensure_spot_funds_insufficient_combined(self, api_client):
+        """Test ensure_spot_funds returns False when combined funds are insufficient."""
+        api_client.get_spot_balance = MagicMock(return_value=5.0)
+        api_client.get_perp_balance = MagicMock(return_value={'withdrawable': 10.0})
+        
+        result = api_client.ensure_spot_funds(50.0)
+        
+        assert result is False

@@ -1119,6 +1119,47 @@ class StrategySelector:
         if ranking and ranking.is_enabled:
             return ranking.weight
         return 0.0
+
+    def get_signal_strength_modifier(self, strategy_name: str) -> float:
+        """
+        Get performance-based modifier for signal strength.
+        
+        Calculates a multiplier based on recent win rate (last 10 trades).
+        - High win rate (>70%) -> Boost up to 1.5x
+        - Low win rate (<30%) -> Penalty down to 0.5x
+        - Neutral/No history -> 1.0x
+        
+        Args:
+            strategy_name: Name of the strategy
+            
+        Returns:
+            Modifier value between 0.5 and 1.5
+        """
+        if strategy_name not in self.performance_windows:
+            return 1.0
+            
+        window = self.performance_windows[strategy_name]
+        recent_returns = list(window.returns)[-10:]  # Last 10 trades
+        
+        # Need at least 3 trades to form an opinion
+        if len(recent_returns) < 3:
+            return 1.0
+            
+        # Calculate recent win rate
+        wins = sum(1 for r in recent_returns if r > 0)
+        win_rate = wins / len(recent_returns)
+        
+        # Map 30%-70% win rate to 0.5-1.5 range
+        # Formula: 0.5 + (win_rate * 1.0)
+        # 0.3 win rate -> 0.8 (penalty)
+        # 0.5 win rate -> 1.0 (neutral)
+        # 0.7 win rate -> 1.2 (boost)
+        # 0.8 win rate -> 1.3 (boost)
+        
+        modifier = 0.5 + (win_rate * 1.0)
+        
+        # Clamp between 0.5 and 1.5
+        return max(0.5, min(1.5, modifier))
     
     def is_strategy_enabled(self, strategy_name: str) -> bool:
         """Check if a strategy is currently enabled."""
