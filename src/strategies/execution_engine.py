@@ -29,7 +29,8 @@ class ExecutionEngine:
         leverage_manager: LeverageManager,
         portfolio_manager: PortfolioManager,
         performance_tracker: PerformanceTracker,
-        pair_selector: DynamicPairSelector
+        pair_selector: DynamicPairSelector,
+        strategy_selector: Any = None  # Added for live performance feedback loop
     ):
         self.config = config
         self.market_api = market_api
@@ -37,6 +38,7 @@ class ExecutionEngine:
         self.portfolio_manager = portfolio_manager
         self.performance_tracker = performance_tracker
         self.pair_selector = pair_selector
+        self.strategy_selector = strategy_selector
         
         self.logger = logging.getLogger(__name__)
         
@@ -223,6 +225,7 @@ class ExecutionEngine:
                     highest_price=fill_price if position_side == 'long' else None,
                     lowest_price=fill_price if position_side == 'short' else None,
                     trailing_stop_active=False,
+                    leverage=leverage,  # Store leverage in position
                 )
                 
                 # Record in leverage manager
@@ -275,6 +278,17 @@ class ExecutionEngine:
                 if position.side == 'short':
                     pnl = -pnl
                 
+                # Retrieve Fee - Try from response first, then fetch from API if missing (common on mainnet)
+                fee = order_result.get('total_fee', 0.0) if order_result else 0.0
+                if fee == 0.0 and order_result.get('order_id'):
+                     # The SDK parsed response might miss fee, so we fetch it explicitly
+                     # Use the numeric OID from the fill
+                     oid = order_result.get('fills', [{}])[0].get('oid') if order_result.get('fills') else None
+                     if oid:
+                        # Slight delay to ensure indexing
+                        time.sleep(0.5) 
+                        fee = self.market_api.get_execution_fee(oid)
+
                 # Record trade
                 self.performance_tracker.record_trade_from_position(
                     symbol=symbol,
@@ -286,7 +300,11 @@ class ExecutionEngine:
                     entry_time=position.entry_time,
                     exit_time=current_time,
                     capital_at_risk=position.capital_at_risk,
-                    exit_reason=reason
+                    exit_reason=reason,
+                    stop_loss=position.stop_loss,
+                    take_profit=position.take_profit,
+                    leverage=position.leverage,
+                    fees=fee
                 )
                 
                 # Close in leverage manager
@@ -302,6 +320,19 @@ class ExecutionEngine:
                 
                 self.pair_selector.update_pair_performance(symbol, pnl)
                 
+                # LIVE FEEDBACK LOOP: Report result to StrategySelector immediately
+                if self.strategy_selector:
+                    # Calculate percentage return relative to capital at risk (margin)
+                    # If capital_at_risk is 0 or missing, fallback to 0
+                    capital = position.capital_at_risk or 0.0
+                    pct_return = (pnl / capital) if capital > 0 else 0.0
+                    
+                    self.strategy_selector.record_trade_result(
+                        position.strategy, 
+                        pct_return,
+                        current_time
+                    )
+
                 self.logger.info(f"✅ Closed position for {symbol}: P&L ${pnl:.2f} ({reason})")
                 return True
                 
@@ -542,11 +573,13 @@ class ExecutionEngine:
                     exit_results.append({
                         'leg': leg,
                         'exit_price': result['avg_fill_price'],
-                        'filled_size': result['filled_size']
+                        'filled_size': result['filled_size'],
+                        'fee': result.get('total_fee', 0.0)
                     })
             
-            # Calculate P&L
+            # Calculate P&L and total fees
             total_pnl = 0.0
+            total_fees = 0.0
             for result in exit_results:
                 leg = result['leg']
                 exit_price = result['exit_price']
@@ -555,6 +588,7 @@ class ExecutionEngine:
                     price_diff = -price_diff
                 leg_pnl = price_diff * result['filled_size']
                 total_pnl += leg_pnl
+                total_fees += result.get('fee', 0.0)
 
             exit_time = current_time
 
@@ -579,7 +613,18 @@ class ExecutionEngine:
                 capital_at_risk=position.capital_at_risk or 0,
                 exit_reason=signal.get('reason', 'signal'),
                 pnl_override=pnl_to_record,
+                stop_loss=position.legs[0].to_dict().get('metadata', {}).get('stop_loss') if position.legs and position.legs[0].market_type == 'perp' else None,
+                fees=total_fees
             )
+
+            # LIVE FEEDBACK LOOP: Report result to StrategySelector immediately
+            # This updates the strategy's recent performance window for dynamic signal sizing
+            if self.strategy_selector:
+                self.strategy_selector.record_trade_result(
+                    strategy_name, 
+                    pnl_to_record / position.initial_capital if position.initial_capital > 0 else 0,
+                    exit_time
+                )
 
             # Close position in leverage manager
             self.leverage_manager.close_position(position.primary_symbol, 0)

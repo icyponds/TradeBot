@@ -176,6 +176,7 @@ class Position:
     take_profit: Optional[float] = None
     current_price: Optional[float] = None
     capital_at_risk: Optional[float] = None  # Actual capital at risk
+    leverage: Optional[float] = None  # Leverage used for the position
     
     # Trailing stop fields
     trailing_stop_enabled: bool = False
@@ -246,6 +247,7 @@ class Position:
             'unrealized_pnl': self.unrealized_pnl,
             'unrealized_pnl_percentage': self.unrealized_pnl_percentage,
             'capital_at_risk_pnl_percentage': self.capital_at_risk_pnl_percentage,
+            'leverage': self.leverage,
             'trailing_stop_enabled': self.trailing_stop_enabled,
             'trailing_stop_pct': self.trailing_stop_pct,
             'trailing_stop_activation_pct': self.trailing_stop_activation_pct,
@@ -268,6 +270,7 @@ class Position:
             take_profit=data.get('take_profit'),
             current_price=data.get('current_price'),
             capital_at_risk=data.get('capital_at_risk'),
+            leverage=data.get('leverage'),
             trailing_stop_enabled=data.get('trailing_stop_enabled', False),
             trailing_stop_pct=data.get('trailing_stop_pct', 0.0),
             trailing_stop_activation_pct=data.get('trailing_stop_activation_pct', 0.0),

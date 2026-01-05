@@ -109,7 +109,8 @@ class StrategyManager:
             self.leverage_manager,
             self.portfolio_manager,
             self.performance_tracker,
-            self.pair_selector
+            self.pair_selector,
+            self.strategy_selector  # Pass strategy selector for live feedback
         )
         
         self.is_running = False

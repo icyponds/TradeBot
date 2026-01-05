@@ -257,153 +257,205 @@ class StrategySelector:
             self.logger.debug("No strategies registered for default rankings")
             return
         
-        # Try to bootstrap from backtest results first
-        if self._load_rankings_from_backtest():
-            return
+        # Try to bootstrap from history (Live + Backtest)
+        self._initialize_strategies_from_history()
         
-        # Fall back to default equal-weight rankings
-        self.logger.info(f"Initializing default rankings for {len(self._registered_strategies)} strategies")
+        # Log initialization status
+        self.logger.info(f"Initialized {len(self.strategy_rankings)} strategies")
+        for name, ranking in self.strategy_rankings.items():
+            source = "backtest" if ranking.metrics.get('from_backtest') else "live" if ranking.metrics.get('total_trades', 0) > 0 else "default"
+            self.logger.info(f"  - {name}: score={ranking.score:.2f}, source={source}")
+
+    def _initialize_strategies_from_history(self, live_db_path: str = 'data/trades.db'):
+        """
+        Initialize strategy rankings with Blended Hybrid History.
         
-        for rank, strategy_name in enumerate(self._registered_strategies, 1):
+        Logic:
+        1. Fetch recent Live trades.
+        2. If Live trades < 20, fill the gap with Backtest trades.
+        3. Calculate metrics from this blended dataset.
+        4. Populate performance windows with blended history for signal strength.
+        
+        Args:
+            live_db_path: Path to live trades database
+        """
+        # 1. Fetch data from both sources (returned as dicts of list of trades)
+        live_history = self._fetch_db_data(live_db_path, "live")
+        bt_history = self._fetch_db_data(self.backtest_results_path, "backtest")
+        
+        scored_strategies = []
+        target_sample_size = 20
+        
+        for strategy_name in self._registered_strategies:
+            
+            # Get available trades
+            live = live_history.get(strategy_name, [])
+            backtest = bt_history.get(strategy_name, [])
+            
+            # Blend
+            # Note: _fetch_db_data returns DESC sorted (newest first)
+            # We want to keep all live trades, then fill from backtest
+            blended_trades = list(live)
+            
+            gap = target_sample_size - len(blended_trades)
+            if gap > 0 and backtest:
+                # Take the 'gap' most recent backtest trades
+                # (Assuming backtest list is also sorted DESC)
+                blended_trades.extend(backtest[:gap])
+            
+            # Mark if using backtest data
+            has_backtest_data = len(blended_trades) > len(live)
+            
+            # Calculate metrics
+            metrics = self._calculate_metrics_from_trades(blended_trades)
+            if has_backtest_data:
+                metrics['from_backtest'] = True
+            
+            # Calculate Score
+            score = self._calculate_score(metrics, strategy_name) if metrics['total_trades'] > 0 else 0.5
+            
+            scored_strategies.append((strategy_name, score, metrics, blended_trades))
+        
+        # Sort by score
+        scored_strategies.sort(key=lambda x: x[1], reverse=True)
+        
+        self.strategy_rankings = {}
+        
+        # Create Rankings and Populate Windows
+        for rank, (strategy_name, score, metrics, trades) in enumerate(scored_strategies, 1):
+            
+            # Populate Performance Window (Important for signal strength!)
+            # Reset first
+            if strategy_name not in self.performance_windows:
+                 self.performance_windows[strategy_name] = StrategyPerformanceWindow()
+            
+            window = self.performance_windows[strategy_name]
+            window.returns.clear()
+            window.timestamps.clear()
+            
+            # Trades are DESC (newest first), insert in reverse (oldest first) for window
+            for trade in reversed(trades):
+                self.record_trade_result(strategy_name, trade['pnl_pct'], trade['exit_time'])
+            
+            # Determine enablement
+            is_enabled = True
+            if metrics.get('total_trades', 0) >= self.min_trades_for_ranking:
+                 if metrics.get('expectancy', 0) < self.min_expectancy:
+                     is_enabled = False
+            
+            # Calculate Weight
+            weight = 1.0
+            if len(self._registered_strategies) > 1:
+                weight = 1.0 - (0.5 * (rank - 1) / (len(self._registered_strategies) - 1))
+            
             self.strategy_rankings[strategy_name] = StrategyRanking(
                 strategy_name=strategy_name,
                 rank=rank,
-                score=0.5,  # Neutral score
-                is_enabled=True,  # All strategies start enabled
-                weight=1.0,  # Full weight until we learn performance
-                kelly_fraction=0.0,
-                regime_affinity={},  # Empty dict until we have data
-                metrics={},  # Empty metrics until we have data
+                score=score,
+                is_enabled=is_enabled,
+                weight=weight,
+                metrics=metrics,
+                last_updated=datetime.now()
             )
-            self.logger.info(f"  - {strategy_name}: enabled with default ranking")
-    
-    def _load_rankings_from_backtest(self) -> bool:
+
+    def _fetch_db_data(self, db_path: str, source_name: str) -> Dict[str, List[Dict]]:
         """
-        Load initial strategy rankings from database.
-        
-        Priority order:
-        1. Live trades database (trades.db) - if has >=3 trades per strategy
-        2. Backtest results database (backtest_results.db) - as fallback
-        
-        This ensures rankings persist across restarts using actual live trade data.
+        Fetch recent trade history from a database for blending.
         
         Returns:
-            True if rankings were successfully loaded, False otherwise.
+            Dict[strategy_name, List[trade_dict]]
+            where trade_dict contains: {'pnl': float, 'pnl_pct': float, 'exit_time': datetime}
         """
         import sqlite3
         import os
         
-        # Priority 1: Try live trades database first
-        live_db_path = 'data/trades.db'
-        if os.path.exists(live_db_path):
-            if self._load_rankings_from_db(live_db_path, source_name="live trades"):
-                return True
+        history = {}
         
-        # Priority 2: Fall back to backtest results
-        if os.path.exists(self.backtest_results_path):
-            return self._load_rankings_from_db(self.backtest_results_path, source_name="backtest")
-        
-        self.logger.debug("No trade databases found, using default rankings")
-        return False
-    
-    def _load_rankings_from_db(self, db_path: str, source_name: str = "database") -> bool:
-        """
-        Load strategy rankings from a trades database.
-        
-        Args:
-            db_path: Path to SQLite database with trades table
-            source_name: Human-readable name for logging
+        if not os.path.exists(db_path):
+            return history
             
-        Returns:
-            True if rankings were successfully loaded, False otherwise.
-        """
-        import sqlite3
-        
         try:
             conn = sqlite3.connect(db_path)
             cursor = conn.cursor()
             
-            # Query strategy metrics from trades table
-            cursor.execute("""
-                SELECT 
-                    strategy,
-                    COUNT(*) as trades,
-                    SUM(CASE WHEN pnl > 0 THEN 1.0 ELSE 0.0 END) / NULLIF(COUNT(*), 0) * 100 as win_rate,
-                    SUM(pnl) as total_pnl,
-                    SUM(CASE WHEN pnl > 0 THEN pnl ELSE 0 END) as gross_profit,
-                    SUM(CASE WHEN pnl < 0 THEN ABS(pnl) ELSE 0 END) as gross_loss
-                FROM trades
-                GROUP BY strategy
-                HAVING trades >= 3
-            """)
-            
-            rows = cursor.fetchall()
+            # Fetch recent trades (Limit 50 to have enough buffer for blending)
+            # We need raw PnL for metrics calculation (PF, Expectancy)
+            try:
+                # Check column existence first
+                cursor.execute("PRAGMA table_info(trades)")
+                columns = [c[1] for c in cursor.fetchall()]
+                
+                required_cols = {'strategy', 'pnl', 'pnl_percentage', 'exit_time'}
+                if required_cols.issubset(set(columns)):
+                     cursor.execute("""
+                        SELECT strategy, pnl, pnl_percentage, exit_time
+                        FROM (
+                            SELECT 
+                                strategy, pnl, pnl_percentage, exit_time,
+                                ROW_NUMBER() OVER (PARTITION BY strategy ORDER BY exit_time DESC) as rn
+                            FROM trades
+                        )
+                        WHERE rn <= 50
+                        ORDER BY exit_time DESC
+                    """)
+                     
+                     for row in cursor.fetchall():
+                         strat, pnl, pnl_pct, exit_time_str = row
+                         
+                         try:
+                             ts = datetime.fromisoformat(exit_time_str)
+                         except:
+                             ts = datetime.now()
+                             
+                         trade = {
+                             'pnl': pnl,
+                             'pnl_pct': pnl_pct,
+                             'exit_time': ts,
+                             'source': source_name
+                         }
+                         
+                         if strat not in history:
+                             history[strat] = []
+                         history[strat].append(trade)
+            except Exception as e:
+                self.logger.warning(f"Error querying history from {db_path}: {e}")
+                
             conn.close()
             
-            if not rows:
-                self.logger.debug(f"No sufficient data in {source_name} (need >= 3 trades per strategy)")
-                return False
-            
-            # Build strategy metrics
-            db_metrics = {}
-            for row in rows:
-                strategy, trades, win_rate, total_pnl, gross_profit, gross_loss = row
-                profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else 2.0 if gross_profit > 0 else 1.0
-                profit_factor = min(profit_factor, 5.0)  # Cap at reasonable level
-                
-                db_metrics[strategy] = {
-                    'total_trades': trades,
-                    'win_rate': win_rate or 0,
-                    'total_pnl': total_pnl or 0,
-                    'profit_factor': profit_factor,
-                    'expectancy': (total_pnl / trades) if trades > 0 else 0,
-                    'from_backtest': source_name == "backtest",
-                }
-            
-            if not db_metrics:
-                return False
-            
-            self.logger.info(f"🚀 Loading rankings from {source_name} ({len(db_metrics)} strategies)")
-            
-            # Calculate scores and create rankings
-            scored_strategies = []
-            for strategy_name in self._registered_strategies:
-                if strategy_name in db_metrics:
-                    metrics = db_metrics[strategy_name]
-                    score = self._calculate_composite_score(metrics, strategy_name)
-                    scored_strategies.append((strategy_name, score, metrics))
-                else:
-                    # Strategy not in database - give neutral score
-                    scored_strategies.append((strategy_name, 0.5, {}))
-            
-            # Sort by score (descending)
-            scored_strategies.sort(key=lambda x: x[1], reverse=True)
-            
-            # Create rankings
-            for rank, (strategy_name, score, metrics) in enumerate(scored_strategies, 1):
-                weight = max(0.1, min(1.0, score))
-                
-                self.strategy_rankings[strategy_name] = StrategyRanking(
-                    strategy_name=strategy_name,
-                    rank=rank,
-                    score=score,
-                    is_enabled=True,
-                    weight=weight,
-                    kelly_fraction=0.0,
-                    regime_affinity={},
-                    metrics=metrics,
-                )
-                
-                pnl_str = f"${metrics.get('total_pnl', 0):.2f}" if metrics else "N/A"
-                wr_str = f"{metrics.get('win_rate', 0):.1f}%" if metrics else "N/A"
-                pf_str = f"{metrics.get('profit_factor', 0):.2f}" if metrics else "N/A"
-                self.logger.info(f"  - {strategy_name}: weight={weight:.2f}, PnL={pnl_str}, WR={wr_str}, PF={pf_str}")
-            
-            return True
+            if history:
+                self.logger.debug(f"Loaded {sum(len(v) for v in history.values())} trades from {source_name}")
             
         except Exception as e:
-            self.logger.warning(f"Failed to load rankings from {source_name}: {e}")
-            return False
+            self.logger.error(f"Failed to read {source_name} DB at {db_path}: {e}")
+            
+        return history
+
+    def _calculate_metrics_from_trades(self, trades: List[Dict]) -> Dict[str, float]:
+        """Calculate performance metrics from a list of trades."""
+        if not trades:
+            return {'total_trades': 0, 'win_rate': 0.0, 'profit_factor': 1.0, 'expectancy': 0.0}
+            
+        total_pnl = sum(t['pnl'] for t in trades)
+        wins = [t for t in trades if t['pnl'] > 0]
+        losses = [t for t in trades if t['pnl'] < 0]
+        
+        n = len(trades)
+        win_rate = (len(wins) / n * 100) if n > 0 else 0
+        
+        gross_profit = sum(t['pnl'] for t in wins)
+        gross_loss = abs(sum(t['pnl'] for t in losses))
+        
+        profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else 2.0 if gross_profit > 0 else 1.0
+        profit_factor = min(profit_factor, 5.0)
+        
+        return {
+            'total_trades': n,
+            'win_rate': win_rate,
+            'total_pnl': total_pnl,
+            'profit_factor': profit_factor,
+            'expectancy': (total_pnl / n) if n > 0 else 0,
+        }
+
 
     
     def register_strategies(self, strategy_names: List[str]):

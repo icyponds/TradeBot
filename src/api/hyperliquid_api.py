@@ -740,7 +740,6 @@ class HyperliquidAPI:
     
     # Asset index ranges
     NATIVE_PERP_MAX = 9999
-    SPOT_START = 10000
     HIP3_START = 110000
     
     def __init__(self, config: Dict[str, Any]):
@@ -2211,10 +2210,15 @@ class HyperliquidAPI:
                     if filled > 0:
                         total_filled += filled
                         weighted_price_sum += filled * avg_px
+                        
+                        # Extract fee - try standard keys
+                        fee = fill_result.get('fee', 0.0)
+                        
                         all_fills.append({
                             'attempt': attempt + 1,
                             'size': filled,
                             'price': avg_px,
+                            'fee': fee,
                             'slippage_bps': slippage_bps,
                         })
                         remaining_size = round(remaining_size - filled, sz_decimals)
@@ -2242,6 +2246,7 @@ class HyperliquidAPI:
                     'filled_size': total_filled,
                     'unfilled_size': remaining_size,
                     'avg_fill_price': avg_fill_price,
+                    'total_fee': sum(f.get('fee', 0.0) for f in all_fills),
                     'status': status,
                     'fills': all_fills,
                     'market_type': market_type,
@@ -2475,12 +2480,21 @@ class HyperliquidAPI:
             order_status = 'pending'
             filled_size = 0.0
             avg_fill_price = 0.0
+            fee = 0.0
             
             if 'filled' in status:
                 order_id = status['filled'].get('oid')
                 order_status = 'filled'
                 filled_size = float(status['filled'].get('totalSz', size))
                 avg_fill_price = float(status['filled'].get('avgPx', price or 0))
+                
+                # DEBUG: Log raw fill content
+                self.logger.info(f"DEBUG: Raw fill data: {status['filled']}")
+                
+                # Try to extract fee
+                fee = float(status['filled'].get('fee', 0.0))
+                if 'totalFee' in status['filled']:
+                    fee = float(status['filled']['totalFee'])
             elif 'resting' in status:
                 order_id = status['resting'].get('oid')
                 order_status = 'open'
@@ -2494,6 +2508,7 @@ class HyperliquidAPI:
                 'status': order_status,
                 'filled_size': filled_size,
                 'avg_fill_price': avg_fill_price,
+                'fee': fee,
                 'timestamp': datetime.now(),
                 'raw_response': response,
             }
@@ -2502,6 +2517,46 @@ class HyperliquidAPI:
             self.logger.error(f"Error parsing order response: {e}")
             return None
     
+    def get_execution_fee(self, order_id: int) -> float:
+        """
+        Get the actual fee paid for a specific order ID by checking user fills.
+        
+        Args:
+            order_id: The order ID (oid) to find fees for
+            
+        Returns:
+            float: Total fee paid for this order, or 0.0 if not found
+        """
+        try:
+            # Fetch recent user fills
+            # user_fills expects address. We use the configured wallet address.
+            fills = self.info.user_fills(self.wallet_address)
+            
+            total_fee = 0.0
+            found = False
+            
+            for fill in fills:
+                # Fill object structure from API doc search:
+                # {'oid': 123, 'fee': '0.05', 'feeToken': 'USDC', ...}
+                if fill.get('oid') == order_id:
+                    fee_str = fill.get('fee', '0.0')
+                    try:
+                        total_fee += float(fee_str)
+                        found = True
+                    except ValueError:
+                        pass
+            
+            if found:
+                self.logger.debug(f"Retrieved fee from API for order {order_id}: {total_fee}")
+                return total_fee
+            
+            self.logger.warning(f"Could not find fee info for order {order_id} in recent fills")
+            return 0.0
+            
+        except Exception as e:
+            self.logger.error(f"Error fetching execution fee: {e}")
+            return 0.0
+
     def get_order_status(self, order_id: int) -> Optional[Dict[str, Any]]:
         """
         Get current status of an order.
@@ -2912,6 +2967,27 @@ class HyperliquidAPI:
                                         'markPrice': float(ctx.get('markPx', 0)) if ctx.get('markPx') else 0,
                                         'funding': float(ctx.get('funding', 0)),
                                     })
+
+                                    # [HIP-3 FIX] Update SDK Exchange maps
+                                    # The SDK Exchange client may not have this asset in its map if
+                                    # meta_and_asset_ctxs() didn't return it. We manually inject it.
+                                    if self.exchange:
+                                        coin_name = asset.get('name', '')
+                                        if coin_name:
+                                            # Copy asset info (contains szDecimals, maxLeverage, etc.)
+                                            # Ensure we don't overwrite if existing (though native shouldn't overlap)
+                                            if coin_name not in self.exchange.name_to_coin:
+                                                self.exchange.name_to_coin[coin_name] = asset
+                                                self.logger.debug(f"[HIP-3] Added {coin_name} to Exchange.name_to_coin")
+                                            
+                                            # Update coin_to_asset if ID is present
+                                            # Note: Different DEXs can have assets with same indices but different IDs?
+                                            # We rely on 'universe' providing global IDs if they are present there.
+                                            # If not, we might be missing the ID required for signing.
+                                            # For now, we just map name -> ID if 'assetId' exists in the object.
+                                            if 'assetId' in asset and coin_name not in self.exchange.coin_to_asset:
+                                                self.exchange.coin_to_asset[coin_name] = asset['assetId']
+                                                self.logger.debug(f"[HIP-3] Added {coin_name} -> ID {asset['assetId']} to Exchange.coin_to_asset")
                                     
                         except Exception as e:
                             # Log warning but continue to next Dex

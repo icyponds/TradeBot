@@ -2,7 +2,9 @@ import pytest
 from unittest.mock import MagicMock, patch
 from src.strategies.strategy_selector import StrategySelector, StrategyRanking, MarketRegime, StrategyPerformanceWindow
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta
+import os
+from src.utils.trade_database import TradeDatabase
 
 class TestStrategySelector:
 
@@ -15,7 +17,9 @@ class TestStrategySelector:
             
         mock_config['strategies']['instances'] = [
             {"type": "stat_arb", "name": "stat_arb_1h", "timeframe": "1h"},
-            {"type": "momentum", "name": "momentum_1h", "timeframe": "1h"}
+            {"type": "momentum", "name": "momentum_1h", "timeframe": "1h"},
+            {"type": "high_vol", "name": "HighVolumeStrategy", "timeframe": "1h"},
+            {"type": "low_vol", "name": "LowVolumeStrategy", "timeframe": "1h"}
         ]
         
         # Mock performance tracker
@@ -94,44 +98,138 @@ class TestStrategySelector:
         assert ranking is not None
         assert ranking.score > 0
 
-    def test_load_rankings_from_db_no_database(self, strategy_selector):
-        """Test that loading rankings returns False when no database exists."""
-        strategy_selector.register_strategies(["stat_arb_1h", "momentum_1h"])
-        # Should not crash and should fall back to defaults
-        result = strategy_selector._load_rankings_from_db("/nonexistent/path.db", "test")
-        assert result is False
     
-    def test_load_rankings_priority_order(self, strategy_selector):
-        """Test that _load_rankings_from_backtest tries trades.db first."""
+    def test_fetch_db_data_no_database(self, strategy_selector):
+        """Test that fetching from non-existent DB returns empty structures."""
+        history = strategy_selector._fetch_db_data("/nonexistent/path.db", "test")
+        assert history == {}
+    
+        assert history == {}
+
+    def test_initialize_strategies_hybrid_fallback(self, strategy_selector):
+        """Test that strategy initialization falls back to backtest DB correctly."""
         import tempfile
         import sqlite3
         import os
-        
-        strategy_selector.register_strategies(["stat_arb_1h", "momentum_1h"])
         
         # Create a temporary trades.db with test data
         with tempfile.TemporaryDirectory() as tmpdir:
             trades_db = os.path.join(tmpdir, "trades.db")
             backtest_db = os.path.join(tmpdir, "backtest.db")
             
-            # Create trades.db with data
+            # Set backtest path and register strategies
+            strategy_selector.backtest_results_path = backtest_db
+            strategy_selector.register_strategies(["blended_strat"])
+            
+            # Create trades.db with data for blended_strat (5 Live trades)
             conn = sqlite3.connect(trades_db)
-            conn.execute("""
-                CREATE TABLE trades (
-                    strategy TEXT, pnl REAL
-                )
-            """)
-            # Insert 5 trades for stat_arb_1h (enough to trigger)
-            for _ in range(5):
-                conn.execute("INSERT INTO trades VALUES ('stat_arb_1h', 10.0)")
+            conn.execute("CREATE TABLE trades (strategy TEXT, pnl REAL, pnl_percentage REAL, exit_time TEXT)")
+            base_time = datetime.now()
+            # 5 Recent Live Trades
+            for i in range(5):
+                t = base_time - timedelta(minutes=i)
+                conn.execute(f"INSERT INTO trades VALUES ('blended_strat', 10.0, 0.01, '{t.isoformat()}')")
             conn.commit()
             conn.close()
             
-            # Test that it loads from the db
-            result = strategy_selector._load_rankings_from_db(trades_db, "live trades")
-            assert result is True
+            # Create backtest.db with data for blended_strat (50 Backtest trades)
+            conn = sqlite3.connect(backtest_db)
+            conn.execute("CREATE TABLE trades (strategy TEXT, pnl REAL, pnl_percentage REAL, exit_time TEXT)")
+            # 50 Older Backtest Trades
+            for i in range(50):
+                t = base_time - timedelta(days=1, minutes=i)
+                conn.execute(f"INSERT INTO trades VALUES ('blended_strat', 20.0, 0.02, '{t.isoformat()}')")
+            conn.commit()
+            conn.close()
             
-            # Check ranking was created
-            assert "stat_arb_1h" in strategy_selector.strategy_rankings
-            ranking = strategy_selector.strategy_rankings["stat_arb_1h"]
-            assert ranking.weight > 0
+            # Run initialization
+            strategy_selector._initialize_strategies_from_history(live_db_path=trades_db)
+            
+            # Verify Blended Loading
+            assert "blended_strat" in strategy_selector.strategy_rankings
+            rank = strategy_selector.strategy_rankings["blended_strat"]
+            
+            # Should have 20 trades total (Target Size)
+            # 5 Live + 15 Backtest to fill gap to 20
+            assert rank.metrics['total_trades'] == 20
+            assert rank.metrics.get('from_backtest', False)
+            
+            # Calculate expected PnL: (5 * 10.0) + (15 * 20.0) = 50 + 300 = 350.0
+            assert rank.metrics['total_pnl'] == 350.0
+            
+            # Verify Window Population
+            window = strategy_selector.performance_windows["blended_strat"]
+            assert len(window.returns) == 20
+            
+    def test_load_rankings_per_strategy_limit(self, strategy_selector):
+        """Test that loading limits trades PER strategy, not globally."""
+        # Create a real temporary database
+        db_path = "test_history_loading.db"
+        if os.path.exists(db_path):
+            os.remove(db_path)
+            
+        try:
+            db = TradeDatabase(db_path)
+            strategy_selector.register_strategies(["HighVolumeStrategy", "LowVolumeStrategy"])
+            
+            # Insert 100 trades for Strategy A (more than limit)
+            # Timestamps: recent
+            base_time = datetime.now()
+            for i in range(100):
+                db.insert_trade({
+                    'symbol': 'BTC',
+                    'strategy': 'HighVolumeStrategy',
+                    'side': 'long',
+                    'entry_price': 50000,
+                    'exit_price': 51000,
+                    'size': 0.01,
+                    'entry_time': base_time - timedelta(minutes=100-i),
+                    'exit_time': base_time - timedelta(minutes=100-i),
+                    'pnl': 10,
+                    'pnl_percentage': 0.02,
+                    'capital_at_risk': 1000,
+                    'exit_reason': 'take_profit'
+                })
+                
+            # Insert 5 trades for Strategy B (infrequent)
+            # Timestamps: OLDER than Strategy A's trades
+            # If global limit 50 was used, these would be starvation victims
+            old_base_time = base_time - timedelta(days=1)
+            for i in range(5):
+                db.insert_trade({
+                    'symbol': 'ETH',
+                    'strategy': 'LowVolumeStrategy',
+                    'side': 'long',
+                    'entry_price': 3000,
+                    'exit_price': 3100,
+                    'size': 0.1,
+                    'entry_time': old_base_time - timedelta(minutes=10-i),
+                    'exit_time': old_base_time - timedelta(minutes=10-i),
+                    'pnl': 10,
+                    'pnl_percentage': 0.02,
+                    'capital_at_risk': 1000,
+                    'exit_reason': 'take_profit'
+                })
+            
+            # Fetch data with helper
+            history = strategy_selector._fetch_db_data(db_path, "test_db")
+            
+            # Check Strategy A History: Should have exactly 50 recent trades (window limit 50)
+            assert 'HighVolumeStrategy' in history
+            trades_a = history.get('HighVolumeStrategy', [])
+            assert len(trades_a) == 50
+            
+            # Check Strategy B History: Should have ALL 5 trades
+            assert 'LowVolumeStrategy' in history
+            trades_b = history.get('LowVolumeStrategy', [])
+            assert len(trades_b) == 5
+
+            
+        finally:
+            if os.path.exists(db_path):
+                os.remove(db_path)
+            # Clean up TradeDatabase side effects (it creates wal/shm files)
+            if os.path.exists(db_path + "-wal"):
+                os.remove(db_path + "-wal")
+            if os.path.exists(db_path + "-shm"):
+                os.remove(db_path + "-shm")
