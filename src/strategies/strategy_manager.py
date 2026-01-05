@@ -423,6 +423,46 @@ class StrategyManager:
         """Initialize the pair selector."""
         return DynamicPairSelector(self.config, self.market_api, self)
     
+    def _is_data_ready_for_symbol(self, symbol: str) -> bool:
+        """
+        Check if all required data is available for trading.
+        Returns False if ANY condition is not met.
+        """
+        import time
+        required_timeframes = ['5m', '15m', '1h', '4h']
+        
+        # 1. Check historical data availability for all timeframes
+        for tf in required_timeframes:
+            ohlcv = self.market_api.get_ohlcv(symbol, tf, limit=20)
+            if ohlcv is None or len(ohlcv) < 20:
+                self.logger.debug(f"[{symbol}] Insufficient historical data for {tf}")
+                return False
+        
+        # 2. Check current candle exists (not stale)
+        for tf in required_timeframes:
+            cached = self.market_api.ohlcv_cache.get(symbol, tf)
+            if not cached:
+                self.logger.debug(f"[{symbol}] No cached data for {tf}")
+                return False
+            
+            last_bar_time = cached[-1].get('time', 0)
+            expected_bar_time = self.market_api.ohlcv_cache._get_bar_key(time.time(), tf)
+            if last_bar_time != expected_bar_time:
+                self.logger.debug(f"[{symbol}/{tf}] Current candle not present (last={last_bar_time}, expected={expected_bar_time})")
+                return False
+        
+        # 3. Check WebSocket subscription active
+        if symbol not in self.market_api._subscribed_symbols:
+            self.logger.debug(f"[{symbol}] WebSocket not subscribed")
+            return False
+        
+        # 4. Check WebSocket data is fresh (recent tick received)
+        if hasattr(self.market_api, 'health_monitor') and not self.market_api.health_monitor.is_ws_data_fresh():
+            self.logger.debug(f"[{symbol}] WebSocket data stale")
+            return False
+        
+        return True
+    
     def start(self, enable_dashboard: bool = True, dashboard_port: int = 5050):
         """
         Start the strategy manager.
@@ -723,6 +763,10 @@ class StrategyManager:
             # Update regime and change-point gating from market proxy (once per cycle)
             self._maybe_update_regime_and_changepoint()
             
+            # Retry any pending symbol subscriptions from previous failures
+            if hasattr(self.market_api, 'retry_pending_subscriptions'):
+                self.market_api.retry_pending_subscriptions()
+            
             # With WebSocket, positions are updated in real-time
             # Only sync periodically to ensure accuracy
             if current_time - self.last_position_sync >= self.position_sync_interval:
@@ -907,17 +951,17 @@ class StrategyManager:
             self.logger.error(f"Error handling position update: {e}")
     
     def _analyze_symbol(self, symbol: str, timestamp: datetime = None):
-        """Analyze a single symbol for trading opportunities."""
-        # ... logic ...
-        # Need to see more context to replace correctly.
-        # Implied signature update.
-        pass # Placeholder for replace logic, see below blocks for specific calls
         """Analyze a single symbol and execute strategies with per-strategy timeframes."""
         try:
             # Subscribe to real-time data for this symbol
             self._subscribe_to_symbol(symbol)
             
-            # Check if we have sufficient data
+            # NEW: Check data readiness before any analysis
+            if not self._is_data_ready_for_symbol(symbol):
+                self.logger.debug(f"[{symbol}] Data not ready, skipping analysis")
+                return
+            
+            # Check if we have sufficient data (legacy check, may overlap with readiness)
             if not self.market_api.is_data_available(symbol):
                 self.logger.debug(f"Insufficient data for {symbol}, skipping")
                 return
@@ -933,7 +977,7 @@ class StrategyManager:
             # Fetch data for all timeframes
             ohlcv_dict = {}
             # Standard set of timeframes to fetch
-            target_timeframes = ['15m', '1h', '4h', '1d']
+            target_timeframes = ['5m', '15m', '1h', '4h', '1d']
             
             has_sufficient_data = False
             for tf in target_timeframes:

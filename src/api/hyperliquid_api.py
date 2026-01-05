@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from collections import defaultdict, deque
 from functools import wraps
+from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 import pandas as pd
 
@@ -246,6 +247,8 @@ class OhlcvCache:
             "1d": 86400,
         }
         self.maxlen = defaultdict(lambda: defaultdict(lambda: 300))
+        # Callback for when a bar is complete (boundary crossed)
+        self.on_bar_complete_callback: Optional[Callable] = None
     
     def seed(self, symbol: str, timeframe: str, bars: list, maxlen: int = 300):
         if timeframe not in self.timeframe_seconds:
@@ -276,15 +279,24 @@ class OhlcvCache:
         if symbol not in self.cache:
             return
         for timeframe, dq in self.cache[symbol].items():
-            self._update_bar_for_timeframe(timeframe, dq, price, volume, ts)
+            self._update_bar_for_timeframe(symbol, timeframe, dq, price, volume, ts)
     
-    def _update_bar_for_timeframe(self, timeframe: str, dq: deque, price: float, volume: float, ts: float):
+    def _update_bar_for_timeframe(self, symbol: str, timeframe: str, dq: deque, price: float, volume: float, ts: float):
         key = self._get_bar_key(ts, timeframe)
         if key is None:
             return
         if dq and dq[-1].get("time") == key:
             bar = dq[-1]
         else:
+            # BOUNDARY CROSSED: Previous bar is complete
+            if dq and self.on_bar_complete_callback:
+                completed_bar = dq[-1]
+                try:
+                    self.on_bar_complete_callback(symbol, timeframe, completed_bar)
+                except Exception:
+                    pass  # Don't let callback errors break tick processing
+            
+            # Create new bar
             bar = {"time": key, "open": price, "high": price, "low": price, "close": price, "volume": 0.0}
             dq.append(bar)
         bar["close"] = price
@@ -767,6 +779,15 @@ class HyperliquidAPI:
         # Market data persistence (optional, for incremental loading)
         self.market_db = None  # Set externally via set_market_db()
         
+        # Queue for symbols that failed initialization
+        self._pending_init_symbols: set = set()
+        
+        # Async persistence worker
+        self._persistence_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="db_persist")
+        
+        # Wire up OhlcvCache callback for DB persistence on boundary crossing
+        self.ohlcv_cache.on_bar_complete_callback = self._on_bar_complete
+        
         # Real-time data storage
         self._price_data: Dict[str, deque] = defaultdict(lambda: deque(maxlen=1000))
         self._subscribed_symbols: set = set()
@@ -976,6 +997,9 @@ class HyperliquidAPI:
         # Cleanup
         self.cache.clear()
         self.order_tracker.cleanup_old(max_age_hours=0)
+        
+        # Stop persistence executor
+        self._persistence_executor.shutdown(wait=False)
         
         self.logger.info("HyperliquidAPI stopped")
     
@@ -1292,6 +1316,179 @@ class HyperliquidAPI:
         if ts is None:
             ts = time.time()
         self.ohlcv_cache.update_from_tick(symbol, price, volume, ts)
+    
+    
+    def _on_bar_complete(self, symbol: str, timeframe: str, bar: dict):
+        """
+        Called when a candle period closes. 
+        Instead of persisting the in-memory bar directly, trigger a background verification fetch.
+        This implements the "Verify-on-Write" pattern to ensure data integrity.
+        """
+        if not self.market_db:
+            return
+            
+        # Submit to background executor to avoid blocking WebSocket thread
+        self._persistence_executor.submit(
+            self._fetch_and_persist_candle, 
+            symbol, 
+            timeframe, 
+            bar['time']
+        )
+
+    def _fetch_and_persist_candle(self, symbol: str, timeframe: str, timestamp: int):
+        """
+        Worker method to fetch the official finalized candle from API and persist it.
+        """
+        try:
+            # Wait a brief buffer to ensure exchange engine has finalized the candle
+            time.sleep(2.0)
+            
+            # Fetch specific candle from API (Source of Truth)
+            # We want the candle STARTING at timestamp
+            start_ms = timestamp * 1000
+            end_ms = start_ms + self._get_interval_ms(timeframe) - 1
+            
+            # Use candles_snapshot to fetch strictly finalized data
+            candles = self.info.candles_snapshot(
+                self._get_api_symbol(symbol), 
+                timeframe, 
+                start_ms, 
+                end_ms + 1000 # Buffer to ensure we cover the range
+            )
+            
+            # Find the exact candle matching our timestamp
+            target_candle = None
+            if candles:
+                for c in candles:
+                    if c['t'] == start_ms:
+                        target_candle = c
+                        break
+            
+            if target_candle:
+                # Format for DB
+                bar = {
+                    'time': target_candle['t'] // 1000,
+                    'open': float(target_candle['o']),
+                    'high': float(target_candle['h']),
+                    'low': float(target_candle['l']),
+                    'close': float(target_candle['c']),
+                    'volume': float(target_candle['v']),
+                }
+                
+                # Persist to DB
+                df = pd.DataFrame([bar])
+                df['timestamp'] = pd.to_datetime(df['time'], unit='s')
+                df.set_index('timestamp', inplace=True)
+                
+                self.market_db.insert_market_data(df, symbol, timeframe)
+                self.logger.debug(f"Persisted VERIFIED {symbol}/{timeframe} candle @ {bar['time']}")
+                
+                # OPTIONAL: Self-heal in-memory cache if needed (omitted for safety to avoid race conditions 
+                # with active WebSocket updates, as the next in-memory candle is already building)
+                
+            else:
+                self.logger.warning(
+                    f"Could not verify candle for {symbol}/{timeframe} @ {timestamp}. "
+                    "Skipping persistence to avoid corruption."
+                )
+                
+        except Exception as e:
+            self.logger.error(f"Failed to persist verified candle for {symbol}/{timeframe}: {e}")
+    
+    def _get_api_symbol(self, symbol: str) -> str:
+        """Get symbol formatted for API requests."""
+        # Currently a pass-through, but centralizes symbol formatting logic
+        return symbol
+
+    def _get_interval_ms(self, timeframe: str) -> int:
+        """Get interval in milliseconds for a timeframe."""
+        intervals = {
+            '1m': 60 * 1000,
+            '5m': 5 * 60 * 1000,
+            '15m': 15 * 60 * 1000,
+            '30m': 30 * 60 * 1000,
+            '1h': 60 * 60 * 1000,
+            '4h': 4 * 60 * 60 * 1000,
+            '1d': 24 * 60 * 60 * 1000,
+        }
+        return intervals.get(timeframe, 60 * 60 * 1000)
+    
+    def _append_current_candle(self, symbol: str, timeframe: str, api_symbol: str):
+        """Fetch in-progress candle to ensure no boundary gap."""
+        try:
+            now_ms = int(time.time() * 1000)
+            interval_ms = self._get_interval_ms(timeframe)
+            current_bar_start = now_ms - (now_ms % interval_ms)
+            
+            candles = self.info.candles_snapshot(api_symbol, timeframe, current_bar_start, now_ms)
+            if candles:
+                bar = {
+                    'time': candles[-1]['t'] // 1000,
+                    'open': float(candles[-1]['o']),
+                    'high': float(candles[-1]['h']),
+                    'low': float(candles[-1]['l']),
+                    'close': float(candles[-1]['c']),
+                    'volume': float(candles[-1]['v']),
+                }
+                dq = self.ohlcv_cache.cache[symbol][timeframe]
+                # Only append if not already present
+                if not dq or dq[-1].get('time') != bar['time']:
+                    dq.append(bar)
+                    self.logger.debug(f"Appended current candle for {symbol}/{timeframe}")
+        except Exception as e:
+            self.logger.warning(f"Failed to append current candle for {symbol}/{timeframe}: {e}")
+    
+    def _initialize_live_data(self, symbol: str, api_symbol: str, max_retries: int = 2) -> bool:
+        """
+        Fetch in-progress candles for all timeframes and subscribe to WebSocket.
+        If fails after retries, adds to pending queue for later retry.
+        """
+        timeframes = ['5m', '15m', '1h', '4h']
+        
+        for attempt in range(max_retries):
+            try:
+                # Step 1: Fetch current in-progress candles for all timeframes
+                for tf in timeframes:
+                    self._append_current_candle(symbol, tf, api_symbol)
+                
+                # Step 2: Subscribe to WebSocket immediately after
+                self.subscribe_symbol(symbol)
+                
+                # Step 3: Verify subscription is active
+                if symbol in self._subscribed_symbols:
+                    self.logger.info(f"Initialized live data for {symbol}")
+                    self._pending_init_symbols.discard(symbol)
+                    return True
+            except Exception as e:
+                self.logger.warning(f"Live data init failed for {symbol}: {e} (attempt {attempt+1}/{max_retries})")
+                time.sleep(0.3)
+        
+        # After max_retries, add to pending queue and continue
+        self._pending_init_symbols.add(symbol)
+        self.logger.warning(f"Deferred {symbol} initialization to retry queue")
+        return False
+    
+    def retry_pending_subscriptions(self):
+        """Called periodically to retry failed subscriptions."""
+        if not self._pending_init_symbols:
+            return
+        
+        pending = list(self._pending_init_symbols)
+        self.logger.info(f"Retrying {len(pending)} pending subscriptions: {pending}")
+        
+        for symbol in pending:
+            # Re-attempt with fresh data
+            api_symbol = symbol  # May need conversion for spot
+            asset_info = self._get_asset_info_for_symbol(symbol)
+            if not asset_info:
+                spot_api_name = self.get_spot_api_name(symbol)
+                if spot_api_name:
+                    api_symbol = spot_api_name
+            
+            self._initialize_live_data(symbol, api_symbol, max_retries=1)
+            
+            # Rate limit: small delay between symbols
+            time.sleep(0.2)
     
     def get_all_prices(self) -> Dict[str, float]:
         """Get current prices for all symbols."""
@@ -1978,21 +2175,87 @@ class HyperliquidAPI:
                 
                 return result
             else:
-                self.logger.warning(
-                    f"Order not filled after {max_attempts} attempts: "
-                    f"{side} {size} {display_symbol}"
-                )
-                return {
-                    'order_id': None,
-                    'symbol': trading_symbol,
-                    'display_symbol': display_symbol,
-                    'side': side,
-                    'size': size,
-                    'filled_size': 0,
-                    'status': 'not_filled',
-                    'market_type': market_type,
-                    'timestamp': datetime.now(),
-                }
+                # FALLBACK: If limit orders failed and this is a position closure (reduce_only),
+                # use market order to guarantee fill
+                if reduce_only and remaining_size > 0:
+                    self.logger.warning(
+                        f"Limit orders exhausted for {display_symbol}. Falling back to MARKET order..."
+                    )
+                    try:
+                        # Use SDK's market_open for position closure with 5% slippage
+                        market_response = self._rate_limited_call(
+                            self.exchange.market_open,
+                            trading_symbol,
+                            is_buy,  # Opposite side to close position
+                            remaining_size,
+                            None,  # px=None for market order
+                            0.05,  # 5% slippage tolerance
+                        )
+                        
+                        market_fill = self._parse_order_response(
+                            market_response, trading_symbol, side, remaining_size, current_price
+                        )
+                        
+                        if market_fill and market_fill.get('filled_size', 0) > 0:
+                            filled = market_fill['filled_size']
+                            avg_px = market_fill.get('avg_fill_price', current_price)
+                            total_filled += filled
+                            weighted_price_sum += filled * avg_px
+                            all_fills.append({
+                                'attempt': 'market_fallback',
+                                'size': filled,
+                                'price': avg_px,
+                                'slippage_bps': 500,  # 5% = 500 bps
+                            })
+                            remaining_size = round(remaining_size - filled, sz_decimals)
+                            
+                            self.logger.info(
+                                f"✓ Market fill: {filled:.6f} @ {avg_px:.6f} "
+                                f"(total: {total_filled:.6f}/{size:.6f})"
+                            )
+                    except Exception as market_err:
+                        self.logger.error(f"Market order fallback failed: {market_err}")
+                
+                # Build result based on final state
+                if total_filled > 0:
+                    avg_fill_price = weighted_price_sum / total_filled
+                    status = 'filled' if remaining_size <= 0 else 'partial'
+                    
+                    result = {
+                        'order_id': f"smart_{trading_symbol}_{int(time.time() * 1000)}",
+                        'symbol': trading_symbol,
+                        'display_symbol': display_symbol,
+                        'side': side,
+                        'size': size,
+                        'filled_size': total_filled,
+                        'unfilled_size': remaining_size,
+                        'avg_fill_price': avg_fill_price,
+                        'status': status,
+                        'fills': all_fills,
+                        'market_type': market_type,
+                        'timestamp': datetime.now(),
+                    }
+                    self.logger.info(
+                        f"{'✓' if status == 'filled' else '⚠'} Order {status}: "
+                        f"{side} {total_filled:.6f}/{size:.6f} {display_symbol} @ {avg_fill_price:.6f}"
+                    )
+                    return result
+                else:
+                    self.logger.warning(
+                        f"Order not filled after {max_attempts} attempts: "
+                        f"{side} {size} {display_symbol}"
+                    )
+                    return {
+                        'order_id': None,
+                        'symbol': trading_symbol,
+                        'display_symbol': display_symbol,
+                        'side': side,
+                        'size': size,
+                        'filled_size': 0,
+                        'status': 'not_filled',
+                        'market_type': market_type,
+                        'timestamp': datetime.now(),
+                    }
                 
         except Exception as e:
             self.logger.error(f"Order execution failed for {symbol} ({market_type}): {e}")
