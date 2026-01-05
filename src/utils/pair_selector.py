@@ -1130,7 +1130,7 @@ class DynamicPairSelector:
             self.logger.info("Backtest mode detected: Disabling rate limits and initial load caps")
         else:
             RATE_LIMIT_DELAY = 1.5  # seconds between OHLCV fetches (~40/min)
-            MAX_INITIAL_LOAD = 15   # Load top 15 assets initially (~25 seconds)
+            MAX_INITIAL_LOAD = 10   # Load top 10 assets initially (~15 seconds)
         
         # Note: No max_pairs limit - all assets passing quality filters are traded
         loaded_symbols = set()  # Track what we've loaded
@@ -1158,18 +1158,21 @@ class DynamicPairSelector:
                 self.logger.info(f"Queued {len(remaining)} assets for background fetching")
                 break
             
-            # Load this asset's historical data
+            # Load this asset's data with correct order for continuity
             try:
                 self.logger.info(f"  [{len(assets_with_data)+1}/{MAX_INITIAL_LOAD}] Loading {symbol} ({market_type})...")
+                
+                # STEP 2a: Subscribe to WebSocket FIRST so ticks can flow immediately
+                if hasattr(self.market_api, 'subscribe_symbol'):
+                    self.market_api.subscribe_symbol(symbol)
+                
+                # STEP 2b: Now fetch historical data (includes current candle)
+                # WebSocket is already connected, so any new ticks will update the current bar
                 self._get_price_history(symbol)
                 loaded_symbols.add(symbol)
                 assets_with_data.append(asset)
                 
-                # Subscribe to WebSocket for real-time updates
-                if hasattr(self.market_api, 'subscribe_symbol'):
-                    self.market_api.subscribe_symbol(symbol)
-                
-                # STEP 2a: If this is a perp with a corresponding spot, also load the spot
+                # STEP 2c: If this is a perp with a corresponding spot, also load the spot
                 # Use a separate key for spot to handle direct-match tokens (HYPE perp -> HYPE spot)
                 if market_type == 'perp':
                     spot_token = self.market_api.get_spot_token_for_perp(symbol) if hasattr(self.market_api, 'get_spot_token_for_perp') else None
@@ -1177,16 +1180,14 @@ class DynamicPairSelector:
                     if spot_token and spot_key not in loaded_symbols:
                         self.logger.info(f"       -> Also loading spot: {spot_token}/USDC")
                         try:
+                            # Subscribe to spot WebSocket first
+                            if hasattr(self.market_api, 'subscribe_symbol'):
+                                self.market_api.subscribe_symbol(spot_token)
                             time.sleep(RATE_LIMIT_DELAY)
                             self._get_price_history(spot_token)
                             loaded_symbols.add(spot_key)  # Use spot_key to track
-                            if hasattr(self.market_api, 'subscribe_symbol'):
-                                self.market_api.subscribe_symbol(spot_token)
                         except Exception as e:
                             self.logger.warning(f"       -> Failed to load spot {spot_token}: {e}")
-                            # Still subscribe to WebSocket for real-time price
-                            if hasattr(self.market_api, 'subscribe_symbol'):
-                                self.market_api.subscribe_symbol(spot_token)
                 
                 # Rate limit delay before next fetch
                 time.sleep(RATE_LIMIT_DELAY)
@@ -1503,14 +1504,15 @@ class DynamicPairSelector:
                     else:
                         self.logger.debug(f"[BackgroundFetcher] Loading {sym} ({market_type})...")
                     
+                    # Subscribe to WebSocket FIRST so ticks flow immediately
+                    if hasattr(self.market_api, 'subscribe_symbol'):
+                        self.market_api.subscribe_symbol(sym)
+                    
+                    # Now fetch historical data
                     self._get_price_history(sym)
                     
                     with self._backfill_lock:
                         self.backfill_symbols_in_queue.discard(sym)
-                    
-                    # Subscribe to WebSocket
-                    if hasattr(self.market_api, 'subscribe_symbol'):
-                        self.market_api.subscribe_symbol(sym)
                     
                     # Dynamically add to trading pairs if it qualifies
                     self._try_add_to_trading_pairs(asset)

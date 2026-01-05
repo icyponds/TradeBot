@@ -438,28 +438,32 @@ class StrategyManager:
                 self.logger.debug(f"[{symbol}] Insufficient historical data for {tf}")
                 return False
         
-        # 2. Check current candle exists (not stale)
+        # 2. Check cache exists for required timeframes
         for tf in required_timeframes:
             cached = self.market_api.ohlcv_cache.get(symbol, tf)
-            if not cached:
-                self.logger.debug(f"[{symbol}] No cached data for {tf}")
-                return False
-            
-            last_bar_time = cached[-1].get('time', 0)
-            expected_bar_time = self.market_api.ohlcv_cache._get_bar_key(time.time(), tf)
-            if last_bar_time != expected_bar_time:
-                self.logger.debug(f"[{symbol}/{tf}] Current candle not present (last={last_bar_time}, expected={expected_bar_time})")
+            if not cached or len(cached) < 5:
+                self.logger.debug(f"[{symbol}] Insufficient cached data for {tf}")
                 return False
         
         # 3. Check WebSocket subscription active
+        # If subscribed, data flows through allMids feed which updates all symbols
         if symbol not in self.market_api._subscribed_symbols:
             self.logger.debug(f"[{symbol}] WebSocket not subscribed")
             return False
         
-        # 4. Check WebSocket data is fresh (recent tick received for THIS symbol)
-        if hasattr(self.market_api, 'health_monitor') and not self.market_api.health_monitor.is_ws_data_fresh(symbol):
-            self.logger.debug(f"[{symbol}] WebSocket data stale")
+        # 4. Check Global WebSocket connection health
+        # Since 'allMids' updates all symbols simultaneously, verifying the
+        # global connection is fresh ensures we aren't trading on stale data.
+        if hasattr(self.market_api, 'health_monitor') and not self.market_api.health_monitor.is_ws_data_fresh():
+            self.logger.debug(f"[{symbol}] WebSocket global connection stale")
             return False
+        
+        # All checks passed - log first time a symbol becomes ready
+        if not hasattr(self, '_symbols_logged_ready'):
+            self._symbols_logged_ready = set()
+        if symbol not in self._symbols_logged_ready:
+            self.logger.info(f"✅ [{symbol}] Data ready for trading")
+            self._symbols_logged_ready.add(symbol)
         
         return True
     
@@ -979,12 +983,12 @@ class StrategyManager:
         self.logger.info("Trading loop stopped")
     
     def _subscribe_to_symbol(self, symbol: str):
-        """Subscribe to real-time data for a symbol."""
-        if symbol not in self._subscribed_symbols:
-            if hasattr(self.market_api, 'subscribe_symbol'):
-                self.market_api.subscribe_symbol(symbol)
-                self._subscribed_symbols.add(symbol)
-                self.logger.info(f"Subscribed to real-time data for {symbol}")
+        """Subscribe to real-time data for a symbol (uses API's tracking set)."""
+        # Use market_api's _subscribed_symbols to avoid duplicate subscriptions
+        # pair_selector may have already subscribed during initialization
+        if symbol not in self.market_api._subscribed_symbols:
+            self.market_api.subscribe_symbol(symbol)
+            self.logger.info(f"Subscribed to real-time data for {symbol}")
     
     def _on_price_update(self, symbol: str, price: float, timestamp: float):
         """Handle real-time price updates."""
@@ -1120,6 +1124,7 @@ class StrategyManager:
                 # Generate signal without executing
                 signal = self._generate_signal_for_strategy(symbol, strategy_name, strategy, ohlcv_dict, current_price)
                 if signal:
+                    self.logger.info(f"🎯 Signal generated: {strategy_name}/{symbol} → {signal.get('signal', signal.get('action', 'unknown'))}")
                     collected_signals.append({
                         'strategy_name': strategy_name,
                         'strategy': strategy,
