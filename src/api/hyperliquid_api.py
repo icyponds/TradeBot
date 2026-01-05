@@ -454,7 +454,7 @@ class ConnectionHealthMonitor:
         self,
         check_interval: float = 30.0,
         unhealthy_threshold: int = 3,
-        ws_stale_threshold: float = 60.0,
+        ws_stale_threshold: float = 10.0,
         latency_warning_ms: float = 1000.0
     ):
         """
@@ -541,6 +541,32 @@ class ConnectionHealthMonitor:
             if self.ws_last_message_time is None:
                 return False
             return time.time() - self.ws_last_message_time < self.ws_stale_threshold
+    
+    def is_ws_data_fresh(self, symbol: str = None) -> bool:
+        """
+        Check if WebSocket data is fresh.
+        
+        Args:
+            symbol: If provided, check freshness for this specific symbol.
+                   If None, check global connection freshness.
+        
+        Returns:
+            True if data is fresh (within threshold), False otherwise.
+        """
+        if symbol is None:
+            return self.is_ws_connected()
+        
+        # Per-symbol freshness check
+        # Access the API's per-symbol tracking if available
+        if self._api and hasattr(self._api, '_symbol_last_tick'):
+            with self._lock:
+                last_tick = self._api._symbol_last_tick.get(symbol)
+                if last_tick is None:
+                    return False
+                return time.time() - last_tick < self.ws_stale_threshold
+        
+        # Fallback to global check
+        return self.is_ws_connected()
     
     def get_avg_latency_ms(self) -> float:
         """Get average REST latency in milliseconds."""
@@ -790,6 +816,7 @@ class HyperliquidAPI:
         
         # Real-time data storage
         self._price_data: Dict[str, deque] = defaultdict(lambda: deque(maxlen=1000))
+        self._symbol_last_tick: Dict[str, float] = {}  # Per-symbol last tick timestamp
         self._subscribed_symbols: set = set()
         self._callbacks: Dict[str, List[Callable]] = defaultdict(list)
         self._data_lock = threading.Lock()
@@ -917,6 +944,7 @@ class HyperliquidAPI:
                 for symbol, price_str in mids.items():
                     try:
                         price = float(price_str)
+                        self._symbol_last_tick[symbol] = timestamp  # Track per-symbol
                         self._price_data[symbol].append({
                             'price': price,
                             'timestamp': timestamp

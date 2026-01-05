@@ -456,12 +456,115 @@ class StrategyManager:
             self.logger.debug(f"[{symbol}] WebSocket not subscribed")
             return False
         
-        # 4. Check WebSocket data is fresh (recent tick received)
-        if hasattr(self.market_api, 'health_monitor') and not self.market_api.health_monitor.is_ws_data_fresh():
+        # 4. Check WebSocket data is fresh (recent tick received for THIS symbol)
+        if hasattr(self.market_api, 'health_monitor') and not self.market_api.health_monitor.is_ws_data_fresh(symbol):
             self.logger.debug(f"[{symbol}] WebSocket data stale")
             return False
         
         return True
+    
+    # Force-close thresholds when data is stale (seconds)
+    # Shorter timeframes need faster reaction to data issues
+    STALE_DATA_FORCE_CLOSE_THRESHOLDS = {
+        '5m': 60,      # 1 minute for 5-min strategies
+        '15m': 180,    # 3 minutes for 15-min strategies  
+        '1h': 600,     # 10 minutes for 1-hour strategies
+        '4h': 1800,    # 30 minutes for 4-hour strategies
+        '1d': 7200,    # 2 hours for daily strategies
+    }
+    
+    def _get_position_timeframe(self, symbol: str) -> str:
+        """Get the primary timeframe of an open position's strategy."""
+        position = self.positions.get(symbol)
+        if not position:
+            return '1h'  # Default fallback
+        
+        strategy_name = position.get('strategy', '')
+        # Extract timeframe from strategy name suffix (e.g., 'stat_arb_15m' -> '15m')
+        # Check longer timeframes first to prevent '15m' from matching '5m'
+        for tf in ['15m', '1d', '4h', '1h', '5m']:
+            if strategy_name.endswith(tf) or f'_{tf}_' in strategy_name:
+                return tf
+        return '1h'
+    
+    def _handle_stale_data_for_symbol(self, symbol: str) -> None:
+        """
+        Handle stale data scenario for a symbol with an open position.
+        
+        - If position exists, check if stale duration exceeds timeframe threshold
+        - If exceeded, force close the position
+        - Otherwise, still attempt exit checks using last known data
+        """
+        import time
+        
+        position = self.positions.get(symbol)
+        if not position:
+            # No position, nothing to manage
+            return
+        
+        # Get the position's timeframe and corresponding threshold
+        timeframe = self._get_position_timeframe(symbol)
+        force_close_threshold = self.STALE_DATA_FORCE_CLOSE_THRESHOLDS.get(timeframe, 600)
+        
+        # Calculate how long data has been stale for this symbol
+        last_tick_time = self.market_api._symbol_last_tick.get(symbol)
+        if last_tick_time is None:
+            stale_duration = float('inf')
+        else:
+            stale_duration = time.time() - last_tick_time
+        
+        self.logger.warning(
+            f"[{symbol}] Data stale for {stale_duration:.1f}s (threshold: {force_close_threshold}s for {timeframe})"
+        )
+        
+        # Check if we should force close
+        if stale_duration >= force_close_threshold:
+            self.logger.error(
+                f"[{symbol}] Force closing position - data stale for {stale_duration:.1f}s "
+                f"exceeds {timeframe} threshold of {force_close_threshold}s"
+            )
+            self.execution_engine.close_position(symbol, reason=f"stale_data_{timeframe}_timeout")
+            return
+        
+        # Data is stale but not yet at force-close threshold
+        # Try to run exit logic using last known price (if available)
+        try:
+            # Get last known price from cache
+            price_data = self.market_api._price_data.get(symbol)
+            if price_data and len(price_data) > 0:
+                last_price = price_data[-1].get('price')
+                if last_price:
+                    self.logger.info(f"[{symbol}] Running exit check with last known price: {last_price}")
+                    # Check stop loss / take profit with existing position data
+                    self._check_exit_conditions_with_price(symbol, position, last_price)
+        except Exception as e:
+            self.logger.error(f"[{symbol}] Error running stale-data exit check: {e}")
+    
+    def _check_exit_conditions_with_price(self, symbol: str, position: dict, current_price: float) -> None:
+        """Check basic exit conditions (stop loss, take profit) using provided price."""
+        entry_price = position.get('entry_price', 0)
+        stop_loss = position.get('stop_loss')
+        take_profit = position.get('take_profit')
+        side = position.get('side', 'long')
+        
+        if not entry_price:
+            return
+        
+        # Check stop loss
+        if stop_loss:
+            if (side == 'long' and current_price <= stop_loss) or \
+               (side == 'short' and current_price >= stop_loss):
+                self.logger.warning(f"[{symbol}] Stop loss triggered during stale data: {current_price}")
+                self.execution_engine.close_position(symbol, reason="stop_loss_stale_data")
+                return
+        
+        # Check take profit
+        if take_profit:
+            if (side == 'long' and current_price >= take_profit) or \
+               (side == 'short' and current_price <= take_profit):
+                self.logger.info(f"[{symbol}] Take profit triggered during stale data: {current_price}")
+                self.execution_engine.close_position(symbol, reason="take_profit_stale_data")
+                return
     
     def start(self, enable_dashboard: bool = True, dashboard_port: int = 5050):
         """
@@ -958,7 +1061,9 @@ class StrategyManager:
             
             # NEW: Check data readiness before any analysis
             if not self._is_data_ready_for_symbol(symbol):
-                self.logger.debug(f"[{symbol}] Data not ready, skipping analysis")
+                # Handle positions with stale data (exit checks, force close if needed)
+                self._handle_stale_data_for_symbol(symbol)
+                self.logger.debug(f"[{symbol}] Data not ready, skipping new analysis")
                 return
             
             # Check if we have sufficient data (legacy check, may overlap with readiness)

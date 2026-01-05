@@ -126,3 +126,83 @@ class TestStrategyManager:
         # Should still try to close ETH after BTC fails
         assert strategy_manager.execution_engine.close_position.call_count == 4 # 2 from prev + 2 new
 
+    def test_get_position_timeframe(self, strategy_manager):
+        """Test extraction of timeframe from strategy name."""
+        # Mock positions property
+        strategy_manager.execution_engine.positions = {
+            'BTC': {'strategy': 'stat_arb_15m', 'side': 'long'},
+            'ETH': {'strategy': 'csm_4h', 'side': 'long'},
+            'SOL': {'strategy': 'vol_breakout_1h', 'side': 'short'},
+            'DOGE': {'strategy': 'unknown_strategy', 'side': 'long'},
+        }
+        
+        assert strategy_manager._get_position_timeframe('BTC') == '15m'
+        assert strategy_manager._get_position_timeframe('ETH') == '4h'
+        assert strategy_manager._get_position_timeframe('SOL') == '1h'
+        assert strategy_manager._get_position_timeframe('DOGE') == '1h'  # default fallback
+        assert strategy_manager._get_position_timeframe('NONEXISTENT') == '1h'  # no position
+
+    def test_check_exit_conditions_with_price_stop_loss(self, strategy_manager):
+        """Test stop loss triggers during stale data."""
+        position = {
+            'side': 'long',
+            'entry_price': 50000,
+            'stop_loss': 48000,
+            'take_profit': 55000,
+        }
+        
+        # Mock close_position
+        strategy_manager.execution_engine.close_position = MagicMock()
+        
+        # Price above stop loss - should NOT close
+        strategy_manager._check_exit_conditions_with_price('BTC', position, 49000)
+        strategy_manager.execution_engine.close_position.assert_not_called()
+        
+        # Price at stop loss - should close
+        strategy_manager._check_exit_conditions_with_price('BTC', position, 48000)
+        strategy_manager.execution_engine.close_position.assert_called_once_with('BTC', reason='stop_loss_stale_data')
+
+    def test_check_exit_conditions_with_price_take_profit(self, strategy_manager):
+        """Test take profit triggers during stale data."""
+        position = {
+            'side': 'long',
+            'entry_price': 50000,
+            'stop_loss': 48000,
+            'take_profit': 55000,
+        }
+        
+        strategy_manager.execution_engine.close_position = MagicMock()
+        
+        # Price at take profit - should close
+        strategy_manager._check_exit_conditions_with_price('BTC', position, 55000)
+        strategy_manager.execution_engine.close_position.assert_called_once_with('BTC', reason='take_profit_stale_data')
+
+    def test_handle_stale_data_force_close(self, strategy_manager):
+        """Test force close when stale duration exceeds threshold."""
+        import time
+        
+        # Mock position with 15m strategy (threshold = 180 seconds)
+        strategy_manager.execution_engine.positions = {
+            'BTC': {'strategy': 'stat_arb_15m', 'side': 'long', 'entry_price': 50000}
+        }
+        strategy_manager.execution_engine.close_position = MagicMock()
+        
+        # Mock stale data for 200 seconds (exceeds 180s threshold for 15m)
+        strategy_manager.market_api._symbol_last_tick = {'BTC': time.time() - 200}
+        
+        strategy_manager._handle_stale_data_for_symbol('BTC')
+        
+        # Should force close
+        strategy_manager.execution_engine.close_position.assert_called_once()
+        call_args = strategy_manager.execution_engine.close_position.call_args
+        assert 'stale_data_15m_timeout' in call_args[1]['reason']
+
+    def test_handle_stale_data_no_position(self, strategy_manager):
+        """Test that handler does nothing when no position exists."""
+        strategy_manager.execution_engine.positions = {}
+        strategy_manager.execution_engine.close_position = MagicMock()
+        
+        strategy_manager._handle_stale_data_for_symbol('BTC')
+        
+        # Should not call close
+        strategy_manager.execution_engine.close_position.assert_not_called()
