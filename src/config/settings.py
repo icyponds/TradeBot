@@ -124,6 +124,10 @@ def load_config() -> Dict[str, Any]:
                 # (Prevents dust trades and excessive slippage relative to size.)
                 "min_scale_factor": float(os.getenv("MULTI_LEG_MIN_SCALE_FACTOR", "0.10")),
             },
+            
+            # Strategy weighting configuration
+            "max_positions_per_strategy": int(os.getenv("MAX_POSITIONS_PER_STRATEGY", "5")),  # Limit positions per strategy
+            "min_trades_for_ranking": int(os.getenv("MIN_TRADES_FOR_RANKING", "3")),  # Faster weight adaptation
         },
         
         # Risk Management Configuration

@@ -157,7 +157,11 @@ class StrategySelector:
         self.min_expectancy = -10.0        # Allow slightly negative during learning
         
         # Minimum trades before a strategy can be disabled (learning period)
-        self.min_trades_for_ranking = 5
+        self.min_trades_for_ranking = config.get('trading', {}).get('min_trades_for_ranking', 3)
+        
+        # Backtest results path for bootstrap (load initial weights from backtest)
+        self.backtest_results_path = config.get('backtesting', {}).get('results_db_path', 'data/backtest_results.db')
+
         
         # Cooling-off: disable strategies after consecutive losses
         self.enable_cooling_off = True
@@ -246,13 +250,18 @@ class StrategySelector:
         """
         Initialize default rankings for all registered strategies.
         
-        All strategies start enabled with equal weights until performance data
-        is available for smarter ranking.
+        First attempts to load rankings from backtest results (bootstrap).
+        Falls back to equal weights if no backtest data is available.
         """
         if not self._registered_strategies:
             self.logger.debug("No strategies registered for default rankings")
             return
         
+        # Try to bootstrap from backtest results first
+        if self._load_rankings_from_backtest():
+            return
+        
+        # Fall back to default equal-weight rankings
         self.logger.info(f"Initializing default rankings for {len(self._registered_strategies)} strategies")
         
         for rank, strategy_name in enumerate(self._registered_strategies, 1):
@@ -267,6 +276,135 @@ class StrategySelector:
                 metrics={},  # Empty metrics until we have data
             )
             self.logger.info(f"  - {strategy_name}: enabled with default ranking")
+    
+    def _load_rankings_from_backtest(self) -> bool:
+        """
+        Load initial strategy rankings from database.
+        
+        Priority order:
+        1. Live trades database (trades.db) - if has >=3 trades per strategy
+        2. Backtest results database (backtest_results.db) - as fallback
+        
+        This ensures rankings persist across restarts using actual live trade data.
+        
+        Returns:
+            True if rankings were successfully loaded, False otherwise.
+        """
+        import sqlite3
+        import os
+        
+        # Priority 1: Try live trades database first
+        live_db_path = 'data/trades.db'
+        if os.path.exists(live_db_path):
+            if self._load_rankings_from_db(live_db_path, source_name="live trades"):
+                return True
+        
+        # Priority 2: Fall back to backtest results
+        if os.path.exists(self.backtest_results_path):
+            return self._load_rankings_from_db(self.backtest_results_path, source_name="backtest")
+        
+        self.logger.debug("No trade databases found, using default rankings")
+        return False
+    
+    def _load_rankings_from_db(self, db_path: str, source_name: str = "database") -> bool:
+        """
+        Load strategy rankings from a trades database.
+        
+        Args:
+            db_path: Path to SQLite database with trades table
+            source_name: Human-readable name for logging
+            
+        Returns:
+            True if rankings were successfully loaded, False otherwise.
+        """
+        import sqlite3
+        
+        try:
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            
+            # Query strategy metrics from trades table
+            cursor.execute("""
+                SELECT 
+                    strategy,
+                    COUNT(*) as trades,
+                    SUM(CASE WHEN pnl > 0 THEN 1.0 ELSE 0.0 END) / NULLIF(COUNT(*), 0) * 100 as win_rate,
+                    SUM(pnl) as total_pnl,
+                    SUM(CASE WHEN pnl > 0 THEN pnl ELSE 0 END) as gross_profit,
+                    SUM(CASE WHEN pnl < 0 THEN ABS(pnl) ELSE 0 END) as gross_loss
+                FROM trades
+                GROUP BY strategy
+                HAVING trades >= 3
+            """)
+            
+            rows = cursor.fetchall()
+            conn.close()
+            
+            if not rows:
+                self.logger.debug(f"No sufficient data in {source_name} (need >= 3 trades per strategy)")
+                return False
+            
+            # Build strategy metrics
+            db_metrics = {}
+            for row in rows:
+                strategy, trades, win_rate, total_pnl, gross_profit, gross_loss = row
+                profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else 2.0 if gross_profit > 0 else 1.0
+                profit_factor = min(profit_factor, 5.0)  # Cap at reasonable level
+                
+                db_metrics[strategy] = {
+                    'total_trades': trades,
+                    'win_rate': win_rate or 0,
+                    'total_pnl': total_pnl or 0,
+                    'profit_factor': profit_factor,
+                    'expectancy': (total_pnl / trades) if trades > 0 else 0,
+                    'from_backtest': source_name == "backtest",
+                }
+            
+            if not db_metrics:
+                return False
+            
+            self.logger.info(f"🚀 Loading rankings from {source_name} ({len(db_metrics)} strategies)")
+            
+            # Calculate scores and create rankings
+            scored_strategies = []
+            for strategy_name in self._registered_strategies:
+                if strategy_name in db_metrics:
+                    metrics = db_metrics[strategy_name]
+                    score = self._calculate_composite_score(metrics, strategy_name)
+                    scored_strategies.append((strategy_name, score, metrics))
+                else:
+                    # Strategy not in database - give neutral score
+                    scored_strategies.append((strategy_name, 0.5, {}))
+            
+            # Sort by score (descending)
+            scored_strategies.sort(key=lambda x: x[1], reverse=True)
+            
+            # Create rankings
+            for rank, (strategy_name, score, metrics) in enumerate(scored_strategies, 1):
+                weight = max(0.1, min(1.0, score))
+                
+                self.strategy_rankings[strategy_name] = StrategyRanking(
+                    strategy_name=strategy_name,
+                    rank=rank,
+                    score=score,
+                    is_enabled=True,
+                    weight=weight,
+                    kelly_fraction=0.0,
+                    regime_affinity={},
+                    metrics=metrics,
+                )
+                
+                pnl_str = f"${metrics.get('total_pnl', 0):.2f}" if metrics else "N/A"
+                wr_str = f"{metrics.get('win_rate', 0):.1f}%" if metrics else "N/A"
+                pf_str = f"{metrics.get('profit_factor', 0):.2f}" if metrics else "N/A"
+                self.logger.info(f"  - {strategy_name}: weight={weight:.2f}, PnL={pnl_str}, WR={wr_str}, PF={pf_str}")
+            
+            return True
+            
+        except Exception as e:
+            self.logger.warning(f"Failed to load rankings from {source_name}: {e}")
+            return False
+
     
     def register_strategies(self, strategy_names: List[str]):
         """

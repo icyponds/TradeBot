@@ -206,3 +206,69 @@ class TestStrategyManager:
         
         # Should not call close
         strategy_manager.execution_engine.close_position.assert_not_called()
+
+    def test_run_trading_cycle_prioritizes_positions(self, strategy_manager):
+        """Test that symbols with open positions are analyzed first."""
+        # Setup: Track the order of symbol analysis
+        analyzed_symbols = []
+        original_analyze = strategy_manager._analyze_symbol
+        
+        def mock_analyze(symbol, **kwargs):
+            analyzed_symbols.append(symbol)
+        
+        strategy_manager._analyze_symbol = mock_analyze
+        strategy_manager.is_running = True
+        
+        # Setup positions for SOL and ETH
+        strategy_manager.execution_engine.positions = {
+            'SOL': MagicMock(strategy='csm_4h'),
+            'ETH': MagicMock(strategy='ou_mean_reversion_1h'),
+        }
+        
+        # Mock pair_selector to return mixed order (positions NOT first)
+        strategy_manager.pair_selector.get_current_pairs = MagicMock(
+            return_value=['BTC', 'SOL', 'DOGE', 'ETH', 'XRP']
+        )
+        
+        # Mock other dependencies to allow cycle to run
+        strategy_manager._maybe_update_regime_and_changepoint = MagicMock()
+        strategy_manager.sync_positions_with_exchange = MagicMock()
+        strategy_manager._check_liquidation_risks = MagicMock()
+        strategy_manager._monitor_and_close_positions = MagicMock()
+        strategy_manager._monitor_pending_orders = MagicMock()
+        strategy_manager._cleanup_stale_orders = MagicMock()
+        strategy_manager.correlation_manager = MagicMock()
+        strategy_manager.correlation_manager.should_update = MagicMock(return_value=False)
+        strategy_manager.update_position_prices = MagicMock()
+        strategy_manager.display_positions_pnl = MagicMock()
+        strategy_manager.last_position_sync = 0
+        strategy_manager.last_position_monitoring = 0
+        strategy_manager.last_performance_report = 0
+        
+        # Run the trading cycle
+        strategy_manager.run_trading_cycle()
+        
+        # Verify: Position symbols (SOL, ETH) should be in first two positions
+        assert set(analyzed_symbols[:2]) == {'SOL', 'ETH'}, \
+            f"Position symbols should be first, but got {analyzed_symbols}"
+        # Verify: Non-position symbols should follow
+        assert set(analyzed_symbols[2:]) == {'BTC', 'DOGE', 'XRP'}, \
+            f"Other symbols should follow, but got {analyzed_symbols}"
+
+    def test_count_positions_for_strategy(self, strategy_manager):
+        """Test that _count_positions_for_strategy correctly counts positions."""
+        # Setup positions with different strategies (use execution_engine.positions)
+        strategy_manager.execution_engine.positions = {
+            'SOL': MagicMock(strategy='csm_4h'),
+            'ETH': MagicMock(strategy='csm_4h'),
+            'BTC': MagicMock(strategy='ou_mean_reversion_1h'),
+            'DOGE': MagicMock(strategy='csm_4h'),
+            'XRP': MagicMock(strategy='vol_breakout_1h'),
+        }
+        
+        # Test counting
+        assert strategy_manager._count_positions_for_strategy('csm_4h') == 3
+        assert strategy_manager._count_positions_for_strategy('ou_mean_reversion_1h') == 1
+        assert strategy_manager._count_positions_for_strategy('vol_breakout_1h') == 1
+        assert strategy_manager._count_positions_for_strategy('nonexistent') == 0
+

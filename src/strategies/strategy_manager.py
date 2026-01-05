@@ -92,6 +92,10 @@ class StrategyManager:
         self.position_sync_interval = config['trading']['position_sync_interval']
         self.enable_position_validation = config['trading']['enable_position_validation']
         
+        # Per-strategy position limit (default 5)
+        self.max_positions_per_strategy = config['trading'].get('max_positions_per_strategy', 5)
+
+        
         # Trading pairs management
         self.max_pairs_to_trade = 20  # Default value, can be updated dynamically
         
@@ -924,12 +928,27 @@ class StrategyManager:
             
             self.logger.info(f"Analyzing {len(trading_pairs)} trading pairs")
             
-            # Analyze each symbol (per-symbol strategies)
-            for symbol in trading_pairs:
-                # Check running flag inside loop to support clean shutdown
+            # Prioritize symbols with open positions to ensure they get data
+            # before rate limits are exhausted during timeframe boundaries
+            position_symbols = set(self.positions.keys())
+            priority_symbols = [s for s in trading_pairs if s in position_symbols]
+            other_symbols = [s for s in trading_pairs if s not in position_symbols]
+            
+            if priority_symbols:
+                self.logger.info(f"Prioritizing {len(priority_symbols)} symbols with open positions: {priority_symbols}")
+            
+            # Process priority symbols first (positions need timely data for exits)
+            for symbol in priority_symbols:
                 if not self.is_running:
                     break
                 self._analyze_symbol(symbol, timestamp=current_datetime)
+            
+            # Then process other symbols
+            for symbol in other_symbols:
+                if not self.is_running:
+                    break
+                self._analyze_symbol(symbol, timestamp=current_datetime)
+
             
 
             
@@ -1573,6 +1592,13 @@ class StrategyManager:
         if not self._should_execute_with_position_limit(symbol, signal, signal_strength):
             return False
         
+        # Check per-strategy position limit
+        strategy_position_count = self._count_positions_for_strategy(strategy_name)
+        if strategy_position_count >= self.max_positions_per_strategy:
+            self.logger.info(f"⛔ {strategy_name} has {strategy_position_count} positions (limit: {self.max_positions_per_strategy}), skipping {symbol}")
+            return False
+
+        
         # Calculate dynamic leveraged position size
         available_capital = self.portfolio_manager.calculate_available_capital_for_trading()
         # Keep a reserve for exploration trades by sizing normal trades using reduced available capital
@@ -1617,7 +1643,33 @@ class StrategyManager:
         # Delegate to execution engine
         self.execution_engine.execute_trade(symbol, signal, current_price, strategy_name, ohlcv, self.strategies, timestamp=timestamp)
     
+    def _count_positions_for_strategy(self, strategy_name: str) -> int:
+        """
+        Count the number of open positions for a specific strategy.
+        
+        Args:
+            strategy_name: Name of the strategy to count positions for
+            
+        Returns:
+            Number of open positions opened by this strategy
+        """
+        count = 0
+        for symbol, pos in self.positions.items():
+            # Position might be a Position object or a dict
+            if hasattr(pos, 'strategy'):
+                pos_strategy = pos.strategy
+            elif isinstance(pos, dict):
+                pos_strategy = pos.get('strategy', '')
+            else:
+                pos_strategy = ''
+            
+            # Match exact strategy name
+            if pos_strategy == strategy_name:
+                count += 1
+        return count
+    
     def close_position(self, symbol: str, reason: str = "manual", timestamp: datetime = None) -> bool:
+
         """Close a position and record it."""
         return self.execution_engine.close_position(symbol, reason, timestamp=timestamp)
 
