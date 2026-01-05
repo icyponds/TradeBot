@@ -1105,37 +1105,69 @@ class HyperliquidAPI:
             return cached
         
         def _fetch():
+            # 1. Check Native Universe
             meta_and_ctxs = self.info.meta_and_asset_ctxs()
             
-            if len(meta_and_ctxs) < 2:
-                return None
-            
-            universe = meta_and_ctxs[0]['universe']
-            asset_contexts = meta_and_ctxs[1]
-            
-            for i, asset in enumerate(universe):
-                if asset.get('name') == symbol:
-                    ctx = asset_contexts[i] if i < len(asset_contexts) else {}
-                    
-                    market_data = {
-                        'symbol': symbol,
-                        'current_price': float(ctx.get('markPx', 0)),
-                        'bid': float(ctx.get('impactPxs', [0, 0])[0]) if ctx.get('impactPxs') else 0,
-                        'ask': float(ctx.get('impactPxs', [0, 0])[1]) if ctx.get('impactPxs') and len(ctx.get('impactPxs')) > 1 else 0,
-                        'volume_24h': float(ctx.get('dayNtlVlm', 0)),
-                        'open_interest': float(ctx.get('openInterest', 0)),
-                        'funding_rate': float(ctx.get('funding', 0)),
-                        'max_leverage': asset.get('maxLeverage', 0),
-                        'sz_decimals': asset.get('szDecimals', 0),
-                        'timestamp': datetime.now(),
-                    }
-                    
-                    self.cache.set(cache_key, market_data, ttl=self.cache_ttl_market_data)
-                    return market_data
-            
+            if len(meta_and_ctxs) >= 2:
+                universe = meta_and_ctxs[0]['universe']
+                asset_contexts = meta_and_ctxs[1]
+                
+                for i, asset in enumerate(universe):
+                    if asset.get('name') == symbol:
+                        ctx = asset_contexts[i] if i < len(asset_contexts) else {}
+                        return self._parse_market_ctx(symbol, asset, ctx)
+
+            # 2. If not found and HIP-3 enabled, check other Dexes
+            if self.hip3_enabled:
+                try:
+                    dexs = self.info.perp_dexs()
+                    # Skip first (Native)
+                    for dex in dexs[1:]:
+                        dex_name = dex.get('name')
+                        if not dex_name: continue
+                        
+                        # Optimization: If symbol structure implies dex (e.g. hyna:BTC), maybe strictly check that dex?
+                        # But for now, simple iteration.
+                        
+                        try:
+                            # Note: This is expensive if we have many dexes.
+                            # Ideally we cache which symbol is on which dex.
+                            res = self.info.post("/info", {"type": "metaAndAssetCtxs", "dex": dex_name})
+                            if res and len(res) >= 2:
+                                u_hip3 = res[0]['universe']
+                                c_hip3 = res[1]
+                                
+                                for i, asset in enumerate(u_hip3):
+                                    if asset.get('name') == symbol:
+                                        ctx = c_hip3[i] if i < len(c_hip3) else {}
+                                        return self._parse_market_ctx(symbol, asset, ctx)
+                        except Exception:
+                            continue
+                except Exception as e:
+                    self.logger.warning(f"HIP-3 lookup failed in get_market_data: {e}")
+
             return None
-        
-        return self._rate_limited_call(_fetch)
+            
+        result = self._rate_limited_call(_fetch)
+        if result:
+            self.cache.set(cache_key, result, ttl=self.cache_ttl_market_data)
+        return result
+    
+    def _parse_market_ctx(self, symbol: str, asset: dict, ctx: dict) -> Dict[str, Any]:
+        """Helper to parse raw asset context into standard dict."""
+        from datetime import datetime
+        return {
+            'symbol': symbol,
+            'current_price': float(ctx.get('markPx', 0)),
+            'bid': float(ctx.get('impactPxs', [0, 0])[0]) if ctx.get('impactPxs') else 0,
+            'ask': float(ctx.get('impactPxs', [0, 0])[1]) if ctx.get('impactPxs') and len(ctx.get('impactPxs')) > 1 else 0,
+            'volume_24h': float(ctx.get('dayNtlVlm', 0)),
+            'open_interest': float(ctx.get('openInterest', 0)),
+            'funding_rate': float(ctx.get('funding', 0)),
+            'max_leverage': asset.get('maxLeverage', 0),
+            'sz_decimals': asset.get('szDecimals', 0),
+            'timestamp': datetime.now(),
+        }
     
     @with_retry(max_attempts=3, base_delay=0.5)
     def get_asset_info(self) -> Optional[Dict[str, Any]]:
@@ -1279,7 +1311,32 @@ class HyperliquidAPI:
             
             # Full fetch (no cached data or cache error)
             start_time = end_time - (limit * interval_ms)
-            candles = self.info.candles_snapshot(api_symbol, timeframe, start_time, end_time)
+            
+            # Try using SDK wrapper first, fallback to direct call if symbol unknown (common for HIP-3)
+            candles = []
+            # Try using SDK wrapper first, fallback to direct call if symbol unknown (common for HIP-3)
+            candles = []
+            try:
+                # This uses info.name_to_coin map which might miss new HIP-3 assets
+                candles = self.info.candles_snapshot(api_symbol, timeframe, start_time, end_time)
+            except KeyError:
+                # Fallback: Symbol not in SDK map, try raw API call
+                # HIP-3 assets are often queryable by their name directly
+                try:
+                    req = {
+                        "coin": api_symbol, 
+                        "interval": timeframe, 
+                        "startTime": start_time, 
+                        "endTime": end_time
+                    }
+                    candles = self.info.post("/info", {"type": "candleSnapshot", "req": req})
+                except Exception as e_raw:
+                     self.logger.warning(f"Failed raw candle fetch for {api_symbol}: {e_raw}")
+                     return None
+            except Exception as e:
+                self.logger.error(f"Error fetching candles for {api_symbol}: {e}")
+                return None
+                
             if not candles:
                 return None
             
@@ -2759,54 +2816,81 @@ class HyperliquidAPI:
         """
         Get all perpetual assets across native and HIP-3.
         
-        Note: When Info is initialized with perp_dexs, HIP-3 assets are automatically
-        included in meta_and_asset_ctxs(). We identify them by checking the asset index
-        against the native asset count.
+        Fetches native assets via default endpoint, and iteratively fetches
+        HIP-3 assets from builder-deployed Dexes if enabled.
         """
         all_assets = []
         
         try:
-            # Get all assets (native + HIP-3 if perp_dexs was passed to Info)
+            # 1. Fetch Native Assets (Default Context)
             meta_and_ctxs = self.info.meta_and_asset_ctxs()
             
-            if len(meta_and_ctxs) < 2:
-                return all_assets
-            
-            universe = meta_and_ctxs[0].get('universe', [])
-            contexts = meta_and_ctxs[1]
-            
-            # Get native perp count from meta (if available)
-            # Assets beyond this index are HIP-3
-            native_count = len(universe)  # Default assume all native
-            
-            # Try to determine native vs HIP-3 boundary
-            # Native perps have '' as dex, HIP-3 have a dex name
-            for i, asset in enumerate(universe):
-                ctx = contexts[i] if i < len(contexts) else {}
+            if len(meta_and_ctxs) >= 2:
+                universe = meta_and_ctxs[0].get('universe', [])
+                contexts = meta_and_ctxs[1]
                 
-                # Check if this is a HIP-3 asset
-                # HIP-3 assets may have different structure or dex field
-                is_hip3 = asset.get('dex', '') != '' if 'dex' in asset else False
-                
-                # Skip HIP-3 if not requested
-                if is_hip3 and not include_hip3:
-                    continue
-                
-                # Skip HIP-3 if not enabled
-                if is_hip3 and not self.hip3_enabled:
-                    continue
-                
-                all_assets.append({
-                    'name': asset.get('name', ''),
-                    'dex': asset.get('dex', ''),
-                    'is_hip3': is_hip3,
-                    'maxLeverage': asset.get('maxLeverage', 0),
-                    'szDecimals': asset.get('szDecimals', 0),
-                    'openInterest': float(ctx.get('openInterest', 0)) * float(ctx.get('markPx', 0)) if ctx.get('markPx') else 0,
-                    'volume24h': float(ctx.get('dayNtlVlm', 0)),
-                    'markPrice': float(ctx.get('markPx', 0)) if ctx.get('markPx') else 0,
-                    'funding': float(ctx.get('funding', 0)),
-                })
+                for i, asset in enumerate(universe):
+                    ctx = contexts[i] if i < len(contexts) else {}
+                    # Native assets process as before
+                    all_assets.append({
+                        'name': asset.get('name', ''),
+                        'dex': '', # Native
+                        'is_hip3': False,
+                        'maxLeverage': asset.get('maxLeverage', 0),
+                        'szDecimals': asset.get('szDecimals', 0),
+                        'openInterest': float(ctx.get('openInterest', 0)) * float(ctx.get('markPx', 0)) if ctx.get('markPx') else 0,
+                        'volume24h': float(ctx.get('dayNtlVlm', 0)),
+                        'markPrice': float(ctx.get('markPx', 0)) if ctx.get('markPx') else 0,
+                        'funding': float(ctx.get('funding', 0)),
+                    })
+
+            # 2. Fetch HIP-3 Assets if requested and enabled
+            if include_hip3 and self.hip3_enabled:
+                try:
+                    # Discover all Dexes
+                    dex_list = self.info.perp_dexs()
+                    
+                    for dex_obj in dex_list:
+                        # Ensure it's a dict and has a name
+                        if not isinstance(dex_obj, dict):
+                            continue
+                            
+                        dex_name = dex_obj.get('name', '')
+                        # Skip Native (empty name) or if name is missing
+                        if not dex_name:
+                            continue
+                            
+                        # Fetch context for this specific Dex
+                        try:
+                            # Use Info's internal post method to reuse config/session
+                            # Payload must match what verified script used: {"dex": "name"}
+                            dex_meta_ctx = self.info.post("/info", {"type": "metaAndAssetCtxs", "dex": dex_name})
+                            
+                            if len(dex_meta_ctx) >= 2:
+                                d_universe = dex_meta_ctx[0].get('universe', [])
+                                d_contexts = dex_meta_ctx[1]
+                                
+                                for i, asset in enumerate(d_universe):
+                                    ctx = d_contexts[i] if i < len(d_contexts) else {}
+                                    
+                                    all_assets.append({
+                                        'name': asset.get('name', ''),
+                                        'dex': dex_name, # Specific Dex Name
+                                        'is_hip3': True,
+                                        'maxLeverage': asset.get('maxLeverage', 0),
+                                        'szDecimals': asset.get('szDecimals', 0),
+                                        'openInterest': float(ctx.get('openInterest', 0)) * float(ctx.get('markPx', 0)) if ctx.get('markPx') else 0,
+                                        'volume24h': float(ctx.get('dayNtlVlm', 0)),
+                                        'markPrice': float(ctx.get('markPx', 0)) if ctx.get('markPx') else 0,
+                                        'funding': float(ctx.get('funding', 0)),
+                                    })
+                                    
+                        except Exception as e:
+                            # Log warning but continue to next Dex
+                            self.logger.warning(f"Failed to fetch HIP-3 Dex '{dex_name}': {e}")
+                            
+                except Exception as e:
+                    self.logger.error(f"Error discovering/fetching HIP-3 Dexes: {e}")
                 
         except Exception as e:
             self.logger.error(f"Error fetching all perp assets: {e}")
