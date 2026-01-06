@@ -502,7 +502,9 @@ class ExecutionEngine:
                     if is_atomic: self.unwind_executed_legs(executed_legs)
                     return
                 
-                leg_size = notional_value / leg_price
+                # Respect per-leg hedge_ratio for proportional sizing
+                leg_hedge_ratio = leg_spec.get('hedge_ratio', 1.0)
+                leg_size = (notional_value * leg_hedge_ratio) / leg_price
                 
                 result = self.market_api.execute_order(
                     symbol=leg_symbol,
@@ -663,20 +665,50 @@ class ExecutionEngine:
             self.logger.error(f"Error executing multi-leg exit: {e}")
 
     def unwind_executed_legs(self, executed_legs: List[PositionLeg]):
-        """Unwind executed legs."""
+        """
+        Unwind executed legs with escalating slippage to ensure no stranded positions.
+        
+        Escalation: high urgency -> 500bps -> 1000bps -> 2000bps -> direct close
+        """
+        import time
+        
+        escalation_levels = [
+            {'urgency': 'high', 'slippage_bps': None, 'delay': 0.5},
+            {'urgency': 'high', 'slippage_bps': 500, 'delay': 1.0},
+            {'urgency': 'high', 'slippage_bps': 1000, 'delay': 1.5},
+            {'urgency': 'high', 'slippage_bps': 2000, 'delay': 2.0},
+        ]
+        
         for leg in executed_legs:
-            try:
-                unwind_side = 'sell' if leg.side == 'long' else 'buy'
-                self.market_api.execute_order(
-                    symbol=leg.symbol,
-                    side=unwind_side,
-                    size=leg.size,
-                    reduce_only=leg.market_type == 'perp',
-                    urgency='high',
-                    market_type=leg.market_type
-                )
-            except Exception as e:
-                self.logger.error(f"Error unwinding leg {leg.symbol}: {e}")
+            unwind_side = 'sell' if leg.side == 'long' else 'buy'
+            unwound = False
+            
+            for level_idx, level in enumerate(escalation_levels):
+                try:
+                    self.logger.info(f"Unwind attempt {level_idx + 1}/{len(escalation_levels)} for {leg.symbol}")
+                    
+                    result = self.market_api.execute_order(
+                        symbol=leg.symbol,
+                        side=unwind_side,
+                        size=leg.size,
+                        reduce_only=leg.market_type == 'perp',
+                        urgency=level['urgency'],
+                        market_type=leg.market_type,
+                        max_slippage_bps=level['slippage_bps'],
+                    )
+                    
+                    if result and result.get('filled_size', 0) > 0:
+                        self.logger.info(f"✅ Unwound leg {leg.symbol}")
+                        unwound = True
+                        break
+                except Exception as e:
+                    self.logger.warning(f"Unwind attempt {level_idx + 1} failed: {e}")
+                
+                if level_idx < len(escalation_levels) - 1:
+                    time.sleep(level['delay'])
+            
+            if not unwound:
+                self.logger.critical(f"❌ STRANDED POSITION: {leg.symbol} {leg.side} {leg.size}")
 
     def get_leg_price(self, symbol: str, market_type: str) -> Optional[float]:
         """Get price for a leg."""
