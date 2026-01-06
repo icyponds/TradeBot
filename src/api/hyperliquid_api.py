@@ -1687,7 +1687,8 @@ class HyperliquidAPI:
             return {
                 'account_value': float(margin_summary.get('accountValue', 0)),
                 'total_margin_used': float(margin_summary.get('totalMarginUsed', 0)),
-                'withdrawable': float(margin_summary.get('withdrawable', 0)),
+                # Fallback to account_value - margin_used if withdrawable (or similar key) is missing
+                'withdrawable': float(margin_summary.get('withdrawable', float(margin_summary.get('accountValue', 0)) - float(margin_summary.get('totalMarginUsed', 0)))),
                 'total_ntl_pos': float(margin_summary.get('totalNtlPos', 0)),
                 'unrealized_pnl': float(margin_summary.get('totalUnrealizedPnl', 0)),
             }
@@ -1712,11 +1713,13 @@ class HyperliquidAPI:
             return False
         
         try:
-            self.logger.info(f"Transferring ${amount:.2f} USDC from spot to perp")
+            # Round to 6 decimals (USDC precision) to avoid API errors
+            amount = round(amount, 6)
+            self.logger.info(f"Transferring ${amount:.6f} USDC from spot to perp")
             result = self.exchange.usd_class_transfer(amount, to_perp=True)
             
             if result.get('status') == 'ok':
-                self.logger.info(f"Successfully transferred ${amount:.2f} to perp account")
+                self.logger.info(f"Successfully transferred ${amount:.6f} to perp account")
                 # Invalidate cache
                 self.cache.invalidate("account_balance")
                 return True
@@ -1745,7 +1748,9 @@ class HyperliquidAPI:
             return False
         
         try:
-            self.logger.info(f"Transferring ${amount:.2f} USDC from perp to spot")
+            # Round to 6 decimals (USDC precision) to avoid API errors
+            amount = round(amount, 6)
+            self.logger.info(f"Transferring ${amount:.6f} USDC from perp to spot")
             result = self.exchange.usd_class_transfer(amount, to_perp=False)
             
             if result.get('status') == 'ok':
@@ -2968,26 +2973,20 @@ class HyperliquidAPI:
                                         'funding': float(ctx.get('funding', 0)),
                                     })
 
-                                    # [HIP-3 FIX] Update SDK Exchange maps
-                                    # The SDK Exchange client may not have this asset in its map if
-                                    # meta_and_asset_ctxs() didn't return it. We manually inject it.
-                                    if self.exchange:
+                                    # [HIP-3 FIX] Update SDK Exchange maps (via Info)
+                                    # The SDK Exchange client relies on its internal Info object for mappings.
+                                    if self.exchange and hasattr(self.exchange, 'info'):
                                         coin_name = asset.get('name', '')
                                         if coin_name:
-                                            # Copy asset info (contains szDecimals, maxLeverage, etc.)
-                                            # Ensure we don't overwrite if existing (though native shouldn't overlap)
-                                            if coin_name not in self.exchange.name_to_coin:
-                                                self.exchange.name_to_coin[coin_name] = asset
-                                                self.logger.debug(f"[HIP-3] Added {coin_name} to Exchange.name_to_coin")
+                                            # Update name_to_coin
+                                            if coin_name not in self.exchange.info.name_to_coin:
+                                                self.exchange.info.name_to_coin[coin_name] = asset
+                                                self.logger.debug(f"[HIP-3] Added {coin_name} to Exchange.info.name_to_coin")
                                             
                                             # Update coin_to_asset if ID is present
-                                            # Note: Different DEXs can have assets with same indices but different IDs?
-                                            # We rely on 'universe' providing global IDs if they are present there.
-                                            # If not, we might be missing the ID required for signing.
-                                            # For now, we just map name -> ID if 'assetId' exists in the object.
-                                            if 'assetId' in asset and coin_name not in self.exchange.coin_to_asset:
-                                                self.exchange.coin_to_asset[coin_name] = asset['assetId']
-                                                self.logger.debug(f"[HIP-3] Added {coin_name} -> ID {asset['assetId']} to Exchange.coin_to_asset")
+                                            if 'assetId' in asset and coin_name not in self.exchange.info.coin_to_asset:
+                                                self.exchange.info.coin_to_asset[coin_name] = asset['assetId']
+                                                self.logger.debug(f"[HIP-3] Added {coin_name} -> ID {asset['assetId']} to Exchange.info.coin_to_asset")
                                     
                         except Exception as e:
                             # Log warning but continue to next Dex

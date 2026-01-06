@@ -201,6 +201,7 @@ class StatisticalArbitrageStrategy(BaseStrategy):
         is_entry = "Stat Arb Entry:" in reason
         return {
             'signal': signal,
+            'signal_type': 'multi_leg',
             'reason': reason,
             'price': current_price_a,
             'strategy': 'stat_arb',
@@ -211,6 +212,9 @@ class StatisticalArbitrageStrategy(BaseStrategy):
             'spread': spread.iloc[-1],
             'pair_price': current_price_b,
         }
+
+    # Alias to match StrategyManager call signature
+    generate_signal_with_symbol = generate_signal
 
     def _get_hedge_ratio(self, symbol_a: str, symbol_b: str, 
                         prices_a: pd.Series, prices_b: pd.Series) -> float:

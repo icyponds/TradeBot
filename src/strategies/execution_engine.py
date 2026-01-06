@@ -570,11 +570,26 @@ class ExecutionEngine:
                 )
                 
                 if result:
+                    # Get fee from result, falling back to 0.0
+                    fee = float(result.get('fee', result.get('total_fee', 0.0)))
+                    
+                    # If fee is 0 or missing, try to fetch it authoritatively
+                    if fee == 0.0 and result.get('order_id'):
+                        try:
+                            # Wait a brief moment for fill to index
+                            time.sleep(0.5)
+                            fetched_fee = self.market_api.get_execution_fee(result['order_id'])
+                            if fetched_fee > 0:
+                                fee = fetched_fee
+                                self.logger.info(f"Retrieved authoritative fee for multi-leg exit {leg.symbol}: {fee}")
+                        except Exception as e:
+                            self.logger.warning(f"Failed to fetch fee for multi-leg exit {leg.symbol}: {e}")
+
                     exit_results.append({
                         'leg': leg,
                         'exit_price': result['avg_fill_price'],
                         'filled_size': result['filled_size'],
-                        'fee': result.get('total_fee', 0.0)
+                        'fee': fee
                     })
             
             # Calculate P&L and total fees

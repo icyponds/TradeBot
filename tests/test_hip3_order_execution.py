@@ -38,11 +38,11 @@ class TestHIP3OrderExecution(unittest.TestCase):
         # Initialize API
         api = HyperliquidAPI(self.config)
         
-        # Mock exchange internal maps (initially empty or just native)
-        # Note: We rely on the SDK implementation details here, which we are patching.
-        # In the real SDK, these are name_to_coin, coin_to_asset, etc.
-        api.exchange.name_to_coin = {'BTC': {'name': 'BTC', 'assetId': 0}}
-        api.exchange.coin_to_asset = {'BTC': 0}
+        # Mock exchange internal maps (via info)
+        # The SDK Exchange client relies on its internal Info object for mappings.
+        api.exchange.info = MagicMock()
+        api.exchange.info.name_to_coin = {'BTC': {'name': 'BTC', 'assetId': 0}}
+        api.exchange.info.coin_to_asset = {'BTC': 0}
         
         # --- PHASE 2: Discover HIP-3 Asset ---
         
@@ -52,7 +52,7 @@ class TestHIP3OrderExecution(unittest.TestCase):
         # Mock post response for the HIP-3 Dex
         # Note: This is what get_all_perp_assets calls
         mock_info.post.return_value = (
-            {'universe': [{'name': 'HYPE', 'szDecimals': 2, 'maxLeverage': 5}]},
+            {'universe': [{'name': 'HYPE', 'assetId': 12345, 'szDecimals': 2, 'maxLeverage': 5}]},
             [{'markPx': '10', 'openInterest': '1000'}]
         )
         
@@ -65,9 +65,9 @@ class TestHIP3OrderExecution(unittest.TestCase):
         self.assertTrue(hype_asset['is_hip3'], "Should be marked as HIP-3")
         
         # --- VERIFICATION ---
-        # The Exchange object should now know about 'HYPE'
-        # This is the assertion that currently FAILS (Reproduction)
-        self.assertIn('HYPE', api.exchange.name_to_coin, "Exchange should know about HYPE")
+        # The Exchange.info object should now know about 'HYPE'
+        self.assertIn('HYPE', api.exchange.info.name_to_coin, "Exchange.info should know about HYPE")
+        self.assertEqual(api.exchange.info.coin_to_asset['HYPE'], 12345, "Exchange.info should map HYPE to AssetID")
         
         # Also simulate execute_order checking for it
         # We'll mock _resolve_market_info which calls get_current_price -> needs asset info
