@@ -708,6 +708,29 @@ class ExecutionEngine:
                     time.sleep(level['delay'])
             
             if not unwound:
+                # Final fallback: try direct API close if exchange supports it
+                self.logger.critical(
+                    f"❌ CRITICAL: All unwind attempts failed for {leg.symbol}. "
+                    f"Attempting direct exchange position close..."
+                )
+                try:
+                    # Try market close via SDK directly
+                    if hasattr(self.market_api, 'exchange') and self.market_api.exchange:
+                        # Fallback to direct SDK usage with 50% slippage tolerance
+                        close_result = self.market_api.exchange.market_close(
+                            leg.symbol, 
+                            sz=leg.size, 
+                            px=None, 
+                            slippage=0.5 
+                        )
+                        
+                        if close_result and close_result.get('status') == 'ok':
+                            self.logger.info(f"✅ Direct exchange close succeeded for {leg.symbol}")
+                            unwound = True
+                except Exception as e:
+                    self.logger.critical(f"Direct exchange close also failed for {leg.symbol}: {e}")
+
+            if not unwound:
                 self.logger.critical(f"❌ STRANDED POSITION: {leg.symbol} {leg.side} {leg.size}")
 
     def get_leg_price(self, symbol: str, market_type: str) -> Optional[float]:
