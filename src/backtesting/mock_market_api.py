@@ -28,10 +28,30 @@ class MockMarketAPI:
         # Trading State
         self.orders = {}  # order_id -> order_dict
         self.positions = {}  # symbol -> position_dict
-        self.balances = {'USDC': 10000.0, 'ETH': 0.0} # Spot wallet
+        self.balances = {'USDC': 10000.0} # Spot wallet
+        
+        # Populate initial balances for all potential spot assets to verify shorting logic
+        # In a real scenario, you'd need to own the asset or borrow. 
+        # For backtesting StatArb/Arbitrage that implies holding spot, we grant initial inventory.
+        for symbol in self.historical_data.keys():
+            if symbol.endswith('_SPOT'):
+                asset = symbol.replace('_SPOT', '')
+                self.balances[asset] = 1000.0  # Give 1000 units of every spot asset
+                
         self.perp_balance = {'withdrawable': 50000.0, 'margin_used': 0.0} # Perp wallet
         
         self.order_id_counter = 0
+
+    def get_spot_token_for_perp(self, symbol: str) -> Optional[str]:
+        """Mock mapping from perp to spot token."""
+        # Simple identity mapping for mock
+        return symbol
+
+    def get_spot_price(self, token: str, quote: str = 'USDC') -> Optional[float]:
+        """Get spot price for token/quote."""
+        # Construct expected spot symbol key in historical data
+        spot_symbol = f"{token}_SPOT"
+        return self.get_current_price(spot_symbol)
 
 
         # WebSocket Subscription State (Mock)
