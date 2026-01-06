@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 
 from .base_strategy import BaseStrategy
 from ..utils.kalman_filter import KalmanFilter1D
+from src.utils.statistics import hurst_exponent
 
 
 class StatisticalArbitrageStrategy(BaseStrategy):
@@ -171,7 +172,7 @@ class StatisticalArbitrageStrategy(BaseStrategy):
         else:
             # Check for entry signal
             # Additional Filter: Hurst Exponent Check
-            hurst = self._calculate_hurst_exponent(spread)
+            hurst = hurst_exponent(spread)
             if hurst >= 0.5:
                 # Spread is random walk (0.5) or trending (>0.5) - NOT SAFE for mean reversion
                 return None
@@ -268,21 +269,7 @@ class StatisticalArbitrageStrategy(BaseStrategy):
             return 0.0
         return (current_spread - current_mean) / current_std
 
-    def _calculate_hurst_exponent(self, ts: pd.Series) -> float:
-        """Calculate the Hurst Exponent of a time series."""
-        try:
-            ts = ts.values
-            if len(ts) < 20:
-                return 0.5
-            lags = range(2, 20)
-            tau = []
-            for lag in lags:
-                diff = np.subtract(ts[lag:], ts[:-lag])
-                tau.append(np.std(diff))
-            m = np.polyfit(np.log(lags), np.log(tau), 1)
-            return m[0]
-        except Exception:
-            return 0.5
+
 
     def get_active_spreads_summary(self) -> Dict[str, Any]:
         """Get summary of active spread positions."""

@@ -17,6 +17,7 @@ from typing import Dict, Any, Optional, Tuple
 import pandas as pd
 import numpy as np
 from .base_strategy import BaseStrategy
+from src.utils.statistics import calculate_atr, calculate_adx
 
 class AdaptiveGridStrategy(BaseStrategy):
     """
@@ -78,11 +79,13 @@ class AdaptiveGridStrategy(BaseStrategy):
         current_ema = ema.iloc[-1]
         
         # 2. Calculate Volatility (ATR)
-        atr = self._calculate_atr(highs, lows, closes)
+        # 2. Calculate Volatility (ATR)
+        atr = calculate_atr(highs, lows, closes, self.atr_period)
         current_atr = atr.iloc[-1]
         
         # 3. Checker Regime (ADX)
-        adx = self._calculate_adx(highs, lows, closes)
+        # 3. Checker Regime (ADX)
+        adx = calculate_adx(highs, lows, closes)
         current_adx = adx.iloc[-1]
         
         # REGIME GATING: If ADX > Threshold, trend is too strong for Mean Reversion grid
@@ -132,50 +135,7 @@ class AdaptiveGridStrategy(BaseStrategy):
             'adx': current_adx
         }
 
-    def _calculate_atr(self, high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
-        """Calculate ATR."""
-        tr1 = high - low
-        tr2 = abs(high - close.shift())
-        tr3 = abs(low - close.shift())
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        return tr.rolling(window=self.atr_period).mean()
 
-    def _calculate_adx(self, high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
-        """Calculate ADX (Average Directional Index)."""
-        # +DM, -DM
-        up = high - high.shift(1)
-        down = low.shift(1) - low
-        
-        plus_dm = np.where((up > down) & (up > 0), up, 0.0)
-        minus_dm = np.where((down > up) & (down > 0), down, 0.0)
-        
-        plus_dm = pd.Series(plus_dm, index=high.index)
-        minus_dm = pd.Series(minus_dm, index=high.index)
-        
-        # TR
-        tr1 = high - low
-        tr2 = abs(high - close.shift(1))
-        tr3 = abs(low - close.shift(1))
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        
-        # Smooth (Wilder's)
-        # Using EWM with com = period - 1 to approximate Wilder's MMA
-        tr_smooth = tr.ewm(com=period-1, min_periods=period).mean()
-        plus_dm_smooth = plus_dm.ewm(com=period-1, min_periods=period).mean()
-        minus_dm_smooth = minus_dm.ewm(com=period-1, min_periods=period).mean()
-        
-        # +DI, -DI
-        plus_di = 100 * (plus_dm_smooth / tr_smooth)
-        minus_di = 100 * (minus_dm_smooth / tr_smooth)
-        
-        # DX
-        sum_di = plus_di + minus_di
-        dx = 100 * abs(plus_di - minus_di) / sum_di
-        
-        # ADX
-        adx = dx.ewm(com=period-1, min_periods=period).mean()
-        
-        return adx
 
     def calculate_take_profit(self, entry_price: float, side: str, ohlcv: Dict[str, pd.DataFrame] = None,
                              signal_strength: float = 1.0, market_volatility: float = 1.0) -> float:
@@ -193,11 +153,7 @@ class AdaptiveGridStrategy(BaseStrategy):
                     high = tf_data['high']
                     low = tf_data['low']
                     close = tf_data['close']
-                    tr1 = high - low
-                    tr2 = abs(high - close.shift())
-                    tr3 = abs(low - close.shift())
-                    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-                    current_atr = tr.rolling(window=14).mean().iloc[-1]
+                    current_atr = calculate_atr(high, low, close, 14).iloc[-1]
                     
                     # Target 1.0 ATR profit
                     tp_dist = current_atr

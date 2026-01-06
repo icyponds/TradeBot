@@ -17,6 +17,7 @@ from typing import Dict, Any, Optional, Tuple, List
 import pandas as pd
 import numpy as np
 from .base_strategy import BaseStrategy
+from src.utils.statistics import hurst_exponent, calculate_atr, calculate_bollinger_bands
 
 class VolatilityBreakoutStrategy(BaseStrategy):
     """
@@ -81,7 +82,7 @@ class VolatilityBreakoutStrategy(BaseStrategy):
         current_price = closes.iloc[-1]
         
         # 1. Calculate Bollinger Bands
-        bb_upper, bb_middle, bb_lower = self._calculate_bollinger_bands(closes)
+        bb_upper, bb_middle, bb_lower = calculate_bollinger_bands(closes, self.bb_length, self.bb_std)
         
         # 2. Calculate Bandwidth
         # Bandwidth = (Upper - Lower) / Middle
@@ -107,7 +108,7 @@ class VolatilityBreakoutStrategy(BaseStrategy):
         # 5. Regime Filter: Hurst Exponent (Trend Checking)
         # We only want to enter breakouts if the market is in a Trending Regime (H > 0.5)
         # Calculating on closing prices
-        hurst = self._calculate_hurst_exponent(closes)
+        hurst = hurst_exponent(closes)
         valid_regime = hurst > 0.5
         
         signal = 'hold'
@@ -125,7 +126,7 @@ class VolatilityBreakoutStrategy(BaseStrategy):
             return None
             
         # Calculate ATR for dynamic stops
-        atr = self._calculate_atr(highs, lows, closes)
+        atr = calculate_atr(highs, lows, closes, self.atr_length)
         current_atr = atr.iloc[-1]
         
         return {
@@ -138,55 +139,7 @@ class VolatilityBreakoutStrategy(BaseStrategy):
             'hurst': hurst
         }
 
-    def _calculate_hurst_exponent(self, ts: pd.Series) -> float:
-        """
-        Calculate the Hurst Exponent of a time series (R/S Analysis).
-        
-        H < 0.5: Mean reverting
-        H = 0.5: Random walk
-        H > 0.5: Trending
-        """
-        try:
-            ts = ts.values
-            if len(ts) < 100:
-                # Need sufficient data for Hurst
-                return 0.5
-                
-            lags = range(2, 20)
-            tau = []
-            
-            # Calculate standard deviation of differences
-            for lag in lags:
-                # Difference between t and t-lag
-                diff = np.subtract(ts[lag:], ts[:-lag])
-                tau.append(np.std(diff))
-            
-            # Fit line to log-log plot to get H (slope)
-            # log(std(diff)) = H * log(lag) + C
-            m = np.polyfit(np.log(lags), np.log(tau), 1)
-            hurst = m[0]
-            
-            return hurst
-            
-        except Exception:
-            # Fallback
-            return 0.5
 
-    def _calculate_bollinger_bands(self, series: pd.Series) -> Tuple[pd.Series, pd.Series, pd.Series]:
-        """Calculate Bollinger Bands."""
-        middle = series.rolling(window=self.bb_length).mean()
-        std = series.rolling(window=self.bb_length).std()
-        upper = middle + (self.bb_std * std)
-        lower = middle - (self.bb_std * std)
-        return upper, middle, lower
-
-    def _calculate_atr(self, high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
-        """Calculate ATR."""
-        tr1 = high - low
-        tr2 = abs(high - close.shift())
-        tr3 = abs(low - close.shift())
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        return tr.rolling(window=self.atr_length).mean()
 
     def calculate_stop_loss(self, entry_price: float, side: str, 
                            signal_context: Dict[str, Any] = None) -> float:

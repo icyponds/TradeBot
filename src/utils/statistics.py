@@ -146,3 +146,93 @@ def hurst_exponent(ts: Union[pd.Series, np.ndarray]) -> float:
         return m[0]
     except:
         return 0.5
+
+def calculate_atr(high: pd.Series, low: pd.Series, close: pd.Series, length: int = 14) -> pd.Series:
+    """
+    Calculate Average True Range (ATR).
+    
+    Args:
+        high: High price series
+        low: Low price series
+        close: Close price series
+        length: Window length (default 14)
+        
+    Returns:
+        ATR series
+    """
+    tr1 = high - low
+    tr2 = abs(high - close.shift())
+    tr3 = abs(low - close.shift())
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    return tr.rolling(window=length).mean()
+
+def calculate_bollinger_bands(series: pd.Series, length: int = 20, std: float = 2.0) -> Tuple[pd.Series, pd.Series, pd.Series]:
+    """
+    Calculate Bollinger Bands.
+    
+    Args:
+        series: Price series
+        length: Rolling window length (default 20)
+        std: Standard deviations (default 2.0)
+        
+    Returns:
+        Tuple of (upper, middle, lower) series
+    """
+    middle = series.rolling(window=length).mean()
+    std_dev = series.rolling(window=length).std()
+    upper = middle + (std * std_dev)
+    lower = middle - (std * std_dev)
+    return upper, middle, lower
+
+def calculate_adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
+    """
+    Calculate ADX (Average Directional Index).
+    
+    Args:
+        high: High price series
+        low: Low price series
+        close: Close price series
+        period: Smoothing period (default 14)
+        
+    Returns:
+        ADX series
+    """
+    # +DM, -DM
+    up = high - high.shift(1)
+    down = low.shift(1) - low
+    
+    plus_dm = np.where((up > down) & (up > 0), up, 0.0)
+    minus_dm = np.where((down > up) & (down > 0), down, 0.0)
+    
+    plus_dm = pd.Series(plus_dm, index=high.index)
+    minus_dm = pd.Series(minus_dm, index=high.index)
+    
+    # TR (using simplified calc reused from ATR logic internal or just inline)
+    # Using inline to be self-contained or call calculate_atr if we wanted TR.. 
+    # But ADX typically uses smoothed TR
+    tr1 = high - low
+    tr2 = abs(high - close.shift(1))
+    tr3 = abs(low - close.shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    
+    # Smooth (Wilder's)
+    # Using EWM with com = period - 1 to approximate Wilder's MMA
+    tr_smooth = tr.ewm(com=period-1, min_periods=period).mean()
+    plus_dm_smooth = plus_dm.ewm(com=period-1, min_periods=period).mean()
+    minus_dm_smooth = minus_dm.ewm(com=period-1, min_periods=period).mean()
+    
+    # Handle division by zero
+    tr_smooth = tr_smooth.replace(0, np.nan)
+    
+    # +DI, -DI
+    plus_di = 100 * (plus_dm_smooth / tr_smooth)
+    minus_di = 100 * (minus_dm_smooth / tr_smooth)
+    
+    # DX
+    sum_di = plus_di + minus_di
+    dx = 100 * abs(plus_di - minus_di) / sum_di
+    
+    # ADX
+    adx = dx.ewm(com=period-1, min_periods=period).mean()
+    
+    return adx
