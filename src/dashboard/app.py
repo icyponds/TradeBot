@@ -282,13 +282,31 @@ def _format_multi_leg_position(multi_pos) -> Dict[str, Any]:
     hours = holding_time.total_seconds() / 3600
     
     legs_data = []
+    total_net_pnl = 0.0
+    
     for leg in multi_pos.legs:
+        # Get current price
+        current_price = _get_leg_current_price(leg.symbol, leg.market_type)
+        
+        # Calculate leg PnL
+        leg_pnl = 0.0
+        if current_price:
+            if leg.side == 'long':
+                leg_pnl = (current_price - leg.entry_price) * leg.size
+            else:
+                leg_pnl = (leg.entry_price - current_price) * leg.size
+        
+        total_net_pnl += leg_pnl
+        
         legs_data.append({
             'symbol': leg.symbol,
             'market_type': leg.market_type,
             'side': leg.side,
             'size': leg.size,
             'entry_price': leg.entry_price,
+            'current_price': current_price,
+            'unrealized_pnl': leg_pnl,
+            'is_spot': leg.market_type == 'spot',
         })
     
     # Get metadata (funding rate info, etc.)
@@ -305,7 +323,8 @@ def _format_multi_leg_position(multi_pos) -> Dict[str, Any]:
         'leg_count': len(legs_data),
         'net_delta': multi_pos.net_delta,
         'capital_at_risk': multi_pos.capital_at_risk,
-        'unrealized_pnl': metadata.get('unrealized_pnl'),
+        # Prefer calculated net PnL, fallback to metadata
+        'unrealized_pnl': total_net_pnl if total_net_pnl != 0 else metadata.get('unrealized_pnl'),
         'funding_collected': metadata.get('funding_collected', 0),
         'entry_funding_rate': metadata.get('entry_funding_rate'),
         'current_funding_rate': metadata.get('current_funding_rate'),
@@ -436,6 +455,34 @@ def _calculate_pnl(pos: Dict) -> Optional[float]:
         return (current - entry) * size
     else:
         return (entry - current) * size
+
+
+def _get_leg_current_price(symbol: str, market_type: str) -> Optional[float]:
+    """Get current price for a leg, handling spot vs perp."""
+    if _market_api is None:
+        return None
+        
+    try:
+        if market_type == 'spot':
+            # For spot, we need the API name (e.g. @109) or get_spot_token_for_perp if we only have base
+            # If symbol contains '/', split it.
+            base = symbol.split('/')[0] if '/' in symbol else symbol
+            
+            # Try getting spot API name
+            spot_api_name = _market_api.get_spot_api_name(base)
+            if spot_api_name:
+                return _market_api.get_current_price(spot_api_name)
+            
+            # Fallback: try raw symbol or exchange method if available
+            return _market_api.get_current_price(symbol)
+            
+        else:
+            # Perp/Hip3
+            return _market_api.get_current_price(symbol)
+            
+    except Exception as e:
+        logger.debug(f"Error getting price for {symbol}: {e}")
+        return None
 
 
 def _calculate_pnl_pct(pos: Dict) -> Optional[float]:
