@@ -226,40 +226,40 @@ def load_config() -> Dict[str, Any]:
             "instances": [
                 # Parallel Strategy Execution:
                 # We run multiple instances of the same strategy on different timeframes.
-                # The StrategySelector will dynamically weight these based on live performance,
-                # effectively finding the "best" timeframe for current market conditions.
+                # The StrategySelector will dynamically weight these based on live performance.
 
-                # Statistical Arbitrage (15m vs 1h)
-                # NOTE: stat_arb_15m is disabled by default; set ENABLE_STAT_ARB_15M=true to include it.
-                *(
-                    [{"type": "stat_arb", "name": "stat_arb_15m", "timeframe": "15m"}]
-                    if enable_stat_arb_15m
-                    else []
-                ),
+                # Statistical Arbitrage (15m, 1h, 4h)
+                {"type": "stat_arb", "name": "stat_arb_15m", "timeframe": "15m"},
                 {"type": "stat_arb", "name": "stat_arb_1h",  "timeframe": "1h"},
                 {"type": "stat_arb", "name": "stat_arb_4h",  "timeframe": "4h"},
 
-                # OU Mean Reversion (15m vs 1h)
+                # OU Mean Reversion (15m, 1h, 4h)
                 {"type": "ou_mean_reversion", "name": "ou_mean_reversion_15m", "timeframe": "15m"},
                 {"type": "ou_mean_reversion", "name": "ou_mean_reversion_1h",  "timeframe": "1h"},
+                {"type": "ou_mean_reversion", "name": "ou_mean_reversion_4h",  "timeframe": "4h"},
                 
-                # Funding Rate Arb (1h) - strictly optimal at 1h (8h funding / 8)
-                # [DISABLED] for current backtesting session
-                # {"type": "funding_rate_arbitrage", "name": "funding_arb_1h", "timeframe": "1h"},
-                
-                # Volatility Breakout (1h)
+                # Volatility Breakout (15m, 1h, 4h)
+                {"type": "volatility_breakout", "name": "vol_breakout_15m", "timeframe": "15m"},
                 {"type": "volatility_breakout", "name": "vol_breakout_1h", "timeframe": "1h"},
+                {"type": "volatility_breakout", "name": "vol_breakout_4h", "timeframe": "4h"},
                 
-                # Adaptive Grid (15m)
+                # Adaptive Grid (15m, 1h, 4h)
                 {"type": "adaptive_grid", "name": "adaptive_grid_15m", "timeframe": "15m"},
+                {"type": "adaptive_grid", "name": "adaptive_grid_1h", "timeframe": "1h"},
+                {"type": "adaptive_grid", "name": "adaptive_grid_4h", "timeframe": "4h"},
                 
-                # Sentiment ML (1h)
+                # Sentiment ML (15m, 1h, 4h)
+                {"type": "sentiment_ml", "name": "sentiment_ml_15m", "timeframe": "15m"},
                 {"type": "sentiment_ml", "name": "sentiment_ml_1h", "timeframe": "1h"},
+                {"type": "sentiment_ml", "name": "sentiment_ml_4h", "timeframe": "4h"},
                 
-                # Liquidation Hunter (5m)
+                # Liquidation Hunter (5m, 15m, 1h)
                 {"type": "liquidation_hunter", "name": "liquidation_hunter_5m", "timeframe": "5m"},
+                {"type": "liquidation_hunter", "name": "liquidation_hunter_15m", "timeframe": "15m"},
+                {"type": "liquidation_hunter", "name": "liquidation_hunter_1h", "timeframe": "1h"},
 
-                # Cross-Sectional Momentum (4h)
+                # Cross-Sectional Momentum (1h, 4h)
+                {"type": "cross_sectional_momentum", "name": "csm_1h", "timeframe": "1h"},
                 {"type": "cross_sectional_momentum", "name": "csm_4h", "timeframe": "4h"},
             ],
             # Note: timeframe is now auto-selected per strategy instance
