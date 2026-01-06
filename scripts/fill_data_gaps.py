@@ -70,11 +70,20 @@ def find_gaps(timestamps: List[datetime], interval_seconds: int, now: datetime) 
             gap_end = timestamps[i+1] - timedelta(seconds=1)
             gaps.append((gap_start, gap_end))
             
-    # Check gap to NOW
+    # Check gap to NOW (exclude current incomplete interval)
     last_ts = timestamps[-1]
-    if (now - last_ts).total_seconds() > tolerance:
+    # We want data up to the last *completed* candle.
+    # If now is 10:12, and 5m candle. Current candle started 10:10.
+    # We only want candles <= 10:05.
+    # So max_allowed_ts = now - interval.
+    # Any gap ending after max_allowed_ts should be capped.
+    
+    max_allowed_end = now - timedelta(seconds=interval_seconds)
+    
+    # If last_ts is already recent enough (e.g. 10:05), diff is small.
+    if (max_allowed_end - last_ts).total_seconds() > tolerance:
         gap_start = last_ts + timedelta(seconds=interval_seconds)
-        gap_end = now
+        gap_end = max_allowed_end
         gaps.append((gap_start, gap_end))
         
     return gaps
@@ -129,6 +138,14 @@ def fetch_and_fill(api: HyperliquidAPI, db: TradeDatabase, symbol: str, timefram
                 
                 df = pd.DataFrame(data)
                 df.set_index('timestamp', inplace=True)
+                
+                # Double-check: Filter out any incomplete candles (timestamp > end)
+                # 'end' here is passed from find_gaps, which is already capped.
+                # But to be safe against API returning current candle if end is close.
+                # Actually, API usually interprets 'end' as inclusive/exclusive depending.
+                # Let's enforce strictly that we don't want anything after 'now - interval' if possible,
+                # but 'end' is the gap_end. Strict filter:
+                df = df[df.index <= end]
                 
                 db.insert_market_data(df, symbol, timeframe)
                 total_filled += len(df)
