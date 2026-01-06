@@ -6,7 +6,11 @@ An automated multi-strategy trading bot for Hyperliquid perpetual futures exchan
 
 - **Multi-Strategy Architecture**: Dynamic orchestration of multiple concurrent strategies.
 - **Real-Time Dashboard**: Web-based monitoring at `localhost:5050` with positions, PnL, trade history.
-- **Dynamic Pair Selection**: Automatically trades assets meeting liquidity/volume/open interest thresholds.
+- **Dynamic Asset Discovery**: Automatically discovers and trades new assets (including HIP-3) every 60 minutes.
+- **Hybrid Environment Support**: 
+    - **Native Perps**: Standard Hyperliquid markets.
+    - **HIP-3 (HyperEVM)**: Seamlessly supports builder-deployed assets (e.g., PURR/USDC).
+    - **Spot Trading**: Support for spot assets and balances.
 - **Cointegration Filtering**: Uses Engle-Granger tests to ensure StatArb pairs are statistically robust.
 - **Regime-Aware Allocation**: 3-state HMM regime classifier adjusts strategy weights (e.g., favors Trend in High Vol, Mean Reversion in Low Vol).
 - **Graceful Shutdown**: Ensures positions are managed on exit.
@@ -16,12 +20,13 @@ An automated multi-strategy trading bot for Hyperliquid perpetual futures exchan
 
 | Strategy | Description | Key Mechanism |
 |----------|-------------|---------------|
-| `structural_arbitrage` | **Statistical Arbitrage** | Cointegration-based mean reversion. Uses Kalman Filter for dynamic hedge ratios and Z-score triggers. |
-| `funding_arbitrage` | **Funding Rate Arbitrage** | Delta-neutral capture of high funding rates. |
+| `structural_arbitrage` | **Statistical Arbitrage** | Cointegration-based mean reversion. Uses Kalman Filter for dynamic hedge ratios and Z-score triggers. Supports Multi-Leg execution. |
+| `funding_arbitrage` | **Funding Rate Arbitrage** | Delta-neutral capture of high funding rates (Perp Long/Short + Spot Hedge). |
 | `momentum_csm` | **Cross-Sectional Momentum** | Ranks assets by returns (7-day lookback), goes Long winners / Short losers. Uses EMA(200) trend filter. |
 | `adaptive_grid` | **Adaptive Grid** | Mean reversion grid centered on EMA. Spacing adapts to ATR. Regulated by ADX filter (pauses in strong trends). |
 | `sentiment_ml` | **Sentiment / Volatility** | Hypersensitive volume/price reaction logic. |
-| `volatility_breakout` | **Volatility Breakout** | Captures expansion from low volatility squeezes. |
+| `volatility_breakout` | **Volatility Breakout** | Captures explosive moves from low volatility squeezes (Bollinger Band Squeeze + Hurst Exponent filter). |
+| `ou_mean_reversion` | **OU Mean Reversion** | Models price as Ornstein-Uhlenbeck process. Estimates Mean/Theta/Sigma to trade deviations. |
 
 ## Dashboard
 
@@ -82,8 +87,14 @@ Copy `env.example` to `.env` and fill in your Hyperliquid credentials.
 cp env.example .env
 ```
 Required:
-- `HYPERLIQUID_PRIVATE_KEY`: Your Arbitrum private key.
-- `HYPERLIQUID_WALLET_ADDRESS`: Your wallet address.
+ - `HYPERLIQUID_PRIVATE_KEY`: Your Arbitrum private key.
+ - `HYPERLIQUID_WALLET_ADDRESS`: Your wallet address.
+ 
+ Optional (HIP-3 / Spot):
+ - `HIP3_ENABLED`: Set to `true` to enable HyperEVM assets.
+ - `HIP3_PERP_DEXS`: Comma-separated list of DEX names (or leave empty for auto-discovery).
+ - `SPOT_ENABLED`: Set to `true` to enable Spot trading.
+
 
 ### 3. Run Backtest (Validation)
 Before live trading, verify the logic with a backtest.
