@@ -29,21 +29,25 @@ class TradeDatabase:
     
     SCHEMA_VERSION = 1
     
-    def __init__(self, db_path: str = "data/trades.db"):
+    def __init__(self, db_path: str = "data/trades.db", table_prefix: str = ""):
         """
         Initialize the trade database.
         
         Args:
             db_path: Path to SQLite database file
+            table_prefix: Prefix for mutable tables (trades, snapshots, pnl).
+                          Useful for separating backtest results (e.g. 'backtest_').
+                          Market data tables remain shared.
         """
         self.logger = logging.getLogger(__name__)
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.table_prefix = table_prefix
         
         # Initialize database
         self._init_database()
         
-        self.logger.info(f"TradeDatabase initialized at {self.db_path}")
+        self.logger.info(f"TradeDatabase initialized at {self.db_path} (prefix='{self.table_prefix}')")
     
     @contextmanager
     def _get_connection(self):
@@ -64,9 +68,14 @@ class TradeDatabase:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             
+            # Mutable Tables (Prefixed)
+            trades_table = f"{self.table_prefix}trades"
+            equity_table = f"{self.table_prefix}equity_snapshots"
+            pnl_table = f"{self.table_prefix}daily_pnl"
+            
             # Create trades table
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS trades (
+            cursor.execute(f"""
+                CREATE TABLE IF NOT EXISTS {trades_table} (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     symbol TEXT NOT NULL,
                     strategy TEXT NOT NULL,
@@ -89,30 +98,30 @@ class TradeDatabase:
             """)
             
             # Create indexes for fast queries
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_strategy ON trades(strategy)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_exit_time ON trades(exit_time)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_entry_time ON trades(entry_time)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_strategy_exit ON trades(strategy, exit_time)")
+            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.table_prefix}trades_strategy ON {trades_table}(strategy)")
+            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.table_prefix}trades_symbol ON {trades_table}(symbol)")
+            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.table_prefix}trades_exit_time ON {trades_table}(exit_time)")
+            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.table_prefix}trades_entry_time ON {trades_table}(entry_time)")
+            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.table_prefix}trades_strategy_exit ON {trades_table}(strategy, exit_time)")
             
             # Create equity snapshots table
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS equity_snapshots (
+            cursor.execute(f"""
+                CREATE TABLE IF NOT EXISTS {equity_table} (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp TIMESTAMP NOT NULL,
                     equity REAL NOT NULL,
                     pnl REAL NOT NULL,
                     trade_id INTEGER,
                     trade_symbol TEXT,
-                    FOREIGN KEY (trade_id) REFERENCES trades(id)
+                    FOREIGN KEY (trade_id) REFERENCES {trades_table}(id)
                 )
             """)
             
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_equity_timestamp ON equity_snapshots(timestamp)")
+            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.table_prefix}equity_timestamp ON {equity_table}(timestamp)")
             
             # Create daily PnL table (materialized for fast access)
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS daily_pnl (
+            cursor.execute(f"""
+                CREATE TABLE IF NOT EXISTS {pnl_table} (
                     date TEXT PRIMARY KEY,
                     pnl REAL NOT NULL,
                     trade_count INTEGER NOT NULL,
@@ -120,7 +129,7 @@ class TradeDatabase:
                 )
             """)
             
-            # Create metadata table for schema version and settings
+            # Create metadata table for schema version and settings (Shared)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS metadata (
                     key TEXT PRIMARY KEY,
@@ -134,7 +143,7 @@ class TradeDatabase:
                 ("schema_version", str(self.SCHEMA_VERSION))
             )
 
-            # Market Data Table (Phase 9)
+            # Market Data Table (Shared - Always Source of Truth)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS market_data (
                     symbol TEXT NOT NULL,
@@ -152,7 +161,7 @@ class TradeDatabase:
             # Index for fast range queries
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_market_data_range ON market_data(symbol, timeframe, timestamp)")
             
-            # Funding Rates Table (Phase 12)
+            # Funding Rates Table (Shared - Always Source of Truth)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS funding_rates (
                     symbol TEXT NOT NULL,
@@ -179,8 +188,8 @@ class TradeDatabase:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             
-            cursor.execute("""
-                INSERT INTO trades (
+            cursor.execute(f"""
+                INSERT INTO {self.table_prefix}trades (
                     symbol, strategy, side, entry_price, exit_price, size,
                     entry_time, exit_time, pnl, pnl_percentage, capital_at_risk,
                     exit_reason, stop_loss, take_profit, leverage, fees
@@ -208,8 +217,8 @@ class TradeDatabase:
             
             # Update daily PnL
             trade_date = trade_data['exit_time'][:10] if isinstance(trade_data['exit_time'], str) else trade_data['exit_time'].strftime('%Y-%m-%d')
-            cursor.execute("""
-                INSERT INTO daily_pnl (date, pnl, trade_count)
+            cursor.execute(f"""
+                INSERT INTO {self.table_prefix}daily_pnl (date, pnl, trade_count)
                 VALUES (?, ?, 1)
                 ON CONFLICT(date) DO UPDATE SET
                     pnl = pnl + excluded.pnl,
@@ -225,8 +234,8 @@ class TradeDatabase:
         """Insert an equity snapshot."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
-                INSERT INTO equity_snapshots (timestamp, equity, pnl, trade_id, trade_symbol)
+            cursor.execute(f"""
+                INSERT INTO {self.table_prefix}equity_snapshots (timestamp, equity, pnl, trade_id, trade_symbol)
                 VALUES (?, ?, ?, ?, ?)
             """, (datetime.now().isoformat(), equity, pnl, trade_id, trade_symbol))
     
@@ -235,7 +244,7 @@ class TradeDatabase:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             
-            query = "SELECT * FROM trades ORDER BY exit_time DESC"
+            query = f"SELECT * FROM {self.table_prefix}trades ORDER BY exit_time DESC"
             if limit:
                 query += f" LIMIT {limit}"
             
@@ -248,7 +257,7 @@ class TradeDatabase:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             
-            query = "SELECT * FROM trades WHERE strategy = ? ORDER BY exit_time DESC"
+            query = f"SELECT * FROM {self.table_prefix}trades WHERE strategy = ? ORDER BY exit_time DESC"
             if limit:
                 query += f" LIMIT {limit}"
             
@@ -261,7 +270,7 @@ class TradeDatabase:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             
-            query = "SELECT * FROM trades WHERE symbol = ? ORDER BY exit_time DESC"
+            query = f"SELECT * FROM {self.table_prefix}trades WHERE symbol = ? ORDER BY exit_time DESC"
             if limit:
                 query += f" LIMIT {limit}"
             
@@ -273,8 +282,8 @@ class TradeDatabase:
         """Get trades within a time range."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
-                SELECT * FROM trades 
+            cursor.execute(f"""
+                SELECT * FROM {self.table_prefix}trades 
                 WHERE exit_time >= ? AND exit_time <= ?
                 ORDER BY exit_time DESC
             """, (start_time.isoformat(), end_time.isoformat()))
@@ -319,7 +328,7 @@ class TradeDatabase:
                     AVG((julianday(exit_time) - julianday(entry_time)) * 24) as avg_duration_hours,
                     MIN(entry_time) as first_trade,
                     MAX(exit_time) as last_trade
-                FROM trades
+                FROM {self.table_prefix}trades
                 {where_clause}
             """, params)
             
@@ -357,7 +366,7 @@ class TradeDatabase:
         """Get statistics for all strategies."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT DISTINCT strategy FROM trades")
+            cursor.execute(f"SELECT DISTINCT strategy FROM {self.table_prefix}trades")
             strategies = [row[0] for row in cursor.fetchall()]
         
         return {strategy: self.get_strategy_stats(strategy) for strategy in strategies}
@@ -366,13 +375,13 @@ class TradeDatabase:
         """Get aggregate statistics for a symbol."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT
                     COUNT(*) as total_trades,
                     SUM(pnl) as total_pnl,
                     AVG(pnl) as avg_pnl,
                     SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as winning_trades
-                FROM trades
+                FROM {self.table_prefix}trades
                 WHERE symbol = ?
             """, (symbol,))
             
@@ -388,8 +397,8 @@ class TradeDatabase:
         """Get daily PnL for the last N days."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
-                SELECT date, pnl FROM daily_pnl
+            cursor.execute(f"""
+                SELECT date, pnl FROM {self.table_prefix}daily_pnl
                 ORDER BY date DESC
                 LIMIT ?
             """, (days,))
@@ -400,11 +409,11 @@ class TradeDatabase:
         """Get monthly PnL."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT 
                     strftime('%Y-%m', exit_time) as month,
                     SUM(pnl) as pnl
-                FROM trades
+                FROM {self.table_prefix}trades
                 GROUP BY month
                 ORDER BY month DESC
                 LIMIT ?
@@ -417,7 +426,7 @@ class TradeDatabase:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             
-            query = "SELECT * FROM equity_snapshots ORDER BY timestamp"
+            query = f"SELECT * FROM {self.table_prefix}equity_snapshots ORDER BY timestamp"
             if limit:
                 query += f" LIMIT {limit}"
             
@@ -515,7 +524,7 @@ class TradeDatabase:
         """Get total number of trades in database."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM trades")
+            cursor.execute(f"SELECT COUNT(*) FROM {self.table_prefix}trades")
             return cursor.fetchone()[0]
 
     def delete_all_trades(self) -> None:
@@ -527,22 +536,22 @@ class TradeDatabase:
         """
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("DELETE FROM trades")
-            cursor.execute("DELETE FROM equity_snapshots")
-            cursor.execute("DELETE FROM daily_pnl")
+            cursor.execute(f"DELETE FROM {self.table_prefix}trades")
+            cursor.execute(f"DELETE FROM {self.table_prefix}equity_snapshots")
+            cursor.execute(f"DELETE FROM {self.table_prefix}daily_pnl")
     
     def get_strategies(self) -> List[str]:
         """Get list of all strategies with trades."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT DISTINCT strategy FROM trades ORDER BY strategy")
+            cursor.execute(f"SELECT DISTINCT strategy FROM {self.table_prefix}trades ORDER BY strategy")
             return [row[0] for row in cursor.fetchall()]
     
     def get_symbols(self) -> List[str]:
         """Get list of all symbols traded."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT DISTINCT symbol FROM trades ORDER BY symbol")
+            cursor.execute(f"SELECT DISTINCT symbol FROM {self.table_prefix}trades ORDER BY symbol")
             return [row[0] for row in cursor.fetchall()]
     
     # ==================== MARKET DATA METHODS ====================

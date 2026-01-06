@@ -32,6 +32,14 @@ class MockMarketAPI:
         self.perp_balance = {'withdrawable': 50000.0, 'margin_used': 0.0} # Perp wallet
         
         self.order_id_counter = 0
+
+
+        # WebSocket Subscription State (Mock)
+        self._subscribed_symbols = set()
+        
+        # Cache for strategy checks
+        from collections import defaultdict
+        self.ohlcv_cache = defaultdict(dict)
         
     def set_time(self, timestamp: datetime):
         """Update the simulation time."""
@@ -121,6 +129,11 @@ class MockMarketAPI:
         
         if filtered_df.empty:
             return None
+            
+        # Update cache to satisfy StrategyManager check
+        # Convert DataFrame to list of dicts or just store DataFrame if len() works
+        # StrategyManager expects len(cached) >= 5
+        self.ohlcv_cache[symbol][timeframe] = filtered_df
             
         return filtered_df
         
@@ -342,7 +355,12 @@ class MockMarketAPI:
         return {'universe': universe}
         
     def subscribe_symbol(self, symbol):
-        pass
+        """Mock subscription."""
+        self._subscribed_symbols.add(symbol)
+        
+    def unsubscribe_symbol(self, symbol):
+        """Mock unsubscription."""
+        self._subscribed_symbols.discard(symbol)
 
     def is_data_available(self, symbol: str) -> bool:
         """Check if data is available for symbol."""

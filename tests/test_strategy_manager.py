@@ -272,3 +272,56 @@ class TestStrategyManager:
         assert strategy_manager._count_positions_for_strategy('vol_breakout_1h') == 1
         assert strategy_manager._count_positions_for_strategy('nonexistent') == 0
 
+    def test_is_data_ready_for_symbol_nested_cache(self, strategy_manager):
+        """
+        Verify that _is_data_ready_for_symbol correctly handles the nested dictionary structure
+        of ohlcv_cache (Symbol -> Timeframe -> DataFrame) and checks DataFrame length,
+        not the number of keys in the inner dictionary.
+        """
+        import pandas as pd
+        import numpy as np
+
+        symbol = 'BTC/USD'
+        required_timeframes = ['5m', '15m', '1h', '4h']
+
+        # Setup mock cache
+        # Create a DataFrame with enough rows (>= 20 to pass historical check)
+        df_valid = pd.DataFrame(np.random.randn(25, 5), columns=['open', 'high', 'low', 'close', 'volume'])
+        
+        # Scenario: Cache exists but is a nested dict. 
+        # Crucially, we manipulate the inner dict to have FEWER keys than the required length threshold (5)
+        # to reproduce the bug conditions (if it were checking len(dict) < 5).
+        # Inner dict has 4 keys (the timeframes), which is < 5.
+        
+        mock_cache = {}
+        for tf in required_timeframes:
+            mock_cache[tf] = df_valid
+            
+        # Set the cache on the market_api
+        # Structure: { 'BTC/USD': { '5m': df, '1h': df, ... } }
+        strategy_manager.market_api.ohlcv_cache = {symbol: mock_cache}
+        
+        # Mock get_ohlcv to return valid data so the historical check passes
+        strategy_manager.market_api.get_ohlcv.return_value = df_valid
+        
+        # Mock WebSocket checks
+        strategy_manager.market_api._subscribed_symbols = {symbol}
+        # Assuming health_monitor might be accessed, verify checks pass or don't exist
+        # If hasattr returns True, we need is_ws_data_fresh to return True
+        # Since mock_market_api is a MagicMock, attributes exist by default
+        strategy_manager.market_api.health_monitor.is_ws_data_fresh.return_value = True
+
+        # Act
+        is_ready = strategy_manager._is_data_ready_for_symbol(symbol)
+
+        # Assert
+        assert is_ready is True
+
+        # Counter-test: Verify it fails if DataFrame is actually too short
+        df_short = pd.DataFrame(np.random.randn(2, 5), columns=['open', 'high', 'low', 'close', 'volume'])
+        mock_cache_short = {tf: df_short for tf in required_timeframes}
+        strategy_manager.market_api.ohlcv_cache = {symbol: mock_cache_short}
+        
+        assert strategy_manager._is_data_ready_for_symbol(symbol) is False
+
+

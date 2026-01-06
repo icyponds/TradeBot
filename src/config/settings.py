@@ -19,7 +19,8 @@ def load_config() -> Dict[str, Any]:
     """
     # Phase-1: disable the 15m stat-arb instance by default (too much churn / fees).
     # Can be re-enabled explicitly for research/backtests.
-    enable_stat_arb_15m = os.getenv("ENABLE_STAT_ARB_15M", "false").lower() == "true"
+    # [MODIFIED] Changed default to "true" for comprehensive backtesting
+    enable_stat_arb_15m = os.getenv("ENABLE_STAT_ARB_15M", "true").lower() == "true"
 
     config = {
         # Hyperliquid API Configuration
@@ -243,7 +244,8 @@ def load_config() -> Dict[str, Any]:
                 {"type": "ou_mean_reversion", "name": "ou_mean_reversion_1h",  "timeframe": "1h"},
                 
                 # Funding Rate Arb (1h) - strictly optimal at 1h (8h funding / 8)
-                {"type": "funding_rate_arbitrage", "name": "funding_arb_1h", "timeframe": "1h"},
+                # [DISABLED] for current backtesting session
+                # {"type": "funding_rate_arbitrage", "name": "funding_arb_1h", "timeframe": "1h"},
                 
                 # Volatility Breakout (1h)
                 {"type": "volatility_breakout", "name": "vol_breakout_1h", "timeframe": "1h"},

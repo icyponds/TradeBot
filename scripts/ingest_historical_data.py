@@ -68,7 +68,13 @@ def fetch_history_for_symbol(api: HyperliquidAPI, db: TradeDatabase, symbol: str
         api_symbol: Actual symbol to send to API (defaults to symbol)
         db_symbol: Symbol to store in DB (defaults to symbol)
     """
+    # Special handling for meme coins that might be k-prefixed in API but not in name
+    # Or vice versa.
     target = api_symbol or symbol
+    
+    # Heuristic: If target fails (caught in loop), we might need to try 'k'+target 
+    # But for now, rely on target passed in.
+    
     store_as = db_symbol or symbol
     
     logger.info(f"[{store_as}] Starting ingestion (API: {target}) for last {days} days...")
@@ -77,7 +83,7 @@ def fetch_history_for_symbol(api: HyperliquidAPI, db: TradeDatabase, symbol: str
     start_time_dt = end_time_dt - timedelta(days=days)
     
     # Timeframes to ingest
-    timeframes = ['15m', '1h', '4h']
+    timeframes = ['5m', '15m', '1h', '4h']
     
     for timeframe in timeframes:
         logger.info(f"[{symbol}] Starting ingestion for {timeframe} (last {days} days)...")
@@ -96,6 +102,7 @@ def fetch_history_for_symbol(api: HyperliquidAPI, db: TradeDatabase, symbol: str
         # Chunk size adjustments
         # 1 week works for 1h (168 candles)
         # For 15m, 1 week is 4 * 168 = 672 candles (safe)
+        # For 5m, 1 week is 12 * 168 = 2016 candles (safe, max is 5000)
         chunk_size_hours = 168 
         chunk_ms = chunk_size_hours * 3600 * 1000
         
@@ -218,9 +225,9 @@ def run_ingestion():
     api = HyperliquidAPI(config)
     db = TradeDatabase()
     
-    # 1. Get Top 100 Assets
-    logger.info("Identifying Top 100 Assets...")
-    top_assets = get_top_assets(api, limit=100)
+    # 1. Get Top 15 Assets
+    logger.info("Identifying Top 15 Assets...")
+    top_assets = get_top_assets(api, limit=15)
     
     # 2. Get All Mapped Assets (Spot & Perp pairs) to ensure Funding Arb coverage
     # Even if they are not in Top 100
@@ -231,16 +238,38 @@ def run_ingestion():
     
     logger.info(f"Assets to ingest ({len(assets_to_ingest)} total): {assets_to_ingest}")
     
-    # Process assets (Sequential to avoid rate limits)
     for symbol in assets_to_ingest:
+        # Resolve Correct API Symbol 
+        # API expects the exact name used in `name_to_coin` map.
+        # Some assets like BONK are actually kBONK in the system.
+        
+        api_symbol = symbol
+        
+        # Check internal SDK map if available
+        if hasattr(api.info, 'name_to_coin'):
+            if symbol not in api.info.name_to_coin:
+                # Try k-prefix
+                if f"k{symbol}" in api.info.name_to_coin:
+                    api_symbol = f"k{symbol}"
+                    logger.info(f"Mapped {symbol} -> {api_symbol} for API requests")
+                elif symbol.startswith('k') and symbol[1:] in api.info.name_to_coin:
+                     # e.g. input comes as kBONK but map has BONK? Unlikely but possible
+                     api_symbol = symbol[1:]
+                     logger.info(f"Mapped {symbol} -> {api_symbol} for API requests")
+        
         # 1. Fetch PERP Candles
-        fetch_history_for_symbol(api, db, symbol, days=90)
+        fetch_history_for_symbol(api, db, symbol, days=90, api_symbol=api_symbol)
         
         # 2. Fetch PERP Funding
-        fetch_funding_history(api, db, symbol, days=90)
+        # Funding calls might also need the corrected symbol? 
+        # Usually funding is by coin ID or symbol. Let's assume sdk handles it if we pass the right symbol.
+        # Actually hyperliquid_api.get_funding_history likely takes the symbol and looks it up.
+        # Let's pass the corrected symbol just in case the method doesn't auto-correct.
+        # Checking get_funding_history implementation... it usually takes 'coin' (symbol).
+        fetch_funding_history(api, db, api_symbol, days=90)
         
         # 3. Fetch SPOT (if mapped)
-        spot_token = api.get_spot_token_for_perp(symbol)
+        spot_token = api.get_spot_token_for_perp(symbol) # Mapping uses original symbol (e.g. BONK)
         if spot_token:
             spot_api_name = api.get_spot_api_name(spot_token)
             if spot_api_name:

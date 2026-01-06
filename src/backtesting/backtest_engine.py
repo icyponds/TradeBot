@@ -25,13 +25,10 @@ class BacktestEngine:
         self.config = config
         self.logger = logging.getLogger(__name__)
 
-        # Ensure backtest trade persistence is isolated from live trading results.
-        # Backtest results should be written to the `trades` table in `data/backtest_results.db`.
-        backtest_cfg = (self.config.get("backtesting") or {})
-        results_db_path = backtest_cfg.get("results_db_path") or "data/backtest_results.db"
-        self.config.setdefault("persistence", {})
-        self.config["persistence"]["db_path"] = results_db_path
-
+        # Ensure backtest trade persistence is isolated via table prefix.
+        # Backtest results should be written to `backtest_trades` etc. in `data/trades.db`.
+        # We NO LONGER switch the database file to backtest_results.db
+        
         # Load data from DB if not provided
         if not historical_data:
             self.logger.info("No historical data provided, loading from TradeDatabase...")
@@ -47,8 +44,29 @@ class BacktestEngine:
         self.mock_api = MockMarketAPI(config, self.historical_data)
         self.mock_api.set_funding_data(self.funding_data)
         
-        # Initialize Strategy Manager with injected Mock API
-        self.strategy_manager = StrategyManager(config, market_api=self.mock_api)
+        # Initialize Strategy Manager with injected Mock API and Prefixed Tracker
+        # IMPORTANT: Initialize PerformanceTracker with 'backtest_' prefix here
+        from src.utils.performance_tracker import PerformanceTracker
+        self.prefixed_tracker = PerformanceTracker(config, table_prefix="backtest_")
+        
+        self.strategy_manager = StrategyManager(
+            config, 
+            market_api=self.mock_api,
+            performance_tracker=self.prefixed_tracker
+        )
+        
+        # Ensure portfolio manager also uses it (though StrategyManager might handle this if it passes it down)
+        # StrategyManager.portfolio_manager doesn't take tracker in init, it creates its own?
+        # Let's check PortfolioManager. If it records trades, it needs the tracker.
+        # But StrategyManager.__init__ didn't pass tracker to PortfolioManager.
+        # It did: self.portfolio_manager = PortfolioManager(config)
+        # We need to manually inject it into portfolio manager if passing to strategy manager isn't enough.
+        # StrategyManager uses ExecutionEngine which uses the tracker. 
+        # PortfolioManager mostly tracks state. ExecutionEngine records trades.
+        # So we should be good if ExecutionEngine gets the right tracker.
+        
+        # Explicitly set it just in case logic elsewhere uses it directly
+        self.strategy_manager.portfolio_manager.performance_tracker = self.prefixed_tracker
 
         # Phase-1: ensure PerformanceTracker has a sensible initial equity baseline in backtests.
         # BacktestEngine does not call StrategyManager.start(), so we must initialize portfolio + tracker here.
@@ -61,12 +79,13 @@ class BacktestEngine:
             self.logger.warning(f"Failed to initialize backtest equity baseline: {e}")
 
         # Optional: clear prior backtest results so analysis only reflects this run
+        backtest_cfg = (self.config.get("backtesting") or {})
         if bool(backtest_cfg.get("reset_results_db", True)):
             try:
                 self.strategy_manager.performance_tracker.db.delete_all_trades()
-                self.logger.info(f"Cleared existing backtest results in {results_db_path}")
+                self.logger.info(f"Cleared existing backtest results in backtest_ tables")
             except Exception as e:
-                self.logger.warning(f"Failed to clear backtest results DB ({results_db_path}): {e}")
+                self.logger.warning(f"Failed to clear backtest results: {e}")
         
         # Results
         self.results = {
@@ -84,7 +103,7 @@ class BacktestEngine:
         total_rows = 0
         
         # Timeframes we care about for now
-        timeframes = ['15m', '1h', '4h']
+        timeframes = ['5m', '15m', '1h', '4h']
         
         # Get all distinct symbols from DB (simplification: assume if 1h exists, others might too)
         symbols = self.db.get_market_data_symbols('1h')

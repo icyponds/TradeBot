@@ -169,4 +169,4 @@ log/
 *~
 
 # macOS specific
-.DS_Store 
+.DS_Store test_output.txt

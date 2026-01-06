@@ -107,25 +107,35 @@ def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None):
 
     # 3. Engine
     # Initialize with None to trigger DB load
-    # Configure separate backtest DB
-    db_path = os.path.join('data', 'backtest_results.db')
-    if os.path.exists(db_path):
-        os.remove(db_path)  # Clear previous results
-        print(f"Cleared previous backtest DB: {db_path}")
+    # 3. Engine
+    # Initialize with None to trigger DB load
+    # Persistence path is handled by BacktestEngine (uses prefix now)
         
-    config['persistence'] = {'db_path': 'data/backtest_results.db'}
     engine = BacktestEngine(config, historical_data=None)
     
     # Configure symbols
     config['trading']['dynamic_pair_selection'] = True # Allow selector to pick from available
     config['trading']['symbols'] = symbols # Limit to what we have
     
+    # 3.1 Override Strategy Lookbacks for Short Data History
+    # Since we only have ~4-5 days of data in DB, standard 100-period lookbacks 
+    # (at 1h = 4 days) consume the entire dataset for warmup, leaving no trade window.
+    print("Overriding strategy lookbacks for short backtest window...")
+    config['strategies']['stat_arb']['window_size'] = 24  # 1 day
+    config['strategies']['stat_arb']['correlation_lookback'] = 24
+    config['strategies']['ou_mean_reversion']['estimation_lookback'] = 24
+    config['strategies']['cointegration']['lookback_period'] = 24
+    config['strategies']['volatility_breakout']['bb_length'] = 20 # Already low
+    config['strategies']['liquidation_hunter']['window'] = 20 # Already low
+    
     # Increase log level
     import logging
     logging.basicConfig(level=logging.INFO)
     
     # 4. Run
-    report = engine.run(start_date, end_date)
+    # Use 15m interval to match the primary strategy timeframe (StatArb 15m)
+    # This increases the chance of catching signals compared to the default 60m step
+    report = engine.run(start_date, end_date, interval_minutes=15)
     
     print("\nTest Complete!")
     print(f"Total Equity: {report['total_equity']}")

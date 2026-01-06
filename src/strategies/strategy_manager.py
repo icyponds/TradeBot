@@ -42,13 +42,14 @@ STRATEGY_CLASSES = {
 class StrategyManager:
     """Manages and orchestrates trading strategies."""
     
-    def __init__(self, config: Dict[str, Any], market_api: Any = None):
+    def __init__(self, config: Dict[str, Any], market_api: Any = None, performance_tracker: Any = None):
         """
         Initialize the strategy manager.
         
         Args:
             config: Configuration dictionary
             market_api: Optional injected market API (for testing)
+            performance_tracker: Optional injected performance tracker (for backtesting)
         """
         self.config = config
         self.logger = logging.getLogger(__name__)
@@ -69,7 +70,7 @@ class StrategyManager:
         self.correlation_manager = CorrelationManager(self.market_api, config)
         
         # Initialize performance tracker
-        self.performance_tracker = PerformanceTracker(config, data_dir='data')
+        self.performance_tracker = performance_tracker if performance_tracker else PerformanceTracker(config, data_dir='data')
         
         # Initialize strategies
         self.strategies = self._initialize_strategies()
@@ -445,9 +446,15 @@ class StrategyManager:
         
         # 2. Check cache exists for required timeframes
         for tf in required_timeframes:
-            cached = self.market_api.ohlcv_cache.get(symbol, tf)
-            if not cached or len(cached) < 5:
-                self.logger.debug(f"[{symbol}] Insufficient cached data for {tf}")
+            # Retrieve the inner dict for the symbol, then the specific timeframe DF
+            symbol_cache = self.market_api.ohlcv_cache.get(symbol)
+            if not symbol_cache:
+                self.logger.debug(f"[{symbol}] No cache entry for symbol")
+                return False
+                
+            cached_df = symbol_cache.get(tf)
+            if cached_df is None or len(cached_df) < 5:
+                self.logger.debug(f"[{symbol}] Insufficient cached data for {tf} (found {len(cached_df) if cached_df is not None else 0} rows)")
                 return False
         
         # 3. Check WebSocket subscription active

@@ -225,13 +225,14 @@ class PerformanceTracker:
     Storage: SQLite database for efficient querying and persistence.
     """
     
-    def __init__(self, config: Dict[str, Any], data_dir: str = 'data'):
+    def __init__(self, config: Dict[str, Any], data_dir: str = 'data', table_prefix: str = ""):
         """
         Initialize the performance tracker.
         
         Args:
             config: Configuration dictionary
             data_dir: Directory for storing performance data
+            table_prefix: Prefix for database tables (e.g. 'backtest_')
         """
         self.config = config
         self.logger = logging.getLogger(__name__)
@@ -246,7 +247,7 @@ class PerformanceTracker:
         else:
             db_path = self.data_dir / 'trades.db'
             
-        self.db = TradeDatabase(str(db_path))
+        self.db = TradeDatabase(str(db_path), table_prefix=table_prefix)
         
         # In-memory cache for current session
         self.completed_trades: List[CompletedTrade] = []
