@@ -1571,6 +1571,87 @@ class StrategyManager:
         """Delegate liquidation risk check to execution engine."""
         self.execution_engine.check_liquidation_risks(self.strategies)
 
+    def _check_nuclear_displacement(self, symbol: str, new_strength: float) -> str:
+        """
+        Check for 'Nuclear Switch' displacement (Multi-Leg vs Single-Leg).
+        
+        Returns:
+            'displacement_arb' if Arb should be displaced.
+            'displacement_single' if Single-Leg should be displaced.
+            None if no displacement.
+        """
+        # Case 1: Arb Existing -> New Single-Leg Signal
+        # We need to find if this symbol is part of an active multi-leg position
+        arb_position = self._get_multi_leg_position_for_symbol(symbol)
+        if arb_position:
+            # Arb Strength is usually stored or needs to be queried. 
+            # For now, we assume stored in metadata or approx 0.5 if unknown.
+            arb_strength = getattr(arb_position, 'entry_signal_strength', 0.5) or 0.5
+            
+            # Threshold: Single > Arb * 1.5
+            if new_strength > (arb_strength * 1.5):
+                self.logger.info(f"☢️ NUCLEAR DISPLACEMENT: New Single ({new_strength:.2f}) > Arb ({arb_strength:.2f} * 1.5). Closing Arb.")
+                return 'displacement_arb'
+            else:
+                return 'block' # Arb protects itself
+                
+        # Case 2 is complex because 'signal' doesn't tell us if it's an arb signal easily 
+        # unless we pass that context. 
+        # StrategyManager typically receives Single-Leg signals in this flow.
+        # Multi-leg signals are handled via _handle_multi_leg_signal.
+        # So we only handle "Breaking an Arb" here.
+        
+        return None
+
+    def _resolve_conflict(self, symbol: str, signal: Dict[str, Any], new_strength: float) -> str:
+        """
+        Traffic Controller: Resolve conflicts between New Signal and Existing Position.
+        
+        Returns:
+            'flip': Close existing, Open new.
+            'upgrade': Close existing (profit), Open new (larger size).
+            'block': Ignore new signal.
+            'nuclear': Displace multi-leg.
+        """
+        
+        # 1. Check Nuclear Displacement (Arb vs Single)
+        nuclear = self._check_nuclear_displacement(symbol, new_strength)
+        if nuclear == 'displacement_arb':
+            return 'nuclear'
+        elif nuclear == 'block':
+            return 'block'
+
+        # 2. Check Standard Position
+        if symbol not in self.positions:
+            return 'open' # No conflict
+            
+        position = self.positions[symbol]
+        
+        # Get Old Strength (Default to 0.5 if missing)
+        # We need to ensure we store this on entry!
+        old_strength = getattr(position, 'entry_signal_strength', 0.5) or 0.5
+        
+        # A. Opposing Signals (Long vs Short)
+        is_opposing = (position.side == 'long' and signal['signal'] == 'sell') or \
+                      (position.side == 'short' and signal['signal'] == 'buy')
+                      
+        if is_opposing:
+            # Strength Hysteresis: New > Old * 1.1
+            if new_strength > (old_strength * 1.1):
+                self.logger.info(f"🔄 FLIP Conflict: New ({new_strength:.2f}) > Old ({old_strength:.2f} * 1.1). Flipping.")
+                return 'flip'
+            else:
+                self.logger.debug(f"🛡️ BLOCK Conflict: New ({new_strength:.2f}) <= Old ({old_strength:.2f} * 1.1). Holding.")
+                return 'block'
+                
+        # B. Same Direction (Long vs Long)
+        # Upgrade Only: New > Old + 0.2
+        if new_strength > (old_strength + 0.2):
+            self.logger.info(f"⬆️ UPGRADE Conflict: New ({new_strength:.2f}) > Old ({old_strength:.2f} + 0.2). Resizing.")
+            return 'upgrade'
+            
+        return 'block'
+
     def _should_execute_signal(self, symbol: str, signal: Dict[str, Any], current_price: float, 
                               ohlcv: Dict[str, pd.DataFrame], strategy_name: str) -> bool:
         """Determine if we should execute a trading signal."""
@@ -1584,11 +1665,36 @@ class StrategyManager:
             elif position.side == 'short' and signal['signal'] == 'sell':
                 return False
         
-        # Calculate signal strength and volatility
+    def _force_close_position_for_displacement(self, symbol: str):
+        """
+        Force close a position (Single or Multi-Leg) due to Nuclear Displacement.
+        """
+        # Check Multi-Leg first
+        arb_position = self._get_multi_leg_position_for_symbol(symbol)
+        if arb_position:
+            self.logger.warning(f"☢️ EXECUTING NUCLEAR DISPLACEMENT on Arb {arb_position.position_id} for {symbol}")
+            # We need to construct a fake signal or call exit directly
+            # Assuming handle_multi_leg_signal can take an 'exit' action
+            # The signal dict is dummy but needs 'action'
+            dummy_signal = {'action': 'exit', 'type': 'nuclear_displacement'}
+            self._handle_multi_leg_signal(symbol, dummy_signal, 0.0, arb_position.strategy, {}, timestamp=datetime.now())
+            return
+
+        # Check Single Leg
+        if symbol in self.positions:
+            self.logger.warning(f"☢️ EXECUTING NUCLEAR DISPLACEMENT on Single Leg {symbol}")
+            self.close_position(symbol, reason='nuclear_displacement')
+
+    def _should_execute_signal(self, symbol: str, signal: Dict[str, Any], current_price: float, 
+                               ohlcv: Dict[str, pd.DataFrame], strategy_name: str) -> bool:
+        """Determine if we should execute a trading signal."""
+        
+        # ---------------------------------------------------------
+        # 1. Calculate Signal Strength & Modifiers (MOVED UP)
+        # ---------------------------------------------------------
         base_strength = self.strategies[strategy_name].calculate_signal_strength(ohlcv, symbol=symbol, signal_context=signal)
         
-        # Apply history-based modifier from strategy selector
-        # (Boosts winning strategies, penalizes losing ones)
+        # Apply modifier from StrategySelector
         if hasattr(self.strategy_selector, 'get_signal_strength_modifier'):
             strength_modifier = self.strategy_selector.get_signal_strength_modifier(strategy_name)
             signal_strength = base_strength * strength_modifier
@@ -1596,6 +1702,27 @@ class StrategyManager:
                 self.logger.info(f"applied signal strength modifier for {strategy_name}: {strength_modifier:.2f} (base: {base_strength:.2f} -> {signal_strength:.2f})")
         else:
             signal_strength = base_strength
+
+        # ---------------------------------------------------------
+        # 2. Conflict Resolution ("The Traffic Controller")
+        # ---------------------------------------------------------
+        resolution = self._resolve_conflict(symbol, signal, signal_strength)
+        
+        if resolution == 'block':
+            # self.logger.debug(f"Signal for {symbol} BLOCKED by Traffic Controller")
+            return False
+            
+        elif resolution == 'nuclear':
+            self._force_close_position_for_displacement(symbol)
+            # Proceed to open new trade
+            
+        elif resolution in ['flip', 'upgrade']:
+            self.close_position(symbol, reason=f'conflict_{resolution}')
+            # Proceed to open new trade
+            
+        # ---------------------------------------------------------
+        # 3. Standard Checks (Volatility, Limits)
+        # ---------------------------------------------------------
         
         # Volatility calc - extract preferred dataframe or use one
         # Use strategy's timeframe if possible, or fallback
@@ -1610,8 +1737,14 @@ class StrategyManager:
         market_volatility = self._calculate_market_volatility(vol_df)
         
         # Check position limit before proceeding
-        if not self._should_execute_with_position_limit(symbol, signal, signal_strength):
-            return False
+        # Note: If we just closed a position (flip/upgrade), the position count checks 
+        # inside _should_execute_with_position_limit might still see the old position 
+        # if execution engine hasn't fully cleared it from memory yet.
+        # However, close_position() usually updates state immediately.
+        # Bypass check for replacement operations
+        if resolution not in ['flip', 'upgrade', 'nuclear']:
+            if not self._should_execute_with_position_limit(symbol, signal, signal_strength):
+                return False
         
         # Check per-strategy position limit
         strategy_position_count = self._count_positions_for_strategy(strategy_name)
