@@ -280,8 +280,10 @@ class StrategySelector:
             live_db_path: Path to live trades database
         """
         # 1. Fetch data from both sources (returned as dicts of list of trades)
-        live_history = self._fetch_db_data(live_db_path, "live")
-        bt_history = self._fetch_db_data(self.backtest_results_path, "backtest")
+        live_history = self._fetch_db_data(live_db_path, "live", "trades")
+        
+        # New unified DB approach: Query backtest_trades from the same DB file
+        bt_history = self._fetch_db_data(live_db_path, "backtest", "backtest_trades")
         
         scored_strategies = []
         target_sample_size = 20
@@ -358,7 +360,7 @@ class StrategySelector:
                 last_updated=datetime.now()
             )
 
-    def _fetch_db_data(self, db_path: str, source_name: str) -> Dict[str, List[Dict]]:
+    def _fetch_db_data(self, db_path: str, source_name: str, table_name: str = "trades") -> Dict[str, List[Dict]]:
         """
         Fetch recent trade history from a database for blending.
         
@@ -382,18 +384,18 @@ class StrategySelector:
             # We need raw PnL for metrics calculation (PF, Expectancy)
             try:
                 # Check column existence first
-                cursor.execute("PRAGMA table_info(trades)")
+                cursor.execute(f"PRAGMA table_info({table_name})")
                 columns = [c[1] for c in cursor.fetchall()]
                 
                 required_cols = {'strategy', 'pnl', 'pnl_percentage', 'exit_time'}
                 if required_cols.issubset(set(columns)):
-                     cursor.execute("""
+                     cursor.execute(f"""
                         SELECT strategy, pnl, pnl_percentage, exit_time
                         FROM (
                             SELECT 
                                 strategy, pnl, pnl_percentage, exit_time,
                                 ROW_NUMBER() OVER (PARTITION BY strategy ORDER BY exit_time DESC) as rn
-                            FROM trades
+                            FROM {table_name}
                         )
                         WHERE rn <= 50
                         ORDER BY exit_time DESC

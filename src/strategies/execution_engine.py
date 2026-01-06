@@ -363,6 +363,12 @@ class ExecutionEngine:
             self.execute_multi_leg_entry(symbol, signal, current_price, strategy_name, ohlcv, signal_strength, timestamp)
         elif action == 'exit':
             self.execute_multi_leg_exit(symbol, signal, strategy_name, strategies_map, timestamp)
+        # Also accept 'open'/'close' variants used by StatisticalArbitrageStrategy
+        elif action == 'open':
+            signal_strength = calculate_signal_strength_fn(ohlcv)
+            self.execute_multi_leg_entry(symbol, signal, current_price, strategy_name, ohlcv, signal_strength, timestamp)
+        elif action == 'close':
+            self.execute_multi_leg_exit(symbol, signal, strategy_name, strategies_map, timestamp)
     
     def execute_multi_leg_entry(
         self, 

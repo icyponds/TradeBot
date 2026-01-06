@@ -2051,10 +2051,11 @@ class StrategyManager:
         
         if score_difference > threshold:
             reason = "position_limit" if at_limit else "capital_rotation"
+            pnl_value = least_profitable_pos.unrealized_pnl if least_profitable_pos and least_profitable_pos.unrealized_pnl is not None else 0.0
             self.logger.info(
                 f"{'⚡ CAPITAL ROTATION' if at_limit else '🔄 CAPITAL ROTATION'}: "
                 f"Closing {least_profitable_symbol} ({least_profitable_pos.strategy if least_profitable_pos else 'unknown'}) "
-                f"[score={least_profitable_score:.3f}, PnL=${least_profitable_pos.unrealized_pnl:.2f if least_profitable_pos else 0}] "
+                f"[score={least_profitable_score:.3f}, PnL=${pnl_value:.2f}] "
                 f"for new trade [strength={new_signal_strength:.3f}] "
                 f"(diff={score_difference:.3f} > threshold={threshold:.2f})"
             )
@@ -2193,12 +2194,12 @@ class StrategyManager:
             if current_price:
                 position.current_price = current_price
         
-        # Update multi-leg positions
+        # Update multi-leg positions - use the position's current_prices dict
         for position_id, position in self.multi_leg_positions.items():
             for leg in position.legs:
                 leg_price = self._get_leg_price(leg.symbol, leg.market_type)
                 if leg_price:
-                    leg.current_price = leg_price
+                    position.current_prices[leg.symbol] = leg_price
     
     def get_positions_summary(self) -> Dict[str, Any]:
         """Get a summary of all open positions with PnL."""
@@ -2257,7 +2258,7 @@ class StrategyManager:
                     'side': leg.side,
                     'size': leg.size,
                     'entry_price': leg.entry_price,
-                    'current_price': leg.current_price,
+                    'current_price': position.current_prices.get(leg.symbol),
                 } for leg in position.legs],
                 'unrealized_pnl': unrealized_pnl,
                 'unrealized_pnl_percentage': position.unrealized_pnl_percentage,
@@ -2356,7 +2357,9 @@ class StrategyManager:
                             leg_pnl = (leg['entry_price'] - leg['current_price']) * leg['size']
                     
                     leg_status = "🟢" if leg_pnl > 0 else ("🔴" if leg_pnl < 0 else "⚪")
-                    self.logger.info(f"   └─ {leg['market_type']:<5} {leg['side']:<5} {leg['size']:>10.6f} {leg['symbol']:<12} @ ${leg.get('entry_price', 0):.4f} → ${leg.get('current_price', 0):.4f} | ${leg_pnl:>8.2f} {leg_status}")
+                entry_price_val = leg.get('entry_price') or 0
+                current_price_val = leg.get('current_price') or 0
+                self.logger.info(f"   └─ {leg['market_type']:<5} {leg['side']:<5} {leg['size']:>10.6f} {leg['symbol']:<12} @ ${entry_price_val:.4f} → ${current_price_val:.4f} | ${leg_pnl:>8.2f} {leg_status}")
         
         self.logger.info("-" * 60)
         total_positions = len(positions_summary.get('positions', [])) + len(positions_summary.get('multi_leg_positions', []))

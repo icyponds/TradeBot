@@ -54,6 +54,12 @@ class MultiLegPosition:
     legs: List[PositionLeg] = field(default_factory=list)
     capital_at_risk: Optional[float] = None
     metadata: Dict[str, Any] = field(default_factory=dict)  # Strategy-specific data
+    current_prices: Dict[str, float] = field(default_factory=dict)  # symbol -> current price
+    
+    @property
+    def initial_capital(self) -> Optional[float]:
+        """Alias for capital_at_risk for compatibility."""
+        return self.capital_at_risk
     
     @property
     def primary_symbol(self) -> str:
@@ -77,6 +83,35 @@ class MultiLegPosition:
         """Calculate total notional value across all legs."""
         return sum(leg.size * leg.entry_price for leg in self.legs)
     
+    @property
+    def unrealized_pnl(self) -> Optional[float]:
+        """Calculate unrealized PnL across all legs based on current prices."""
+        if not self.current_prices:
+            return None
+        
+        total_pnl = 0.0
+        for leg in self.legs:
+            current_price = self.current_prices.get(leg.symbol)
+            if current_price is None:
+                continue
+            
+            if leg.side == 'long':
+                leg_pnl = (current_price - leg.entry_price) * leg.size
+            else:  # short
+                leg_pnl = (leg.entry_price - current_price) * leg.size
+            total_pnl += leg_pnl
+        
+        return total_pnl
+    
+    @property
+    def unrealized_pnl_percentage(self) -> Optional[float]:
+        """Calculate unrealized PnL percentage based on capital at risk."""
+        pnl = self.unrealized_pnl
+        if pnl is None or not self.capital_at_risk:
+            return None
+        return (pnl / self.capital_at_risk) * 100
+
+    
     def get_leg(self, market_type: str) -> Optional[PositionLeg]:
         """Get leg by market type."""
         for leg in self.legs:
@@ -92,9 +127,12 @@ class MultiLegPosition:
             'legs': [leg.to_dict() for leg in self.legs],
             'capital_at_risk': self.capital_at_risk,
             'metadata': self.metadata,
+            'current_prices': self.current_prices,
             'primary_symbol': self.primary_symbol,
             'net_delta': self.net_delta,
             'total_notional': self.total_notional,
+            'unrealized_pnl': self.unrealized_pnl,
+            'unrealized_pnl_percentage': self.unrealized_pnl_percentage,
         }
     
     @classmethod
@@ -106,6 +144,7 @@ class MultiLegPosition:
             legs=[PositionLeg.from_dict(leg) for leg in data['legs']],
             capital_at_risk=data.get('capital_at_risk'),
             metadata=data.get('metadata', {}),
+            current_prices=data.get('current_prices', {}),
         )
 
 
