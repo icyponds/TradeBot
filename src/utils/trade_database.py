@@ -596,6 +596,25 @@ class TradeDatabase:
             
             self.logger.info(f"Inserted {len(data_to_insert)} candles for {symbol} {timeframe}")
 
+    def get_all_timestamps(self, symbol: str, timeframe: str) -> List[datetime]:
+        """Get all timestamps to identify gaps."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT timestamp 
+                FROM market_data 
+                WHERE symbol = ? AND timeframe = ?
+                ORDER BY timestamp ASC
+            """, (symbol, timeframe))
+            
+            timestamps = []
+            for row in cursor.fetchall():
+                try:
+                    timestamps.append(datetime.fromisoformat(row[0]))
+                except ValueError:
+                    continue
+            return timestamps
+
     def get_market_data(self, symbol: str, timeframe: str, 
                        start_date: Optional[datetime] = None, 
                        end_date: Optional[datetime] = None) -> pd.DataFrame:
