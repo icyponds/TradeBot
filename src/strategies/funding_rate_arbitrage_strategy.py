@@ -456,3 +456,26 @@ class FundingRateArbitrageStrategy(BaseStrategy):
         """Get funding rate history for a symbol."""
         history = self.funding_rate_cache.get(symbol, [])
         return [r[1] for r in history[-self.funding_history_periods:]]
+    def calculate_signal_strength(self, ohlcv: Dict[str, pd.DataFrame], symbol: str = None, signal_context: Dict[str, Any] = None) -> float:
+        """
+        Calculate signal strength based on Annualized Return (APR).
+        
+        Mapping:
+        - APR 10% -> 0.5
+        - APR 50% -> 1.0
+        """
+        if signal_context and 'annualized_return' in signal_context:
+            apr = float(signal_context['annualized_return'])
+            
+            # Normalize
+            base_apr = 0.10 # 10%
+            max_apr = 0.50  # 50%
+            
+            if apr >= max_apr:
+                return 1.0
+            
+            # Map [0.10, 0.50] -> [0.5, 1.0]
+            strength = 0.5 + 0.5 * (apr - base_apr) / (max_apr - base_apr)
+            return max(0.4, min(1.0, strength)) # Floor at 0.4 for valid signals
+            
+        return 0.5

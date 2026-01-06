@@ -132,7 +132,8 @@ class AdaptiveGridStrategy(BaseStrategy):
             'strategy': 'adaptive_grid',
             'ema': current_ema,
             'atr': current_atr,
-            'adx': current_adx
+            'adx': current_adx,
+            'deviation_ratio': abs(current_price - current_ema) / (current_atr * self.grid_spacing_atr) if (current_atr * self.grid_spacing_atr) > 0 else 0
         }
 
 
@@ -204,3 +205,24 @@ class AdaptiveGridStrategy(BaseStrategy):
         # StrategyManager passes minimal data.
         # For now, rely on Take Profit being set effectively.
         return False, None
+
+    def calculate_signal_strength(self, ohlcv: Dict[str, pd.DataFrame], symbol: str = None, signal_context: Dict[str, Any] = None) -> float:
+        """
+        Calculate signal strength based on Grid Deviation.
+        
+        Mapping:
+        - Ratio 1.0 (Entry) -> 0.5
+        - Ratio 2.0 (Double Spacing) -> 1.0
+        """
+        ratio = 0.0
+        if signal_context and 'deviation_ratio' in signal_context:
+            ratio = float(signal_context['deviation_ratio'])
+            
+        if ratio < 1.0:
+            return 0.5
+            
+        max_ratio = 2.0
+        if ratio >= max_ratio:
+            return 1.0
+            
+        return 0.5 + 0.5 * (ratio - 1.0) / (max_ratio - 1.0)

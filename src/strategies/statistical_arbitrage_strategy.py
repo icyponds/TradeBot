@@ -397,5 +397,35 @@ class StatisticalArbitrageStrategy(BaseStrategy):
             'activation_pct': 0.05,
         }
 
-    def calculate_signal_strength(self, ohlcv: pd.DataFrame) -> float:
-        return 0.8
+    def calculate_signal_strength(self, ohlcv: Dict[str, pd.DataFrame], symbol: str = None, signal_context: Dict[str, Any] = None) -> float:
+        """
+        Calculate signal strength based on Z-Score magnitude.
+        
+        Mapping:
+        - Z-Score < Entry (2.0): 0.5 (Base)
+        - Z-Score 2.0 -> 0.5
+        - Z-Score 3.0 -> 0.75
+        - Z-Score >= 4.0 -> 1.0 (Max Conviction)
+        """
+        z_score = 0.0
+        
+        # Try to get from context first (most reliable)
+        if signal_context and 'z_score' in signal_context:
+            z_score = abs(signal_context['z_score'])
+        elif symbol:
+            # Try to find active spread for this symbol (re-calculation fallback)
+            # This is complex because we need the pair. 
+            # If we don't have context, we arguably shouldn't trust a fresh calc without peer.
+            pass
+            
+        # Default to entry threshold if unknown, or if z_score is small (holding)
+        if z_score < self.z_score_entry:
+            return 0.5
+            
+        # Normalize: (Z - Entry) / (Max - Entry) * 0.5 + 0.5
+        # Scale range: 2.0 to 4.0 maps to 0.5 to 1.0
+        z_max = 4.0
+        if z_score >= z_max:
+            return 1.0
+            
+        return 0.5 + 0.5 * (z_score - self.z_score_entry) / (z_max - self.z_score_entry)

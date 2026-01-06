@@ -61,12 +61,14 @@ class BaseStrategy(ABC):
         """
         pass
 
-    def calculate_signal_strength(self, ohlcv: Dict[str, pd.DataFrame]) -> float:
+    def calculate_signal_strength(self, ohlcv: Dict[str, pd.DataFrame], symbol: str = None, signal_context: Dict[str, Any] = None) -> float:
         """
         Calculate the strength of the trading signal.
         
         Args:
             ohlcv: Dictionary mapping timeframe to OHLCV DataFrame
+            symbol: Optional symbol being analyzed (required for stateful strategies)
+            signal_context: Optional context from generated signal (e.g. z-score), prevents recalculation
             
         Returns:
             Signal strength between 0.0 and 1.0

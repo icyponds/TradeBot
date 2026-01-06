@@ -1585,7 +1585,7 @@ class StrategyManager:
                 return False
         
         # Calculate signal strength and volatility
-        base_strength = self.strategies[strategy_name].calculate_signal_strength(ohlcv)
+        base_strength = self.strategies[strategy_name].calculate_signal_strength(ohlcv, symbol=symbol, signal_context=signal)
         
         # Apply history-based modifier from strategy selector
         # (Boosts winning strategies, penalizes losing ones)

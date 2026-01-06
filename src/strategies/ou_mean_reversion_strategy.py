@@ -622,3 +622,25 @@ class OUMeanReversionStrategy(BaseStrategy):
         self.logger.info(f"Found {len(tradeable)} tradeable assets out of {len(symbols)}")
         return tradeable
 
+    def calculate_signal_strength(self, ohlcv: Dict[str, pd.DataFrame], symbol: str = None, signal_context: Dict[str, Any] = None) -> float:
+        """
+        Calculate signal strength based on OU Z-Score.
+        
+        Mapping:
+        - Z-Score < Entry (2.0): 0.5
+        - Z-Score 2.0 -> 0.5
+        - Z-Score 4.0 -> 1.0
+        """
+        z_score = 0.0
+        if signal_context and 'zscore' in signal_context:
+            z_score = abs(signal_context['zscore'])
+        
+        # Default/Safety
+        if z_score < self.zscore_entry:
+            return 0.5
+            
+        z_max = 4.0
+        if z_score >= z_max:
+            return 1.0
+            
+        return 0.5 + 0.5 * (z_score - self.zscore_entry) / (z_max - self.zscore_entry)

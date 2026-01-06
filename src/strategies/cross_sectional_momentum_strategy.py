@@ -188,3 +188,15 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
             'trail_pct': 0.04,
             'activation_pct': 0.05
         }
+    def calculate_signal_strength(self, ohlcv: Dict[str, pd.DataFrame], symbol: str = None, signal_context: Dict[str, Any] = None) -> float:
+        """
+        Calculate signal strength based on Rank Confidence.
+        
+        Rank Confidence = abs(Rank - 0.5) * 2
+        - Top/Bottom 1% -> ~1.0
+        - Top/Bottom 10% -> ~0.8
+        """
+        if signal_context and 'confidence' in signal_context:
+            return float(signal_context['confidence'])
+            
+        return 0.5

@@ -159,3 +159,23 @@ class LiquidationHunterStrategy(BaseStrategy):
             'trail_pct': 0.005,      # 0.5% trailing
             'activation_pct': 0.005, # Activate immediately
         }
+    def calculate_signal_strength(self, ohlcv: Dict[str, pd.DataFrame], symbol: str = None, signal_context: Dict[str, Any] = None) -> float:
+        """
+        Calculate signal strength based on Liquidation Z-Score.
+        
+        Mapping:
+        - Z-Score 3.5 (Entry) -> 0.5
+        - Z-Score 5.0 (Max) -> 1.0
+        """
+        z_score = 0.0
+        if signal_context and 'z_score' in signal_context:
+            z_score = abs(signal_context['z_score'])
+            
+        if z_score < self.std_dev_threshold:
+            return 0.5
+            
+        z_max = 5.0
+        if z_score >= z_max:
+            return 1.0
+            
+        return 0.5 + 0.5 * (z_score - self.std_dev_threshold) / (z_max - self.std_dev_threshold)

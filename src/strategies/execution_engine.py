@@ -357,7 +357,7 @@ class ExecutionEngine:
         action = signal.get('action')
         
         if action == 'enter':
-            signal_strength = calculate_signal_strength_fn(ohlcv)
+            signal_strength = calculate_signal_strength_fn(ohlcv, symbol=symbol, signal_context=signal)
             # Position limit check logic would need to be moved or passed in
             # Assuming simplified flow for now or we will add the method
             self.execute_multi_leg_entry(symbol, signal, current_price, strategy_name, ohlcv, signal_strength, timestamp)
@@ -365,7 +365,7 @@ class ExecutionEngine:
             self.execute_multi_leg_exit(symbol, signal, strategy_name, strategies_map, timestamp)
         # Also accept 'open'/'close' variants used by StatisticalArbitrageStrategy
         elif action == 'open':
-            signal_strength = calculate_signal_strength_fn(ohlcv)
+            signal_strength = calculate_signal_strength_fn(ohlcv, symbol=symbol, signal_context=signal)
             self.execute_multi_leg_entry(symbol, signal, current_price, strategy_name, ohlcv, signal_strength, timestamp)
         elif action == 'close':
             self.execute_multi_leg_exit(symbol, signal, strategy_name, strategies_map, timestamp)

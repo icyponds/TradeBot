@@ -193,3 +193,17 @@ class VolatilityBreakoutStrategy(BaseStrategy):
         For now, rely on trailing stops.
         """
         return False, None
+    def calculate_signal_strength(self, ohlcv: Dict[str, pd.DataFrame], symbol: str = None, signal_context: Dict[str, Any] = None) -> float:
+        """
+        Calculate signal strength based on Trend Persistence (Hurst Exponent).
+        
+        Mapping:
+        - Hurst 0.5 -> 0.5 Strength
+        - Hurst 1.0 -> 1.0 Strength
+        """
+        if signal_context and 'hurst' in signal_context:
+            hurst = float(signal_context['hurst'])
+            # Clamp and pass through as it maps naturally (0.5 to 1.0)
+            return max(0.5, min(1.0, hurst))
+            
+        return 0.5
