@@ -4,7 +4,7 @@ import pandas as pd
 import os
 import sys
 
-def analyze_backtest(db_path='data/backtest_results.db'):
+def analyze_backtest(db_path='data/trades.db'):
     if not os.path.exists(db_path):
         print(f"Database not found at {db_path}")
         return
@@ -20,7 +20,7 @@ def analyze_backtest(db_path='data/backtest_results.db'):
         SUM(pnl) as total_pnl,
         AVG(pnl) as avg_pnl,
         AVG(pnl_percentage) as avg_pnl_pct
-    FROM trades
+    FROM backtest_trades
     GROUP BY strategy
     ORDER BY total_pnl DESC
     """
@@ -43,7 +43,7 @@ def analyze_backtest(db_path='data/backtest_results.db'):
         print("No trades found in database.")
 
     # 2. Equity Curve & Drawdown
-    query_equity = "SELECT timestamp, equity FROM equity_snapshots ORDER BY timestamp"
+    query_equity = "SELECT timestamp, equity FROM backtest_equity_snapshots ORDER BY timestamp"
     df_eq = pd.read_sql_query(query_equity, conn)
     
     if not df_eq.empty:
