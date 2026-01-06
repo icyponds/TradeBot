@@ -69,6 +69,18 @@ TradeBot/
     │   ├── correlation_manager.py # Pair Correlation Logic
     │   └── regime_hmm.py       # Market Regime Detection
     └── dashboard/          # Flask UI
+
+## Utility Scripts Reference
+The `scripts/` directory contains essential tools for maintenance and analysis:
+
+| Script | Description |
+|--------|-------------|
+| `analyze_backtest_db.py` | **Analyze Backtest Performance**: Connects to `data/trades.db` to generate performance metrics (Win Rate, Sharpes, Drawdowns) from backtest runs. |
+| `close_all_positions.py` | **Emergency Kill Switch**: Safely unwinds and closes all open positions. Run this if the bot fails to shut down gracefully. |
+| `fill_data_gaps.py` | **Data Maintenance**: Multi-purpose tool to ensure data integrity.<br>Modes:<br>`fill`: Finds and fills missing candle ranges.<br>`repair`: Mismatches check & overwrite against API.<br>`verify`: Read-only integrity check. |
+| `ingest_historical_data.py` | **Data Ingestion**: Downloads ~90 days of historical OHLCV and funding data for all active assets to prime the database for backtesting. |
+| `run_backtest.py` | **Backtest Engine**: Runs the trading simulation over historical data using the configured strategies. |
+| `run_timed_session.py` | **Timed Execution**: Runs the live trading bot for a specified duration (in seconds), useful for controlled live tests. |
 ```
 
 ## Quick Start
