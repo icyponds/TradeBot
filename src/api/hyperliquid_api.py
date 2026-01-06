@@ -26,7 +26,7 @@ import pandas as pd
 from hyperliquid.info import Info
 from hyperliquid.exchange import Exchange
 from eth_account import Account
-
+from .interface import MarketInterface
 
 # =============================================================================
 # RATE LIMITER
@@ -723,7 +723,7 @@ class ConnectionHealthMonitor:
 # MAIN API CLASS
 # =============================================================================
 
-class HyperliquidAPI:
+class HyperliquidAPI(MarketInterface):
     """
     Unified Hyperliquid API client using SDK with built-in WebSocket.
     
@@ -3180,6 +3180,10 @@ class HyperliquidAPI:
         """Subscribe to real-time data for a symbol."""
         self._subscribed_symbols.add(symbol)
         # SDK handles subscriptions via allMids automatically
+
+    def unsubscribe_symbol(self, symbol: str):
+        """Unsubscribe from real-time data for a symbol."""
+        self._subscribed_symbols.discard(symbol)
     
     def add_price_callback(self, callback: Callable):
         """Add callback for price updates."""

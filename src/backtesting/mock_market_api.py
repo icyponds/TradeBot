@@ -4,8 +4,9 @@ from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
 import pandas as pd
 import math
+from src.api.interface import MarketInterface
 
-class MockMarketAPI:
+class MockMarketAPI(MarketInterface):
     """
     Mock implementation of HyperliquidAPI for backtesting.
     Intercepts API calls and serves historical data/simulated execution.
@@ -41,6 +42,17 @@ class MockMarketAPI:
         self.perp_balance = {'withdrawable': 50000.0, 'margin_used': 0.0} # Perp wallet
         
         self.order_id_counter = 0
+        
+        # WebSocket Subscription State (Mock)
+        self._subscribed_symbols = set()
+        
+        # Cache for strategy checks
+        from collections import defaultdict
+        self.ohlcv_cache = defaultdict(dict)
+        
+        # Initialize current_time to the earliest data point to allow pair selection before run()
+        # This prevents "Simulation time not set" errors during StrategyManager init
+        self._initialize_default_time()
 
     def get_spot_token_for_perp(self, symbol: str) -> Optional[str]:
         """Mock mapping from perp to spot token."""
@@ -52,18 +64,31 @@ class MockMarketAPI:
         # Construct expected spot symbol key in historical data
         spot_symbol = f"{token}_SPOT"
         return self.get_current_price(spot_symbol)
-
-
-        # WebSocket Subscription State (Mock)
-        self._subscribed_symbols = set()
-        
-        # Cache for strategy checks
-        from collections import defaultdict
-        self.ohlcv_cache = defaultdict(dict)
         
     def set_time(self, timestamp: datetime):
         """Update the simulation time."""
         self.current_time = timestamp
+    
+    def _initialize_default_time(self):
+        """
+        Initialize current_time to a sensible default based on historical data.
+        This allows get_current_price and get_asset_info to work before run() starts.
+        """
+        earliest_time = None
+        for symbol, tf_data in self.historical_data.items():
+            for tf, df in tf_data.items():
+                if df is not None and len(df) > 0:
+                    # Use the second-to-last timestamp to ensure we have "prior" data
+                    if len(df) > 1:
+                        candidate = df.index[-2]
+                    else:
+                        candidate = df.index[-1]
+                    if earliest_time is None or candidate > earliest_time:
+                        earliest_time = candidate
+        
+        if earliest_time is not None:
+            self.current_time = earliest_time
+            self.logger.info(f"MockMarketAPI: Initialized default time to {self.current_time}")
         
     def _resolve_symbol(self, symbol: str) -> str:
         """
@@ -181,7 +206,8 @@ class MockMarketAPI:
 
     def execute_order(self, symbol: str, side: str, size: float, 
                      reduce_only: bool = False, market_type: str = 'perp', 
-                     urgency: str = 'normal', limit_price: float = None) -> Dict[str, Any]:
+                     urgency: str = 'normal', limit_price: float = None,
+                     max_slippage_bps: int = None) -> Dict[str, Any]:
         """Simulate order execution."""
         
         price = self.get_current_price(symbol)
@@ -294,6 +320,16 @@ class MockMarketAPI:
                  # Flip - remaining part is new pos
                  self.positions[pos_key]['entry_price'] = fill_price
             
+        # Calculate Fee (0.05% Taker assumed for simplicity)
+        fee_rate = 0.0005
+        fee = cost * fee_rate
+        
+        # Deduct fee from USDC/Balances
+        if market_type == 'spot':
+            self.balances['USDC'] -= fee
+        elif market_type == 'perp':
+            self.perp_balance['withdrawable'] -= fee
+
         self.order_id_counter += 1
         order_id = f"mock_{self.order_id_counter}"
         
@@ -304,12 +340,21 @@ class MockMarketAPI:
             'order_id': order_id,
             'symbol': symbol,
             'side': side,
-            'timestamp': self.current_time
+            'timestamp': self.current_time,
+            'fee': fee,
+            'total_fee': fee  # Alias
         }
         
         self.orders[order_id] = result
         
         return result
+
+    def get_execution_fee(self, order_id: Any) -> float:
+        """Get execution fee for a specific order."""
+        order = self.orders.get(order_id)
+        if order:
+            return order.get('fee', 0.0)
+        return 0.0
 
     def get_positions(self) -> List[Dict[str, Any]]:
         return [
