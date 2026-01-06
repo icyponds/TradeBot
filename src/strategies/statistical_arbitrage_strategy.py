@@ -200,6 +200,32 @@ class StatisticalArbitrageStrategy(BaseStrategy):
             return None
         
         is_entry = "Stat Arb Entry:" in reason
+        
+        # Build legs specification for atomic multi-leg execution
+        if is_entry:
+            if signal == 'buy':  # Long spread: long A, short B
+                legs = [
+                    {'symbol': symbol_a, 'market_type': 'perp', 'side': 'long', 'order_side': 'buy', 'hedge_ratio': 1.0},
+                    {'symbol': symbol_b, 'market_type': 'perp', 'side': 'short', 'order_side': 'sell', 'hedge_ratio': hedge_ratio},
+                ]
+            else:  # Short spread: short A, long B
+                legs = [
+                    {'symbol': symbol_a, 'market_type': 'perp', 'side': 'short', 'order_side': 'sell', 'hedge_ratio': 1.0},
+                    {'symbol': symbol_b, 'market_type': 'perp', 'side': 'long', 'order_side': 'buy', 'hedge_ratio': hedge_ratio},
+                ]
+        else:
+            # Exit: close both positions
+            if signal == 'buy':  # Closing a short spread
+                legs = [
+                    {'symbol': symbol_a, 'market_type': 'perp', 'side': 'close', 'order_side': 'buy', 'reduce_only': True, 'hedge_ratio': 1.0},
+                    {'symbol': symbol_b, 'market_type': 'perp', 'side': 'close', 'order_side': 'sell', 'reduce_only': True, 'hedge_ratio': hedge_ratio},
+                ]
+            else:  # Closing a long spread
+                legs = [
+                    {'symbol': symbol_a, 'market_type': 'perp', 'side': 'close', 'order_side': 'sell', 'reduce_only': True, 'hedge_ratio': 1.0},
+                    {'symbol': symbol_b, 'market_type': 'perp', 'side': 'close', 'order_side': 'buy', 'reduce_only': True, 'hedge_ratio': hedge_ratio},
+                ]
+        
         return {
             'signal': signal,
             'signal_type': 'multi_leg',
@@ -212,6 +238,9 @@ class StatisticalArbitrageStrategy(BaseStrategy):
             'hedge_ratio': hedge_ratio,
             'spread': spread.iloc[-1],
             'pair_price': current_price_b,
+            'legs': legs,
+            'atomic': True,
+            'metadata': {'symbol_a': symbol_a, 'symbol_b': symbol_b, 'entry_z_score': z_score, 'hedge_ratio': hedge_ratio},
         }
 
     # Alias to match StrategyManager call signature
