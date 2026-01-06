@@ -896,6 +896,9 @@ class StrategyManager:
             # Check liquidation risks for multi-leg positions
             self._check_liquidation_risks()
             
+            # Update position prices immediately to ensure latest data for monitoring
+            self.update_position_prices()
+
             # Continuous position monitoring and auto-closure
             position_monitoring_interval = self.config['trading']['position_monitoring_interval']
             emergency_portfolio_loss_pct = self.config.get('risk_management', {}).get('emergency_portfolio_loss_pct', 10.0)
@@ -960,8 +963,8 @@ class StrategyManager:
             
 
             
-            # Update position prices and display PnL
-            self.update_position_prices()
+            
+            # Display PnL (prices already updated at start of cycle)
             self.display_positions_pnl()
             
             # Periodically update account balance (every 10 cycles)
