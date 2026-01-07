@@ -138,8 +138,26 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
             signal = 'sell'
             reason = f"Cross-Sectional Mom: Bottom {self.bottom_n_percent:.0%} Loser (Rank {rank:.2f}, Ret {my_return:.1%})"
             
+        if signal == 'sell':
+            # Restrict shorting to higher timeframes (4h, 1d) to avoid whipsaws
+            if self.timeframe not in ['4h', '1d']:
+                self.logger.debug(f"{symbol}: Short signal rejected (Timeframe {self.timeframe} < 4h)")
+                return None
+        
         if signal == 'hold':
             return None
+
+    def calculate_stop_loss(self, entry_price: float, side: str, signal_context: Dict[str, Any] = None) -> float:
+        """
+        Fixed 3% Stop Loss for Momentum.
+        The ExecutionEngine will clamp this if it exceeds Max Account Risk.
+        """
+        sl_pct = 0.03
+        
+        if side == 'long':
+            return entry_price * (1 - sl_pct)
+        else:
+            return entry_price * (1 + sl_pct)
             
         # 5. Trend Filter Implementation (EMA 200)
         # Only take LONG signals if Price > EMA200

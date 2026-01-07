@@ -126,7 +126,20 @@ def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None):
     config['strategies']['ou_mean_reversion']['estimation_lookback'] = 24
     config['strategies']['cointegration']['lookback_period'] = 24
     config['strategies']['volatility_breakout']['bb_length'] = 20 # Already low
+    config['strategies']['volatility_breakout']['bb_length'] = 20 # Already low
     config['strategies']['liquidation_hunter']['window'] = 20 # Already low
+    config['strategies']['cross_sectional_momentum']['lookback_period'] = 6 # Shorten for backtest warmup
+
+    # 3.2 Consolidate Strategies
+    # - Disable SentimentML (Underperforming)
+    # - Disable Liquidation Hunter 5m/1h (Underperforming)
+    if 'instances' in config['strategies']:
+        config['strategies']['instances'] = [
+            s for s in config['strategies']['instances'] 
+            if s['name'] not in ['liquidation_hunter_5m', 'liquidation_hunter_1h']
+            and not s['name'].startswith('sentiment_ml')
+        ]
+        print("Consolidated Strategies: Disabled SentimentML & LH 5m/1h.")
     
     # Increase log level
     import logging

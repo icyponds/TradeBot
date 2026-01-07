@@ -47,8 +47,8 @@ class AdaptiveGridStrategy(BaseStrategy):
 
         # RSI Mean Reversion Filter
         self.rsi_period = grid_config.get('rsi_period', 14)
-        self.rsi_long_threshold = grid_config.get('rsi_long_threshold', 40)
-        self.rsi_short_threshold = grid_config.get('rsi_short_threshold', 60)
+        self.rsi_long_threshold = grid_config.get('rsi_long_threshold', 30)
+        self.rsi_short_threshold = grid_config.get('rsi_short_threshold', 70)
         
         self.logger.info(f"Initialized Adaptive Grid Strategy: "
                         f"EMA={self.ema_period}, Spacing={self.grid_spacing_atr}xATR, ADX_Limit={self.adx_threshold}, "
@@ -190,8 +190,8 @@ class AdaptiveGridStrategy(BaseStrategy):
         """
         return {
             'enabled': True,
-            'trail_pct': 0.015,        # 1.5% trail
-            'activation_pct': 0.01,    # Activate after 1% gain
+            'trail_pct': 0.01,         # 1.0% trail (locks in 0.5% profit)
+            'activation_pct': 0.015,   # Activate after 1.5% gain
         }
 
     def should_exit(self, position: Any, current_price: float, 
@@ -224,3 +224,13 @@ class AdaptiveGridStrategy(BaseStrategy):
             return 1.0
             
         return 0.5 + 0.5 * (ratio - 1.0) / (max_ratio - 1.0)
+
+    def calculate_stop_loss(self, current_price: float, side: str, signal_context: Dict[str, Any] = None) -> float:
+        """
+        Calculate wider Stop Loss for Grid resilience (4%).
+        """
+        sl_pct = 0.04
+        if side == 'buy' or side == 'long':
+            return current_price * (1.0 - sl_pct)
+        else:
+            return current_price * (1.0 + sl_pct)

@@ -153,17 +153,22 @@ class ExecutionEngine:
             )
             
             # Use the MOST CONSERVATIVE stop loss
-            # If strategy returns None, only use risk-layer stops (account + leverage based)
+            # Logic Update: If strategy provides explicit SL, use it (subject to account safety).
+            # If not, use generic leverage-based fallback.
+            # "Account Based" (Hard Risk Cap) always applies as the worst-case floor/ceiling.
+            
             if position_side == 'long':
-                risk_layer_stops = [stop_loss_account_based, stop_loss_leverage_based]
                 if strategy_stop_loss is not None:
-                    risk_layer_stops.append(strategy_stop_loss)
-                stop_loss = max(risk_layer_stops)
+                     # Strategy knows best, but don't exceed account safety
+                     stop_loss = max(strategy_stop_loss, stop_loss_account_based)
+                else:
+                     # Use tightest of leverage-fallback vs account-safety
+                     stop_loss = max(stop_loss_leverage_based, stop_loss_account_based)
             else:
-                risk_layer_stops = [stop_loss_account_based, stop_loss_leverage_based]
                 if strategy_stop_loss is not None:
-                    risk_layer_stops.append(strategy_stop_loss)
-                stop_loss = min(risk_layer_stops)
+                     stop_loss = min(strategy_stop_loss, stop_loss_account_based)
+                else:
+                     stop_loss = min(stop_loss_leverage_based, stop_loss_account_based)
             
             # Avoid formatting errors when strategy_stop_loss is None
             strategy_stop_loss_display = (

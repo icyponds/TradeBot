@@ -98,3 +98,46 @@ class TestExecutionEngine:
         
         assert symbol not in execution_engine.positions
         mock_market_api.execute_order.assert_called()
+
+    def test_strategy_sl_prioritization(self, execution_engine, mock_market_api):
+        """Test that strategy SL is prioritized over leverage fallback if safe."""
+        symbol = "SOL"
+        current_price = 100.0
+        # Position Size 1.0, Leverage 1.0
+        # Account Equity 10000. Max Loss 3% = 300.
+        # Account SL = 100 - (300/1) = -200 (Safe)
+        
+        signal = {
+            'signal': 'buy', 'side': 'buy', 'size': 1.0, 'leverage': 1.0, 
+            'margin_required': 100.0, 'signal_strength': 1.0, 'market_volatility': 0.1
+        }
+        
+        # Mocks
+        mock_market_api.execute_order.return_value = {
+            'order_id': 999, 'status': 'filled', 'filled_size': 1.0, 'avg_fill_price': 100.0
+        }
+        
+        mock_strategy = MagicMock()
+        # Strategy wants 4% SL (Price 96.0)
+        mock_strategy.calculate_stop_loss.return_value = 96.0 
+        mock_strategy.calculate_take_profit.return_value = 110.0
+        mock_strategy.get_trailing_stop_config.return_value = {'enabled': False}
+        strategies_map = {'test_strat': mock_strategy}
+        
+        # Leverage Manager Fallback wants 1.6% SL (Price 98.4)
+        execution_engine.leverage_manager.calculate_stop_loss_with_leverage.return_value = 98.4
+        execution_engine.leverage_manager.calculate_take_profit_with_leverage.return_value = 105.0
+        execution_engine.leverage_manager.calculate_take_profit_with_capital_at_risk.return_value = 105.0
+        
+        execution_engine.portfolio_manager.total_equity = 10000.0
+        
+        # Execute
+        execution_engine.execute_trade(symbol, signal, current_price, 'test_strat', {}, strategies_map)
+        
+        # Verify Position
+        pos = execution_engine.positions[symbol]
+        
+        # OLD Logic would pick 98.4 (Tightest/Max)
+        # NEW Logic should pick 96.0 (Strategy) because it's safer than Account Limit (-200)
+        assert pos.stop_loss == 96.0
+

@@ -16,8 +16,8 @@ class TestAdaptiveGridOptimization:
                     'grid_spacing_atr': 1.5,
                     'adx_threshold': 30,
                     'rsi_period': 14,
-                    'rsi_long_threshold': 40,
-                    'rsi_short_threshold': 60
+                    'rsi_long_threshold': 30,
+                    'rsi_short_threshold': 70
                 }
             }
         }
@@ -46,16 +46,16 @@ class TestAdaptiveGridOptimization:
                 signal = strategy._generate_signal_internal(df, "BTC")
                 assert signal is None
 
-        # Case B: RSI = 30 (Low) -> Should Allow
+        # Case B: RSI = 25 (Low) -> Should Allow
         with patch('src.strategies.adaptive_grid_strategy.calculate_rsi') as mock_rsi:
-            mock_rsi.return_value = pd.Series([30] * 100)
+            mock_rsi.return_value = pd.Series([25] * 100)
             with patch('src.strategies.adaptive_grid_strategy.calculate_adx') as mock_adx:
                 mock_adx.return_value = pd.Series([20] * 100)
                 
                 signal = strategy._generate_signal_internal(df, "BTC")
                 assert signal is not None
                 assert signal['signal'] == 'buy'
-                assert "RSI=30.0" in signal['reason']
+                assert "RSI=25.0" in signal['reason']
 
     def test_rsi_short_filter(self, strategy):
         """Test that Short signal is generated ONLY when RSI > threshold."""
@@ -76,13 +76,13 @@ class TestAdaptiveGridOptimization:
                 signal = strategy._generate_signal_internal(df, "BTC")
                 assert signal is None
 
-        # Case B: RSI = 70 (High) -> Should Allow
+        # Case B: RSI = 75 (High) -> Should Allow
         with patch('src.strategies.adaptive_grid_strategy.calculate_rsi') as mock_rsi:
-            mock_rsi.return_value = pd.Series([70] * 100)
+            mock_rsi.return_value = pd.Series([75] * 100)
             with patch('src.strategies.adaptive_grid_strategy.calculate_adx') as mock_adx:
                 mock_adx.return_value = pd.Series([20] * 100)
                 
                 signal = strategy._generate_signal_internal(df, "BTC")
                 assert signal is not None
                 assert signal['signal'] == 'sell'
-                assert "RSI=70.0" in signal['reason']
+                assert "RSI=75.0" in signal['reason']

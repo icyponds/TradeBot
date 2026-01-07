@@ -1279,8 +1279,8 @@ class StrategyManager:
             
             self.logger.warning(
                 f"⚠️ Signal conflict for {symbol}: "
-                f"BUY ({best_buy['strategy_name']}, strength={buy_strength:.3f}) vs "
-                f"SELL ({best_sell['strategy_name']}, strength={sell_strength:.3f})"
+                f"BUY ({best_buy['strategy_name']}, strength={float(buy_strength or 0):.3f}) vs "
+                f"SELL ({best_sell['strategy_name']}, strength={float(sell_strength or 0):.3f})"
             )
             
             # Use the stronger signal
@@ -1444,7 +1444,7 @@ class StrategyManager:
             if 'signal_strength' in signal:
                 signal['signal_strength'] *= strategy_weight
             
-            self.logger.info(f"Executing {strategy_name} trade for {symbol} (weight: {strategy_weight:.2f})")
+            self.logger.info(f"Executing {strategy_name} trade for {symbol} (weight: {float(strategy_weight or 0):.2f})")
             self._execute_trade(symbol, signal, current_price, strategy_name, ohlcv, timestamp=timestamp)
             self._last_trade_ts_by_strategy[strategy_name] = timestamp if timestamp else datetime.now()
         else:
@@ -1504,7 +1504,7 @@ class StrategyManager:
             # Standard single-leg signal handling
             # Get strategy weight from selector
             strategy_weight = self._get_effective_strategy_weight(strategy_name)
-            self.logger.debug(f"Strategy {strategy_name} weight: {strategy_weight:.2f}")
+            self.logger.debug(f"Strategy {strategy_name} weight: {float(strategy_weight or 0):.2f}")
             
             # Check if we should act on the signal
             should_execute = self._should_execute_signal(symbol, signal, current_price, ohlcv, strategy_name)
@@ -1515,7 +1515,7 @@ class StrategyManager:
                 if 'signal_strength' in signal:
                     signal['signal_strength'] *= strategy_weight
                 
-                self.logger.info(f"Executing {strategy_name} trade for {symbol} (weight: {strategy_weight:.2f})")
+                self.logger.info(f"Executing {strategy_name} trade for {symbol} (weight: {float(strategy_weight or 0):.2f})")
                 self._execute_trade(symbol, signal, current_price, strategy_name, ohlcv, timestamp=timestamp)
             else:
                 self.logger.info(f"Skipping {strategy_name} signal for {symbol} - conditions not met")
@@ -1834,7 +1834,7 @@ class StrategyManager:
             symbol, current_price, available_capital_for_trade, strategy_name, signal_strength, market_volatility
         )
         
-        self.logger.info(f"Position calculation for {symbol}: size={position_size:.4f}, margin=${margin_required:.2f}, leverage={leverage:.1f}x")
+        self.logger.info(f"Position calculation for {symbol}: size={position_size:.4f}, margin=${float(margin_required or 0):.2f}, leverage={float(leverage or 0):.1f}x")
         
         # Check if we can open the position
         can_open = self.leverage_manager.can_open_position(symbol, margin_required, available_capital_for_trade)
@@ -2189,8 +2189,8 @@ class StrategyManager:
         )
         
         self.logger.debug(
-            f"Position score for {symbol}: PnL={pnl_score:.2f}, EV={ev_score:.2f}, "
-            f"Strategy={strategy_score:.2f}, TimeMom={time_momentum_score:.2f}, Final={final_score:.2f}"
+            f"Position score for {symbol}: PnL={float(pnl_score or 0):.2f}, EV={float(ev_score or 0):.2f}, "
+            f"Strategy={float(strategy_score or 0):.2f}, TimeMom={float(time_momentum_score or 0):.2f}, Final={float(final_score or 0):.2f}"
         )
         
         return final_score
@@ -2228,7 +2228,7 @@ class StrategyManager:
             pnl = pos.unrealized_pnl if pos else 0
             strategy = pos.strategy if pos else 'unknown'
             self.logger.info(f"  #{rank} {sym} ({strategy}): score={float(score or 0):.3f}, PnL=${float(pnl or 0):.2f}")
-        self.logger.info(f"  New signal strength: {new_signal_strength:.3f}")
+        self.logger.info(f"  New signal strength: {float(new_signal_strength or 0):.3f}")
         self.logger.info("=" * 45)
         
         # Find the position with the lowest score
