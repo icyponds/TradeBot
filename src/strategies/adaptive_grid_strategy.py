@@ -17,7 +17,7 @@ from typing import Dict, Any, Optional, Tuple
 import pandas as pd
 import numpy as np
 from .base_strategy import BaseStrategy
-from src.utils.statistics import calculate_atr, calculate_adx
+from src.utils.statistics import calculate_atr, calculate_adx, calculate_rsi
 
 class AdaptiveGridStrategy(BaseStrategy):
     """
@@ -44,9 +44,15 @@ class AdaptiveGridStrategy(BaseStrategy):
         
         # Trend Strength Filter (Regime Gating)
         self.adx_threshold = grid_config.get('adx_threshold', 30)
+
+        # RSI Mean Reversion Filter
+        self.rsi_period = grid_config.get('rsi_period', 14)
+        self.rsi_long_threshold = grid_config.get('rsi_long_threshold', 40)
+        self.rsi_short_threshold = grid_config.get('rsi_short_threshold', 60)
         
         self.logger.info(f"Initialized Adaptive Grid Strategy: "
-                        f"EMA={self.ema_period}, Spacing={self.grid_spacing_atr}xATR, ADX_Limit={self.adx_threshold}")
+                        f"EMA={self.ema_period}, Spacing={self.grid_spacing_atr}xATR, ADX_Limit={self.adx_threshold}, "
+                        f"RSI Filter=({self.rsi_long_threshold}/{self.rsi_short_threshold})")
     
     def generate_signal(self, symbol: str, ohlcv: Dict[str, pd.DataFrame]) -> Optional[Dict[str, Any]]:
         """
@@ -84,9 +90,12 @@ class AdaptiveGridStrategy(BaseStrategy):
         current_atr = atr.iloc[-1]
         
         # 3. Checker Regime (ADX)
-        # 3. Checker Regime (ADX)
+        # 3. Checker Regime (ADX & RSI)
         adx = calculate_adx(highs, lows, closes)
         current_adx = adx.iloc[-1]
+        
+        rsi = calculate_rsi(closes, self.rsi_period)
+        current_rsi = rsi.iloc[-1]
         
         # REGIME GATING: If ADX > Threshold, trend is too strong for Mean Reversion grid
         if current_adx > self.adx_threshold:
@@ -110,17 +119,21 @@ class AdaptiveGridStrategy(BaseStrategy):
         reason = ''
         
         # 5. Generate Mean Reversion Signals
-        # Entry Long: Price dips below Lower Band (oversold relative to trend)
+        # Entry Long: Price dips below Lower Band (oversold relative to trend) AND RSI is oversold
         if current_price < lower_band:
-            # Check Trend Filter: EMA should not be falling too fast?
-            # For now, simplistic grid logic: buy the dip
-            signal = 'buy'
-            reason = f"Adaptive Grid: Price {current_price} < Lower Band {lower_band:.2f} (EMA={current_ema:.2f}, ADX={current_adx:.1f})"
+            if current_rsi < self.rsi_long_threshold:
+                signal = 'buy'
+                reason = f"Adaptive Grid: Buy Dip (Price {current_price} < {lower_band:.2f}, RSI={current_rsi:.1f} < {self.rsi_long_threshold})"
+            else:
+                self.logger.debug(f"{symbol}: Grid Long skipped (RSI {current_rsi:.1f} >= {self.rsi_long_threshold})")
             
-        # Entry Short: Price spikes above Upper Band (overbought relative to trend)
+        # Entry Short: Price spikes above Upper Band (overbought relative to trend) AND RSI is overbought
         elif current_price > upper_band:
-            signal = 'sell'
-            reason = f"Adaptive Grid: Price {current_price} > Upper Band {upper_band:.2f} (EMA={current_ema:.2f}, ADX={current_adx:.1f})"
+            if current_rsi > self.rsi_short_threshold:
+                signal = 'sell'
+                reason = f"Adaptive Grid: Sell Pump (Price {current_price} > {upper_band:.2f}, RSI={current_rsi:.1f} > {self.rsi_short_threshold})"
+            else:
+                self.logger.debug(f"{symbol}: Grid Short skipped (RSI {current_rsi:.1f} <= {self.rsi_short_threshold})")
         
         if signal == 'hold':
             return None

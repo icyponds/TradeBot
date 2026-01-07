@@ -1049,7 +1049,7 @@ class StrategyManager:
         if old_price is not None:
             price_change = ((price - old_price) / old_price) * 100
             if abs(price_change) > 1.0:  # Log significant price changes (>1%)
-                self.logger.info(f"Real-time price update for {symbol}: ${old_price:.4f} → ${price:.4f} ({price_change:+.2f}%)")
+                self.logger.info(f"Real-time price update for {symbol}: ${float(old_price or 0):.4f} → ${float(price or 0):.4f} ({float(price_change or 0):+.2f}%)")
         
         # Notify callbacks
         for callback in self._price_callbacks:
@@ -1606,7 +1606,7 @@ class StrategyManager:
             
             # Threshold: Single > Arb * 1.5
             if new_strength > (arb_strength * 1.5):
-                self.logger.info(f"☢️ NUCLEAR DISPLACEMENT: New Single ({new_strength:.2f}) > Arb ({arb_strength:.2f} * 1.5). Closing Arb.")
+                self.logger.info(f"☢️ NUCLEAR DISPLACEMENT: New Single ({float(new_strength or 0):.2f}) > Arb ({float(arb_strength or 0):.2f} * 1.5). Closing Arb.")
                 return 'displacement_arb'
             else:
                 return 'block' # Arb protects itself
@@ -1654,16 +1654,16 @@ class StrategyManager:
         if is_opposing:
             # Strength Hysteresis: New > Old * 1.3 (increased from 1.1 to reduce premature flips)
             if new_strength > (old_strength * 1.3):
-                self.logger.info(f"🔄 FLIP Conflict: New ({new_strength:.2f}) > Old ({old_strength:.2f} * 1.3). Flipping.")
+                self.logger.info(f"🔄 FLIP Conflict: New ({float(new_strength or 0):.2f}) > Old ({float(old_strength or 0):.2f} * 1.3). Flipping.")
                 return 'flip'
             else:
-                self.logger.debug(f"🛡️ BLOCK Conflict: New ({new_strength:.2f}) <= Old ({old_strength:.2f} * 1.3). Holding.")
+                self.logger.debug(f"🛡️ BLOCK Conflict: New ({float(new_strength or 0):.2f}) <= Old ({float(old_strength or 0):.2f} * 1.3). Holding.")
                 return 'block'
                 
         # B. Same Direction (Long vs Long)
         # Upgrade Only: New > Old + 0.5 (increased from 0.2 to prevent premature closures)
         if new_strength > (old_strength + 0.5):
-            self.logger.info(f"⬆️ UPGRADE Conflict: New ({new_strength:.2f}) > Old ({old_strength:.2f} + 0.5). Resizing.")
+            self.logger.info(f"⬆️ UPGRADE Conflict: New ({float(new_strength or 0):.2f}) > Old ({float(old_strength or 0):.2f} + 0.5). Resizing.")
             return 'upgrade'
             
         return 'block'
@@ -2227,7 +2227,7 @@ class StrategyManager:
             pos = self.positions.get(sym)
             pnl = pos.unrealized_pnl if pos else 0
             strategy = pos.strategy if pos else 'unknown'
-            self.logger.info(f"  #{rank} {sym} ({strategy}): score={score:.3f}, PnL=${pnl:.2f}")
+            self.logger.info(f"  #{rank} {sym} ({strategy}): score={float(score or 0):.3f}, PnL=${float(pnl or 0):.2f}")
         self.logger.info(f"  New signal strength: {new_signal_strength:.3f}")
         self.logger.info("=" * 45)
         
@@ -2251,16 +2251,16 @@ class StrategyManager:
             self.logger.info(
                 f"{'⚡ CAPITAL ROTATION' if at_limit else '🔄 CAPITAL ROTATION'}: "
                 f"Closing {least_profitable_symbol} ({least_profitable_pos.strategy if least_profitable_pos else 'unknown'}) "
-                f"[score={least_profitable_score:.3f}, PnL=${pnl_value:.2f}] "
-                f"for new trade [strength={new_signal_strength:.3f}] "
-                f"(diff={score_difference:.3f} > threshold={threshold:.2f})"
+                f"[score={float(least_profitable_score or 0):.3f}, PnL=${float(pnl_value or 0):.2f}] "
+                f"for new trade [strength={float(new_signal_strength or 0):.3f}] "
+                f"(diff={float(score_difference or 0):.3f} > threshold={float(threshold or 0):.2f})"
             )
             self.close_position(least_profitable_symbol, reason)
             return True
         else:
             self.logger.info(
-                f"❌ Capital rotation rejected: {least_profitable_symbol} score ({least_profitable_score:.3f}) "
-                f"+ threshold ({threshold:.2f}) > new signal ({new_signal_strength:.3f})"
+                f"❌ Capital rotation rejected: {least_profitable_symbol} score ({float(least_profitable_score or 0):.3f}) "
+                f"+ threshold ({float(threshold or 0):.2f}) > new signal ({float(new_signal_strength or 0):.3f})"
             )
         
         return False
@@ -2557,7 +2557,7 @@ class StrategyManager:
                     leg_status = "🟢" if leg_pnl > 0 else ("🔴" if leg_pnl < 0 else "⚪")
                 entry_price_val = leg.get('entry_price') or 0
                 current_price_val = leg.get('current_price') or 0
-                self.logger.info(f"   └─ {leg['market_type']:<5} {leg['side']:<5} {leg['size']:>10.6f} {leg['symbol']:<12} @ ${entry_price_val:.4f} → ${current_price_val:.4f} | ${leg_pnl:>8.2f} {leg_status}")
+                self.logger.info(f"   └─ {leg['market_type']:<5} {leg['side']:<5} {leg['size']:>10.6f} {leg['symbol']:<12} @ ${float(entry_price_val or 0):.4f} → ${float(current_price_val or 0):.4f} | ${float(leg_pnl or 0):>8.2f} {leg_status}")
         
         self.logger.info("-" * 60)
         total_positions = len(positions_summary.get('positions', [])) + len(positions_summary.get('multi_leg_positions', []))

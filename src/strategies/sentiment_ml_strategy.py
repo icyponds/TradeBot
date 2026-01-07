@@ -44,7 +44,11 @@ class SentimentMLStrategy(BaseStrategy):
         # Lookback for Z-Score normalization
         self.normalization_lookback = sent_config.get('normalization_lookback', 24 * 7) # 1 week
         
-        self.logger.info(f"Initialized Sentiment ML Strategy: Threshold={self.sentiment_threshold}")
+        # Trend Filter (EMA)
+        self.enable_trend_filter = True
+        self.trend_ema_period = sent_config.get('trend_ema_period', 200)
+
+        self.logger.info(f"Initialized Sentiment ML Strategy: Threshold={self.sentiment_threshold}, TrendFilter={self.enable_trend_filter} (EMA {self.trend_ema_period})")
     
     def generate_signal(self, symbol: str, ohlcv: Dict[str, pd.DataFrame]) -> Optional[Dict[str, Any]]:
         """
@@ -88,19 +92,40 @@ class SentimentMLStrategy(BaseStrategy):
             
         z_score = (current_sentiment - mean_val) / std_val
         
+        # 3. Trend Filter Calculation
+        trend_ok = True
+        trend_desc = ""
+        current_price = ohlcv['close'].iloc[-1]
+        
+        if self.enable_trend_filter and len(ohlcv) > self.trend_ema_period:
+            ema = ohlcv['close'].ewm(span=self.trend_ema_period, adjust=False).mean()
+            current_ema = ema.iloc[-1]
+            if current_price > current_ema:
+                trend_desc = "Uptrend"
+            else:
+                trend_desc = "Downtrend"
+                
         signal = 'hold'
         reason = ''
         
-        # 3. Generate Signals
-        # High Positive Sentiment -> Long
+        # 4. Generate Signals
+        # High Positive Sentiment -> Long (Hype)
+        # Filter: Only buy Hype in Uptrend (buying Hype in downtrend = bagholding)
         if z_score > self.sentiment_threshold:
-            signal = 'buy'
-            reason = f"Sentiment ML: Hype detected (Z-Score {z_score:.2f} > {self.sentiment_threshold})"
+            if not self.enable_trend_filter or current_price > current_ema:
+                signal = 'buy'
+                reason = f"Sentiment ML: Hype detected (Z-Score {z_score:.2f} > {self.sentiment_threshold}) [{trend_desc}]"
+            else:
+                self.logger.debug(f"{symbol}: Sentiment Long filtered (Price {current_price:.2f} < EMA {current_ema:.2f})")
             
         # Extreme Negative Sentiment -> Short (FUD)
+        # Filter: Only short FUD in Downtrend (shorting FUD in uptrend = bear trap)
         elif z_score < -self.sentiment_threshold:
-            signal = 'sell'
-            reason = f"Sentiment ML: FUD detected (Z-Score {z_score:.2f} < -{self.sentiment_threshold})"
+            if not self.enable_trend_filter or current_price < current_ema:
+                signal = 'sell'
+                reason = f"Sentiment ML: FUD detected (Z-Score {z_score:.2f} < -{self.sentiment_threshold}) [{trend_desc}]"
+            else:
+                self.logger.debug(f"{symbol}: Sentiment Short filtered (Price {current_price:.2f} > EMA {current_ema:.2f})")
         
         if signal == 'hold':
             return None

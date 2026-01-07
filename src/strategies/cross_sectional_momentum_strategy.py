@@ -22,6 +22,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from .base_strategy import BaseStrategy
+from src.utils.statistics import calculate_adx
 
 class CrossSectionalMomentumStrategy(BaseStrategy):
     """
@@ -45,9 +46,12 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
         self.bottom_n_percent = csm_config.get('bottom_n_percent', 0.10) # Bottom 10%
         self.rebalance_interval_hours = csm_config.get('rebalance_interval', 4)
         
+        # Market Regime Filter
+        self.adx_threshold = csm_config.get('adx_threshold', 25)
+
         self.logger.info(f"Initialized Cross-Sectional Momentum: "
                         f"Lookback={self.lookback_period}h, "
-                        f"Top/Bottom={self.top_n_percent:.0%}")
+                        f"Top/Bottom={self.top_n_percent:.0%}, ADX_Min={self.adx_threshold}")
 
     def generate_signal(self, symbol: str, ohlcv: Dict[str, pd.DataFrame]) -> Optional[Dict[str, Any]]:
         """
@@ -57,9 +61,9 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
         if data is None or len(data) < self.lookback_period:
             return None
             
-        return self._generate_signal_internal(data, symbol)
+        return self._generate_signal_internal(data, symbol, ohlcv.get(self.timeframe))
         
-    def _generate_signal_internal(self, ohlcv: pd.DataFrame, symbol: str) -> Optional[Dict[str, Any]]:
+    def _generate_signal_internal(self, ohlcv: pd.DataFrame, symbol: str, full_ohlcv: pd.DataFrame = None) -> Optional[Dict[str, Any]]:
         """
         Calculate return, update universe cache, and determine rank.
         """
@@ -77,6 +81,21 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
                 'timestamp': datetime.now(),
                 'volatility': ohlcv['close'].pct_change().std()
             }
+        
+        # 1b. Check Market Regime (ADX)
+        # We need High/Low/Close for ADX. If ohlcv has them:
+        if len(ohlcv) > 20 and 'high' in ohlcv.columns:
+            adx = calculate_adx(ohlcv['high'], ohlcv['low'], ohlcv['close'])
+            current_adx = adx.iloc[-1]
+            if current_adx < self.adx_threshold:
+                # self.logger.debug(f"CSM: Skipping {symbol} - Weak Trend (ADX {current_adx:.1f} < {self.adx_threshold})")
+                return None
+        elif full_ohlcv is not None and len(full_ohlcv) > 20:
+             # Fallback if internal ohlcv was just closes (unlikely but safe)
+            adx = calculate_adx(full_ohlcv['high'], full_ohlcv['low'], full_ohlcv['close'])
+            current_adx = adx.iloc[-1]
+            if current_adx < self.adx_threshold:
+                return None
         
         # 2. Clean old entries (once per cycle)
         now = datetime.now()
