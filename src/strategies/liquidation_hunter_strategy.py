@@ -108,20 +108,6 @@ class LiquidationHunterStrategy(BaseStrategy):
             'mean': current_ma
         }
     
-    def calculate_stop_loss(self, entry_price: float, side: str, 
-                           signal_context: Dict[str, Any] = None) -> float:
-        """
-        Tight stop loss. If price continues to deviate, we seek cover.
-        Catastrophic liquidation can go to 5-10 sigma.
-        """
-        # 1-2% deviation stop
-        sl_pct = 0.015
-        
-        if side == 'buy':
-            return entry_price * (1 - sl_pct)
-        else:
-            return entry_price * (1 + sl_pct)
-
     def calculate_take_profit(self, entry_price: float, side: str, ohlcv: Dict[str, pd.DataFrame] = None,
                              signal_strength: float = 1.0, market_volatility: float = 1.0) -> float:
         """

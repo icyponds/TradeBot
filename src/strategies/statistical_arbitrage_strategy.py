@@ -315,14 +315,6 @@ class StatisticalArbitrageStrategy(BaseStrategy):
         """
         return 0.0 # Disabled
         
-    def calculate_stop_loss(self, entry_price: float, side: str, 
-                            signal_context: Dict[str, Any] = None) -> float:
-        """
-        Disable fixed Stop Loss.
-        Exit is managed by Z-Score divergence (> 4.0) in should_exit().
-        """
-        return 0.0 # Disabled
-
     def should_exit(self, position: Any, current_price: float, 
                    current_data: Dict[str, Any] = None) -> Tuple[bool, Optional[str]]:
         """Determine if position should exit (mean reversion complete or logic break)."""

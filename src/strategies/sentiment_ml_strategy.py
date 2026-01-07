@@ -156,18 +156,6 @@ class SentimentMLStrategy(BaseStrategy):
         else:
             return entry_price - tp_dist
 
-    def calculate_stop_loss(self, entry_price: float, side: str, 
-                           signal_context: Dict[str, Any] = None) -> float:
-        """
-        If sentiment was wrong (price drops), get out fast.
-        """
-        sl_dist = entry_price * 0.03
-        
-        if side == 'buy':
-            return entry_price - sl_dist
-        else:
-            return entry_price + sl_dist
-            
     def get_trailing_stop_config(self) -> Dict[str, Any]:
         """
         Aggressive trailing stop to catch pumps and dump.

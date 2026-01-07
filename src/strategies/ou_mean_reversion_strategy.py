@@ -468,47 +468,6 @@ class OUMeanReversionStrategy(BaseStrategy):
         else:
             return entry_price * (1 - adjusted_tp)
     
-    def calculate_stop_loss(self, entry_price: float, side: str, 
-                           signal_context: Dict[str, Any] = None) -> float:
-        """
-        Calculate stop loss for OU mean reversion.
-        
-        For mean reversion, stop loss is based on the Z-score moving further
-        from the mean (wrong direction), typically 1.5-2x the entry Z-score.
-        """
-        # Default stop loss if no context available
-        if signal_context is None:
-            # Use 5% as default
-            sl_pct = 0.05
-        else:
-            # Get the entry Z-score and OU sigma (handle None values explicitly)
-            z_score = signal_context.get('z_score')
-            z_score = abs(z_score) if z_score is not None else 2.0
-            sigma = signal_context.get('sigma') or 0.02
-            mu = signal_context.get('mu') or entry_price
-            
-            # Stop loss if Z-score moves to 1.5x entry (e.g., entered at 2, stop at 3)
-            stop_z = z_score * 1.5
-            
-            # Convert back to price deviation
-            # For OU: z = (ln(price) - ln(mu)) / sigma
-            # So: ln(price) = ln(mu) + z * sigma
-            # And: price = mu * exp(z * sigma)
-            if side == 'buy':
-                # Long position - price went down to enter, stop if it goes even lower
-                sl_pct = 1 - np.exp(-stop_z * sigma)
-            else:
-                # Short position - price went up to enter, stop if it goes even higher
-                sl_pct = np.exp(stop_z * sigma) - 1
-            
-            # Clamp to reasonable range (3% to 10%)
-            sl_pct = max(0.03, min(0.10, sl_pct))
-        
-        if side == 'buy':
-            return entry_price * (1 - sl_pct)
-        else:
-            return entry_price * (1 + sl_pct)
-    
     def should_exit(self, position: Any, current_price: float, 
                    current_data: Dict[str, Any] = None) -> Tuple[bool, Optional[str]]:
         """

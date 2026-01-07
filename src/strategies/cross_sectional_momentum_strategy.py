@@ -159,19 +159,6 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
         for k in to_remove:
             del cls._universe_stats[k]
 
-    def calculate_stop_loss(self, entry_price: float, side: str, 
-                            signal_context: Dict[str, Any] = None) -> float:
-        """
-        Momentum trades can reverse quickly.
-        Wide stop (it's a portfolio play), rely on rebalancing.
-        """
-        sl_pct = 0.05 # 5% max loss per leg
-        
-        if side == 'buy':
-            return entry_price * (1 - sl_pct)
-        else:
-            return entry_price * (1 + sl_pct)
-
     def calculate_take_profit(self, entry_price: float, side: str, ohlcv: Dict[str, pd.DataFrame] = None,
                               signal_strength: float = 1.0, market_volatility: float = 1.0) -> float:
         """

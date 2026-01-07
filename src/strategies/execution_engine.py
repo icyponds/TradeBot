@@ -126,10 +126,14 @@ class ExecutionEngine:
                 'signal_strength': signal_strength,
             }
             
-            # 1. Strategy-specific stop loss
-            strategy_stop_loss = strategy.calculate_stop_loss(
-                current_price, side, signal_context
-            )
+            # 1. Strategy-specific stop loss (optional - only if method exists)
+            # Most strategies defer to risk layer by not implementing this method
+            if hasattr(strategy, 'calculate_stop_loss') and callable(getattr(strategy, 'calculate_stop_loss')):
+                strategy_stop_loss = strategy.calculate_stop_loss(
+                    current_price, side, signal_context
+                )
+            else:
+                strategy_stop_loss = None
             
             # 2. Global safety net: Max X% of account value loss per trade
             account_equity = self.portfolio_manager.total_equity if self.portfolio_manager else 10000
@@ -149,12 +153,19 @@ class ExecutionEngine:
             )
             
             # Use the MOST CONSERVATIVE stop loss
+            # If strategy returns None, only use risk-layer stops (account + leverage based)
             if position_side == 'long':
-                stop_loss = max(strategy_stop_loss, stop_loss_account_based, stop_loss_leverage_based)
+                risk_layer_stops = [stop_loss_account_based, stop_loss_leverage_based]
+                if strategy_stop_loss is not None:
+                    risk_layer_stops.append(strategy_stop_loss)
+                stop_loss = max(risk_layer_stops)
             else:
-                stop_loss = min(strategy_stop_loss, stop_loss_account_based, stop_loss_leverage_based)
+                risk_layer_stops = [stop_loss_account_based, stop_loss_leverage_based]
+                if strategy_stop_loss is not None:
+                    risk_layer_stops.append(strategy_stop_loss)
+                stop_loss = min(risk_layer_stops)
             
-            self.logger.debug(f"Stop loss calculation for {symbol}: Final={stop_loss:.4f}")
+            self.logger.debug(f"Stop loss calculation for {symbol}: Final={stop_loss:.4f} (strategy={'deferred' if strategy_stop_loss is None else strategy_stop_loss:.4f})")
             
             # === TAKE PROFIT CALCULATION ===
             strategy_take_profit = strategy.calculate_take_profit(

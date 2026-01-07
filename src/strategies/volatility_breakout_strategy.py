@@ -141,22 +141,6 @@ class VolatilityBreakoutStrategy(BaseStrategy):
 
 
 
-    def calculate_stop_loss(self, entry_price: float, side: str, 
-                           signal_context: Dict[str, Any] = None) -> float:
-        """Calculate ATR-based stop loss."""
-        # Default fallback
-        atr_sl_dist = entry_price * 0.05
-        
-        if signal_context and 'atr' in signal_context:
-            atr = signal_context['atr']
-            if atr > 0:
-                atr_sl_dist = atr * self.atr_multiplier_sl
-        
-        if side == 'buy':
-            return entry_price - atr_sl_dist
-        else:
-            return entry_price + atr_sl_dist
-
     def calculate_take_profit(self, entry_price: float, side: str, ohlcv: Dict[str, pd.DataFrame] = None,
                              signal_strength: float = 1.0, market_volatility: float = 1.0) -> float:
         """

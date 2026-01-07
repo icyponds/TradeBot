@@ -407,23 +407,6 @@ class FundingRateArbitrageStrategy(BaseStrategy):
         else:
             return entry_price * 0.5  # -50% - effectively no TP
     
-    def calculate_stop_loss(self, entry_price: float, side: str, 
-                           signal_context: Dict[str, Any] = None) -> float:
-        """
-        Calculate stop loss for funding rate arbitrage.
-        
-        Funding arb is delta-neutral, so price-based stop loss is mostly a safety net.
-        The real exit is based on funding rate normalization.
-        """
-        # Very wide stop loss since we're delta-neutral
-        # This is just a safety net for extreme scenarios (e.g., one leg fails)
-        base_sl_pct = 0.15  # 15% - wide stop for delta-neutral positions
-        
-        if side == 'buy':
-            return entry_price * (1 - base_sl_pct)
-        else:
-            return entry_price * (1 + base_sl_pct)
-    
     def should_exit(self, position: Any, current_price: float, 
                    current_data: Dict[str, Any] = None) -> Tuple[bool, Optional[str]]:
         """

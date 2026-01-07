@@ -170,21 +170,6 @@ class AdaptiveGridStrategy(BaseStrategy):
         else:
             return entry_price - tp_dist
 
-    def calculate_stop_loss(self, entry_price: float, side: str, 
-                           signal_context: Dict[str, Any] = None) -> float:
-        """
-        Calculate Stop Loss.
-        Grid strategies often run without stops or wide stops.
-        Active management (Adaptivity) is key.
-        We'll use a wide stop (e.g., 3x Grid Spacing).
-        """
-        sl_dist = entry_price * 0.05  # 5% wide stop
-        
-        if side == 'buy':
-            return entry_price - sl_dist
-        else:
-            return entry_price + sl_dist
-            
     def get_trailing_stop_config(self) -> Dict[str, Any]:
         """
         Grid strategies typically take fixed profit at levels.

@@ -83,7 +83,7 @@ class TestConflictResolution:
         with patch.object(StrategyManager, 'positions', new_callable=PropertyMock) as mock_positions:
             mock_positions.return_value = {symbol: pos}
             
-            # New Sell Signal (Strength 0.8) -> 0.8 > 0.4*1.1 (0.44) -> FLIP
+            # New Sell Signal (Strength 0.8) -> 0.8 > 0.4*1.3 (0.52) -> FLIP
             signal = {'signal': 'sell'}
             strategy_manager.strategies['TestStrategy'].calculate_signal_strength.return_value = 0.8
             
@@ -103,9 +103,9 @@ class TestConflictResolution:
         with patch.object(StrategyManager, 'positions', new_callable=PropertyMock) as mock_positions:
             mock_positions.return_value = {symbol: pos}
             
-            # New Buy Signal (Strength 0.8) -> 0.8 > 0.3 + 0.2 (0.5) -> UPGRADE
+            # New Buy Signal (Strength 0.9) -> 0.9 > 0.3 + 0.5 (0.8) -> UPGRADE
             signal = {'signal': 'buy'}
-            strategy_manager.strategies['TestStrategy'].calculate_signal_strength.return_value = 0.8
+            strategy_manager.strategies['TestStrategy'].calculate_signal_strength.return_value = 0.9
             
             should_exec = strategy_manager._should_execute_signal(symbol, signal, 50000, {}, 'TestStrategy')
             

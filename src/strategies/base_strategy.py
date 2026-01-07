@@ -94,27 +94,12 @@ class BaseStrategy(ABC):
         # portfolio/percentage-based logic upstream (PortfolioManager + LeverageManager).
         return float(risk_amount)
     
-    def calculate_stop_loss(self, entry_price: float, side: str, 
-                           signal_context: Dict[str, Any] = None) -> float:
-        """
-        Calculate stop loss price based on strategy-specific logic.
-        
-        Args:
-            entry_price: Entry price
-            side: 'buy' or 'sell'
-            signal_context: Additional context from the signal (e.g., z-score, volatility)
-            
-        Returns:
-            Stop loss price
-        """
-        # Default implementation uses a conservative fallback.
-        # Subclasses should override for strategy-specific logic.
-        stop_loss_percentage = 0.05  # 5%
-        
-        if side == 'buy':
-            return entry_price * (1 - stop_loss_percentage)
-        else:
-            return entry_price * (1 + stop_loss_percentage)
+    # NOTE: calculate_stop_loss has been removed from the strategy layer.
+    # Stop-loss is now entirely managed by the centralized risk layer:
+    #   - ExecutionEngine applies account-based and leverage-based stops
+    #   - LeverageManager.calculate_stop_loss_with_leverage() computes the stop
+    # Strategies that need custom stop-loss logic can implement calculate_stop_loss
+    # and it will be checked via hasattr in ExecutionEngine.
     
     def should_exit(self, position: Any, current_price: float, 
                    current_data: Dict[str, Any] = None) -> Tuple[bool, Optional[str]]:
