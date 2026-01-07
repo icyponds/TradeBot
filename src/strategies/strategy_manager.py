@@ -1715,7 +1715,7 @@ class StrategyManager:
             strength_modifier = self.strategy_selector.get_signal_strength_modifier(strategy_name)
             signal_strength = base_strength * strength_modifier
             if strength_modifier != 1.0:
-                self.logger.info(f"applied signal strength modifier for {strategy_name}: {strength_modifier:.2f} (base: {base_strength:.2f} -> {signal_strength:.2f})")
+                self.logger.info(f"applied signal strength modifier for {strategy_name}: {strength_modifier:.2f} (base: {float(base_strength or 0):.2f} -> {float(signal_strength or 0):.2f})")
         else:
             signal_strength = base_strength
 
@@ -1764,7 +1764,7 @@ class StrategyManager:
         if penalty_scale < 1.0:
             signal_strength = signal_strength * penalty_scale
             self.logger.info(
-                f"Applying pair penalty for {symbol}: scale={penalty_scale:.2f}, strength -> {signal_strength:.2f}"
+                f"Applying pair penalty for {symbol}: scale={penalty_scale:.2f}, strength -> {float(signal_strength or 0):.2f}"
             )
 
         # ---------------------------------------------------------
@@ -1827,7 +1827,7 @@ class StrategyManager:
         self.logger.info(
             f"Calculating position size for {symbol}: available capital=${available_capital:.2f} "
             f"(trade_capital=${available_capital_for_trade:.2f}, reserve=${reserved_amount:.2f}), "
-            f"signal_strength={signal_strength:.2f}, volatility={market_volatility:.2f}"
+            f"signal_strength={float(signal_strength or 0):.2f}, volatility={float(market_volatility or 0):.2f}"
         )
         
         position_size, margin_required, leverage = self.leverage_manager.calculate_leveraged_position_size(
@@ -2342,8 +2342,9 @@ class StrategyManager:
             # Keep reserve_pct of available capital "free" by lowering the max allocation threshold for normal trades.
             effective_max = max(0.0, float(self.max_positions_percentage) - (reserve_pct * 100.0))
 
+        alloc_pct = float(allocation.get('allocation_percentage') or 0.0)
         self.logger.info(
-            f"Portfolio allocation for {symbol}: {allocation['allocation_percentage']:.1f}% "
+            f"Portfolio allocation for {symbol}: {alloc_pct:.1f}% "
             f"(max: {effective_max:.1f}%, exploration={is_exploration}, reserve_pct={reserve_pct:.2f})"
         )
         
@@ -2486,7 +2487,8 @@ class StrategyManager:
         self.logger.info("=" * 60)
         
         # Display allocation info
-        self.logger.info(f"Portfolio Allocation: {allocation['allocation_percentage']:.1f}% / {allocation['max_allocation']}%")
+        alloc_pct = float(allocation.get('allocation_percentage') or 0.0)
+        self.logger.info(f"Portfolio Allocation: {alloc_pct:.1f}% / {allocation['max_allocation']}%")
         self.logger.info(f"Total Capital at Risk: ${allocation['total_capital_at_risk']:.2f}")
         self.logger.info(f"Available Capital: ${allocation['available_capital']:.2f}")
         

@@ -2,7 +2,7 @@ import pytest
 from unittest.mock import MagicMock, patch, ANY
 from src.strategies.strategy_manager import StrategyManager
 from src.models.trade import Position
-from datetime import datetime
+from datetime import datetime, timedelta
 
 class TestStrategyManager:
     
@@ -207,7 +207,7 @@ class TestStrategyManager:
         # Should not call close
         strategy_manager.execution_engine.close_position.assert_not_called()
 
-    def test_per_strategy_weight_clamp(self, strategy_manager, mocker):
+    def test_per_strategy_weight_clamp(self, strategy_manager):
         """Ensure weights are clamped by per-strategy caps/floors."""
         cfg_caps = {
             "adaptive_grid_5m": {"min": 0.05, "max": 0.25},
@@ -215,10 +215,10 @@ class TestStrategyManager:
         }
         strategy_manager.config["risk_management"]["strategy_weight_caps"] = cfg_caps
         # Mock selector and regime multiplier
-        strategy_manager.strategy_selector.get_strategy_weight = mocker.Mock(return_value=0.8)
-        strategy_manager._regime_allocator = mocker.Mock()
+        strategy_manager.strategy_selector.get_strategy_weight = MagicMock(return_value=0.8)
+        strategy_manager._regime_allocator = MagicMock()
         strategy_manager._regime_result = {"regime": "range"}
-        strategy_manager._regime_allocator.get_multiplier = mocker.Mock(return_value=2.0)  # doubles to 1.6
+        strategy_manager._regime_allocator.get_multiplier = MagicMock(return_value=2.0)  # doubles to 1.6
 
         # Clamped to max 0.25
         w_grid = strategy_manager._get_effective_strategy_weight("adaptive_grid_5m")
@@ -228,8 +228,13 @@ class TestStrategyManager:
         w_csm = strategy_manager._get_effective_strategy_weight("csm_4h")
         assert abs(w_csm - 1.0) < 1e-9
 
-    def test_cooldown_blocks_then_allows(self, strategy_manager, mocker):
+    def test_cooldown_blocks_then_allows(self, strategy_manager):
         """Per-strategy cooldown prevents rapid re-entry."""
+        # Fix KeyError by mocking the strategy
+        strategy_manager.strategies["adaptive_grid_15m"] = MagicMock()
+        strategy_manager.strategies["adaptive_grid_15m"].calculate_signal_strength.return_value = 1.0
+        strategy_manager.strategy_selector.get_signal_strength_modifier.return_value = 1.0
+
         strategy_manager.config["trading"]["strategy_cooldowns"] = {"adaptive_grid_15m": 300}
         strategy_manager._last_trade_ts_by_strategy["adaptive_grid_15m"] = datetime.now()
 
@@ -254,8 +259,13 @@ class TestStrategyManager:
             res = strategy_manager._should_execute_signal("BTC", signal, 100.0, {}, "adaptive_grid_15m")
             assert res is True
 
-    def test_pair_controls_blacklist_and_penalty(self, strategy_manager, mocker):
+    def test_pair_controls_blacklist_and_penalty(self, strategy_manager):
         """Blacklist skips; penalty scales signal strength."""
+        # Fix KeyError
+        strategy_manager.strategies["adaptive_grid_15m"] = MagicMock()
+        strategy_manager.strategies["adaptive_grid_15m"].calculate_signal_strength.return_value = 1.0
+        strategy_manager.strategy_selector.get_signal_strength_modifier.return_value = 1.0
+        
         strategy_manager.config["trading"]["pair_blacklist"] = ["BADPAIR"]
         strategy_manager.config["trading"]["pair_penalties"] = {"PENALTY": 0.5}
         signal = {"signal": "buy"}
@@ -274,8 +284,13 @@ class TestStrategyManager:
             res2 = strategy_manager._should_execute_signal("PENALTY", signal.copy(), 100.0, {}, "adaptive_grid_15m")
             assert res2 is True
 
-    def test_cost_hurdle_blocks_low_edge(self, strategy_manager, mocker):
+    def test_cost_hurdle_blocks_low_edge(self, strategy_manager):
         """Skip trades when expected edge is below hurdle."""
+        # Fix KeyError
+        strategy_manager.strategies["adaptive_grid_15m"] = MagicMock()
+        strategy_manager.strategies["adaptive_grid_15m"].calculate_signal_strength.return_value = 1.0
+        strategy_manager.strategy_selector.get_signal_strength_modifier.return_value = 1.0
+        
         strategy_manager.config["risk_management"]["cost_hurdles"] = {"adaptive_grid_15m": 6.0}
         strategy_manager.config["trading"]["pair_blacklist"] = []
         signal_low = {"signal": "buy", "expected_edge_bps": 4.0}
