@@ -121,7 +121,7 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
         try:
              # Find approximate rank
              idx = next(i for i, x in enumerate(sorted_returns) if x >= my_return)
-             rank = idx / len(sorted_returns)
+             rank = (idx + 1) / len(sorted_returns)
         except StopIteration:
             rank = 1.0
 

@@ -236,3 +236,30 @@ def calculate_adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int
     adx = dx.ewm(com=period-1, min_periods=period).mean()
     
     return adx
+
+def calculate_rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    """
+    Calculate RSI (Relative Strength Index).
+    
+    Args:
+        series: Price series
+        period: RSI period (default 14)
+        
+    Returns:
+        RSI series
+    """
+    delta = series.diff()
+    
+    up = delta.where(delta > 0, 0.0)
+    down = -delta.where(delta < 0, 0.0)
+    
+    # Use Wilder's Smoothing
+    ma_up = up.ewm(com=period-1, min_periods=period).mean()
+    ma_down = down.ewm(com=period-1, min_periods=period).mean()
+    
+    rs = ma_up / ma_down
+    rs = rs.replace([np.inf, -np.inf], np.nan)
+    
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
