@@ -165,7 +165,14 @@ class ExecutionEngine:
                     risk_layer_stops.append(strategy_stop_loss)
                 stop_loss = min(risk_layer_stops)
             
-            self.logger.debug(f"Stop loss calculation for {symbol}: Final={stop_loss:.4f} (strategy={'deferred' if strategy_stop_loss is None else strategy_stop_loss:.4f})")
+            # Avoid formatting errors when strategy_stop_loss is None
+            strategy_stop_loss_display = (
+                "deferred" if strategy_stop_loss is None else f"{strategy_stop_loss:.4f}"
+            )
+            self.logger.debug(
+                f"Stop loss calculation for {symbol}: Final={stop_loss:.4f} "
+                f"(strategy={strategy_stop_loss_display})"
+            )
             
             # === TAKE PROFIT CALCULATION ===
             strategy_take_profit = strategy.calculate_take_profit(
