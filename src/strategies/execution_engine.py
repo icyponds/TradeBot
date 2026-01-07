@@ -199,7 +199,7 @@ class ExecutionEngine:
             
             if order_result and order_result.get('filled_size', 0) > 0:
                 fill_size = order_result['filled_size']
-                fill_price = order_result['avg_fill_price']
+                fill_price = float(order_result['avg_fill_price'])
                 order_id = order_result.get('order_id')
                 
                 if order_result.get('status') == 'partial':
