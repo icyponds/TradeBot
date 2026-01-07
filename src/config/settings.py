@@ -125,6 +125,29 @@ def load_config() -> Dict[str, Any]:
                 # (Prevents dust trades and excessive slippage relative to size.)
                 "min_scale_factor": float(os.getenv("MULTI_LEG_MIN_SCALE_FACTOR", "0.10")),
             },
+
+            # Per-strategy cooldowns (seconds) to reduce churn on high-turnover strategies
+            "strategy_cooldowns": {
+                "adaptive_grid_5m": int(os.getenv("COOLDOWN_ADAPTIVE_GRID_5M", "120")),
+                "adaptive_grid_15m": int(os.getenv("COOLDOWN_ADAPTIVE_GRID_15M", "180")),
+                "vol_breakout_15m": int(os.getenv("COOLDOWN_VOL_BREAKOUT_15M", "180")),
+                "vol_breakout_1h": int(os.getenv("COOLDOWN_VOL_BREAKOUT_1H", "300")),
+                "liquidation_hunter_5m": int(os.getenv("COOLDOWN_LH_5M", "120")),
+                "liquidation_hunter_15m": int(os.getenv("COOLDOWN_LH_15M", "180")),
+                "sentiment_ml_15m": int(os.getenv("COOLDOWN_SENTIMENT_15M", "180")),
+            },
+
+            # Pair blacklist/penalties to avoid or downweight problematic symbols
+            "pair_blacklist": [
+                asset.strip()
+                for asset in os.getenv("PAIR_BLACKLIST", "").split(",")
+                if asset.strip()
+            ],
+            "pair_penalties": {
+                # symbol: scale (0-1). Example env: PAIR_PENALTY_STABLE=0.2
+                "STABLE": float(os.getenv("PAIR_PENALTY_STABLE", "1.0")),
+                "STABLE_SPOT": float(os.getenv("PAIR_PENALTY_STABLE_SPOT", "1.0")),
+            },
             
             # Strategy weighting configuration
             "max_positions_per_strategy": int(os.getenv("MAX_POSITIONS_PER_STRATEGY", "5")),  # Limit positions per strategy
@@ -196,6 +219,47 @@ def load_config() -> Dict[str, Any]:
                     for s in os.getenv("ENTRY_HURDLE_APPLY_TO", "ou_mean_reversion,stat_arb").split(",")
                     if s.strip()
                 ],
+            },
+
+            # Per-strategy weight caps/floors to keep high-churn cohorts small while
+            # allowing strong performers to scale. Values are fractions of total weight.
+            "strategy_weight_caps": {
+                # High-churn grids
+                "adaptive_grid_5m": {"min": 0.05, "max": 0.25},
+                "adaptive_grid_15m": {"min": 0.05, "max": 0.25},
+                "adaptive_grid_1h": {"min": 0.05, "max": 0.30},
+                "adaptive_grid_4h": {"min": 0.05, "max": 0.30},
+                # Breakout short TF
+                "vol_breakout_15m": {"min": 0.05, "max": 0.25},
+                "vol_breakout_1h": {"min": 0.05, "max": 0.30},
+                "vol_breakout_4h": {"min": 0.05, "max": 0.35},
+                # Liquidation hunters short TF
+                "liquidation_hunter_5m": {"min": 0.05, "max": 0.20},
+                "liquidation_hunter_15m": {"min": 0.05, "max": 0.25},
+                "liquidation_hunter_1h": {"min": 0.05, "max": 0.35},
+                # Sentiment ML (keep modest, allow to grow on performance)
+                "sentiment_ml_15m": {"min": 0.05, "max": 0.35},
+                "sentiment_ml_1h": {"min": 0.05, "max": 0.35},
+                "sentiment_ml_4h": {"min": 0.05, "max": 0.40},
+                # Mean reversion/stat-arb mid/high TF
+                "ou_mean_reversion_15m": {"min": 0.05, "max": 0.35},
+                "ou_mean_reversion_1h": {"min": 0.05, "max": 0.40},
+                "ou_mean_reversion_4h": {"min": 0.05, "max": 0.45},
+                "stat_arb_15m": {"min": 0.05, "max": 0.25},
+                "stat_arb_1h": {"min": 0.05, "max": 0.35},
+                "stat_arb_4h": {"min": 0.05, "max": 0.40},
+                # Top performer (budget ceiling higher)
+                "csm_4h": {"min": 0.10, "max": 1.00},
+            },
+            # Cost hurdle (net edge in bps) per strategy; if a signal provides expected_edge_bps/edge_bps,
+            # it must exceed this to trade. Missing edge values are ignored to stay backward compatible.
+            "cost_hurdles": {
+                "adaptive_grid_5m": float(os.getenv("COST_HURDLE_ADAPTIVE_GRID_5M", "5.0")),
+                "adaptive_grid_15m": float(os.getenv("COST_HURDLE_ADAPTIVE_GRID_15M", "5.0")),
+                "vol_breakout_15m": float(os.getenv("COST_HURDLE_VOL_BREAKOUT_15M", "6.0")),
+                "liquidation_hunter_5m": float(os.getenv("COST_HURDLE_LH_5M", "6.0")),
+                "liquidation_hunter_15m": float(os.getenv("COST_HURDLE_LH_15M", "6.0")),
+                "sentiment_ml_15m": float(os.getenv("COST_HURDLE_SENTIMENT_15M", "6.0")),
             },
         },
         

@@ -127,6 +127,8 @@ python3 -m src.main
 
 - **Position Sizing**: Configurable per strategy (default ~20% max per position).
 - **Leverage**: Dynamic (1.5x - 5x).
+- **Per-Strategy Weights**: StrategySelector weights are performance-based and now honor per-strategy caps/floors (configurable in `risk_management.strategy_weight_caps`) so high-churn strategies stay small while strong performers can scale.
+- **Cooldowns & Pair Controls**: Per-strategy cooldowns, pair blacklist/penalties, and optional cost/edge hurdles (bps) are configurable to throttle high-churn strategies and avoid poor pairs.
 - **Stop Losses**:
   - **Hard Stop**: Fixed percentage (e.g., 5-10%).
   - **Trailing Stop**: Activates after profit target to lock gains.

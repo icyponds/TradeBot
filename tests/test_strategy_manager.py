@@ -207,6 +207,105 @@ class TestStrategyManager:
         # Should not call close
         strategy_manager.execution_engine.close_position.assert_not_called()
 
+    def test_per_strategy_weight_clamp(self, strategy_manager, mocker):
+        """Ensure weights are clamped by per-strategy caps/floors."""
+        cfg_caps = {
+            "adaptive_grid_5m": {"min": 0.05, "max": 0.25},
+            "csm_4h": {"min": 0.10, "max": 1.00},
+        }
+        strategy_manager.config["risk_management"]["strategy_weight_caps"] = cfg_caps
+        # Mock selector and regime multiplier
+        strategy_manager.strategy_selector.get_strategy_weight = mocker.Mock(return_value=0.8)
+        strategy_manager._regime_allocator = mocker.Mock()
+        strategy_manager._regime_result = {"regime": "range"}
+        strategy_manager._regime_allocator.get_multiplier = mocker.Mock(return_value=2.0)  # doubles to 1.6
+
+        # Clamped to max 0.25
+        w_grid = strategy_manager._get_effective_strategy_weight("adaptive_grid_5m")
+        assert abs(w_grid - 0.25) < 1e-9
+
+        # Clamped to min 0.10 (base*mult=1.6 -> clamp to 1.0 cap, but min=0.10)
+        w_csm = strategy_manager._get_effective_strategy_weight("csm_4h")
+        assert abs(w_csm - 1.0) < 1e-9
+
+    def test_cooldown_blocks_then_allows(self, strategy_manager, mocker):
+        """Per-strategy cooldown prevents rapid re-entry."""
+        strategy_manager.config["trading"]["strategy_cooldowns"] = {"adaptive_grid_15m": 300}
+        strategy_manager._last_trade_ts_by_strategy["adaptive_grid_15m"] = datetime.now()
+
+        signal = {"signal": "buy"}
+        with patch.object(strategy_manager, "_resolve_conflict", return_value="proceed"), \
+             patch.object(strategy_manager, "_calculate_market_volatility", return_value=0.2), \
+             patch.object(strategy_manager, "_should_execute_with_position_limit", return_value=True), \
+             patch.object(strategy_manager, "_count_positions_for_strategy", return_value=0), \
+             patch.object(strategy_manager.leverage_manager, "calculate_leveraged_position_size", return_value=(1.0, 10.0, 1.0)), \
+             patch.object(strategy_manager.leverage_manager, "can_open_position", return_value=True):
+            res = strategy_manager._should_execute_signal("BTC", signal, 100.0, {}, "adaptive_grid_15m")
+            assert res is False
+
+        # Advance time beyond cooldown
+        strategy_manager._last_trade_ts_by_strategy["adaptive_grid_15m"] = datetime.now() - timedelta(seconds=400)
+        with patch.object(strategy_manager, "_resolve_conflict", return_value="proceed"), \
+             patch.object(strategy_manager, "_calculate_market_volatility", return_value=0.2), \
+             patch.object(strategy_manager, "_should_execute_with_position_limit", return_value=True), \
+             patch.object(strategy_manager, "_count_positions_for_strategy", return_value=0), \
+             patch.object(strategy_manager.leverage_manager, "calculate_leveraged_position_size", return_value=(1.0, 10.0, 1.0)), \
+             patch.object(strategy_manager.leverage_manager, "can_open_position", return_value=True):
+            res = strategy_manager._should_execute_signal("BTC", signal, 100.0, {}, "adaptive_grid_15m")
+            assert res is True
+
+    def test_pair_controls_blacklist_and_penalty(self, strategy_manager, mocker):
+        """Blacklist skips; penalty scales signal strength."""
+        strategy_manager.config["trading"]["pair_blacklist"] = ["BADPAIR"]
+        strategy_manager.config["trading"]["pair_penalties"] = {"PENALTY": 0.5}
+        signal = {"signal": "buy"}
+
+        with patch.object(strategy_manager, "_resolve_conflict", return_value="proceed"), \
+             patch.object(strategy_manager, "_calculate_market_volatility", return_value=0.2), \
+             patch.object(strategy_manager, "_should_execute_with_position_limit", return_value=True), \
+             patch.object(strategy_manager, "_count_positions_for_strategy", return_value=0), \
+             patch.object(strategy_manager.leverage_manager, "calculate_leveraged_position_size", return_value=(1.0, 10.0, 1.0)), \
+             patch.object(strategy_manager.leverage_manager, "can_open_position", return_value=True):
+            # Blacklisted
+            res = strategy_manager._should_execute_signal("BADPAIR", signal.copy(), 100.0, {}, "adaptive_grid_15m")
+            assert res is False
+
+            # Penalty scales strength; still allowed
+            res2 = strategy_manager._should_execute_signal("PENALTY", signal.copy(), 100.0, {}, "adaptive_grid_15m")
+            assert res2 is True
+
+    def test_cost_hurdle_blocks_low_edge(self, strategy_manager, mocker):
+        """Skip trades when expected edge is below hurdle."""
+        strategy_manager.config["risk_management"]["cost_hurdles"] = {"adaptive_grid_15m": 6.0}
+        strategy_manager.config["trading"]["pair_blacklist"] = []
+        signal_low = {"signal": "buy", "expected_edge_bps": 4.0}
+        signal_high = {"signal": "buy", "expected_edge_bps": 7.0}
+
+        common_patches = dict(
+            _resolve_conflict="proceed",
+            _calculate_market_volatility=0.2,
+            _should_execute_with_position_limit=True,
+            _count_positions_for_strategy=0,
+        )
+
+        with patch.object(strategy_manager, "_resolve_conflict", return_value="proceed"), \
+             patch.object(strategy_manager, "_calculate_market_volatility", return_value=common_patches["_calculate_market_volatility"]), \
+             patch.object(strategy_manager, "_should_execute_with_position_limit", return_value=common_patches["_should_execute_with_position_limit"]), \
+             patch.object(strategy_manager, "_count_positions_for_strategy", return_value=common_patches["_count_positions_for_strategy"]), \
+             patch.object(strategy_manager.leverage_manager, "calculate_leveraged_position_size", return_value=(1.0, 10.0, 1.0)), \
+             patch.object(strategy_manager.leverage_manager, "can_open_position", return_value=True):
+            res_low = strategy_manager._should_execute_signal("BTC", signal_low.copy(), 100.0, {}, "adaptive_grid_15m")
+            assert res_low is False
+
+        with patch.object(strategy_manager, "_resolve_conflict", return_value="proceed"), \
+             patch.object(strategy_manager, "_calculate_market_volatility", return_value=common_patches["_calculate_market_volatility"]), \
+             patch.object(strategy_manager, "_should_execute_with_position_limit", return_value=common_patches["_should_execute_with_position_limit"]), \
+             patch.object(strategy_manager, "_count_positions_for_strategy", return_value=common_patches["_count_positions_for_strategy"]), \
+             patch.object(strategy_manager.leverage_manager, "calculate_leveraged_position_size", return_value=(1.0, 10.0, 1.0)), \
+             patch.object(strategy_manager.leverage_manager, "can_open_position", return_value=True):
+            res_high = strategy_manager._should_execute_signal("BTC", signal_high.copy(), 100.0, {}, "adaptive_grid_15m")
+            assert res_high is True
+
     def test_run_trading_cycle_prioritizes_positions(self, strategy_manager):
         """Test that symbols with open positions are analyzed first."""
         # Setup: Track the order of symbol analysis

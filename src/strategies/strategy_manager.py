@@ -80,6 +80,9 @@ class StrategyManager:
         
         # Initialize pair selector
         self.pair_selector = self._initialize_pair_selector()
+
+        # Track last execution per strategy for cooldown/throttle
+        self._last_trade_ts_by_strategy = {}
         
         # Trading configuration
         # Note: timeframe is now per-strategy, not global
@@ -229,11 +232,23 @@ class StrategyManager:
     def _get_effective_strategy_weight(self, strategy_name: str) -> float:
         """Selector weight multiplied by regime multiplier (if enabled)."""
         base_weight = float(self.strategy_selector.get_strategy_weight(strategy_name))
-        if not self._regime_allocator or not self._regime_result:
-            return base_weight
-        regime = str(self._regime_result.get("regime", "range"))
-        mult = float(self._regime_allocator.get_multiplier(strategy_name, regime))
-        return max(0.0, base_weight * mult)
+
+        # Apply optional regime multiplier
+        if self._regime_allocator and self._regime_result:
+            regime = str(self._regime_result.get("regime", "range"))
+            mult = float(self._regime_allocator.get_multiplier(strategy_name, regime))
+            base_weight = base_weight * mult
+
+        # Apply per-strategy caps/floors (fractions of total weight)
+        caps_cfg = (
+            (self.config.get("risk_management", {}) or {}).get("strategy_weight_caps", {})
+            or {}
+        )
+        caps = caps_cfg.get(strategy_name) or {}
+        min_cap = float(caps.get("min", 0.0))
+        max_cap = float(caps.get("max", 1.0))
+
+        return max(min_cap, min(max_cap, base_weight))
 
     def _maybe_update_regime_and_changepoint(self) -> None:
         """Update regime and change-point state from the configured proxy symbol."""
@@ -1431,6 +1446,7 @@ class StrategyManager:
             
             self.logger.info(f"Executing {strategy_name} trade for {symbol} (weight: {strategy_weight:.2f})")
             self._execute_trade(symbol, signal, current_price, strategy_name, ohlcv, timestamp=timestamp)
+            self._last_trade_ts_by_strategy[strategy_name] = timestamp if timestamp else datetime.now()
         else:
             self.logger.info(f"Skipping {strategy_name} signal for {symbol} - conditions not met")
     
@@ -1719,7 +1735,51 @@ class StrategyManager:
         elif resolution in ['flip', 'upgrade']:
             self.close_position(symbol, reason=f'conflict_{resolution}')
             # Proceed to open new trade
-            
+
+        # ---------------------------------------------------------
+        # 2a. Per-strategy cooldown to reduce churn
+        # ---------------------------------------------------------
+        cooldowns = (self.config.get("trading", {}) or {}).get("strategy_cooldowns", {}) or {}
+        cooldown_sec = float(cooldowns.get(strategy_name, 0) or 0)
+        last_ts = self._last_trade_ts_by_strategy.get(strategy_name)
+        if cooldown_sec > 0 and last_ts:
+            elapsed = (datetime.now() - last_ts).total_seconds()
+            if elapsed < cooldown_sec:
+                self.logger.info(
+                    f"Cooldown active for {strategy_name}: waited {elapsed:.1f}s of {cooldown_sec:.0f}s"
+                )
+                return False
+
+        # ---------------------------------------------------------
+        # 2b. Pair blacklist/penalty
+        # ---------------------------------------------------------
+        trading_cfg = self.config.get("trading", {}) or {}
+        pair_blacklist = set(trading_cfg.get("pair_blacklist", []) or [])
+        if symbol in pair_blacklist:
+            self.logger.info(f"Skipping {symbol} for {strategy_name}: pair is blacklisted")
+            return False
+
+        pair_penalties = trading_cfg.get("pair_penalties", {}) or {}
+        penalty_scale = float(pair_penalties.get(symbol, 1.0) or 1.0)
+        if penalty_scale < 1.0:
+            signal_strength = signal_strength * penalty_scale
+            self.logger.info(
+                f"Applying pair penalty for {symbol}: scale={penalty_scale:.2f}, strength -> {signal_strength:.2f}"
+            )
+
+        # ---------------------------------------------------------
+        # 2c. Cost/edge hurdle (if signal provides expected edge in bps)
+        # ---------------------------------------------------------
+        cost_hurdles = (self.config.get("risk_management", {}) or {}).get("cost_hurdles", {}) or {}
+        min_edge_bps = cost_hurdles.get(strategy_name)
+        if min_edge_bps is not None:
+            edge_bps = signal.get("expected_edge_bps", signal.get("edge_bps"))
+            if edge_bps is not None and float(edge_bps) < float(min_edge_bps):
+                self.logger.info(
+                    f"Skipping {strategy_name} on {symbol}: edge {edge_bps}bps < hurdle {min_edge_bps}bps"
+                )
+                return False
+
         # ---------------------------------------------------------
         # 3. Standard Checks (Volatility, Limits)
         # ---------------------------------------------------------
