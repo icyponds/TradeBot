@@ -75,23 +75,30 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
             past_price = ohlcv['close'].iloc[-self.lookback_period]
             momentum = (current_price / past_price) - 1
             
+            # Calculate Volatility (over same lookback period)
+            volatility = ohlcv['close'].iloc[-self.lookback_period:].pct_change().std()
+            if volatility == 0 or np.isnan(volatility):
+                volatility = 1.0 # Avoid div/0
+                
+            # Score = Risk Adjusted Return
+            score = momentum / volatility
+            
             # Store in shared cache
             self._universe_stats[symbol] = {
                 'return': momentum,
+                'score': score,
                 'timestamp': datetime.now(),
-                'volatility': ohlcv['close'].pct_change().std()
+                'volatility': volatility
             }
         
         # 1b. Check Market Regime (ADX)
-        # We need High/Low/Close for ADX. If ohlcv has them:
+        # ... (ADX Logic Unchanged)
         if len(ohlcv) > 20 and 'high' in ohlcv.columns:
             adx = calculate_adx(ohlcv['high'], ohlcv['low'], ohlcv['close'])
             current_adx = adx.iloc[-1]
             if current_adx < self.adx_threshold:
-                # self.logger.debug(f"CSM: Skipping {symbol} - Weak Trend (ADX {current_adx:.1f} < {self.adx_threshold})")
                 return None
         elif full_ohlcv is not None and len(full_ohlcv) > 20:
-             # Fallback if internal ohlcv was just closes (unlikely but safe)
             adx = calculate_adx(full_ohlcv['high'], full_ohlcv['low'], full_ohlcv['close'])
             current_adx = adx.iloc[-1]
             if current_adx < self.adx_threshold:
@@ -104,24 +111,19 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
              CrossSectionalMomentumStrategy._last_cleanup = now
              
         # 3. Determine Rank
-        # Need enough assets to rank
         if len(self._universe_stats) < 5:
             return None
             
-        returns = [v['return'] for k, v in self._universe_stats.items()]
+        # Use SCORE for ranking (Risk-Adjusted Momentum)
+        scores = [v.get('score', v.get('return', 0)) for k, v in self._universe_stats.items()]
+        my_score = self._universe_stats.get(symbol, {}).get('score', 0)
         my_return = self._universe_stats.get(symbol, {}).get('return', 0)
         
-        # Calculate Percentile (0 to 1)
-        # Percentile of my_return within returns
-        rank = pd.Series(returns).rank(pct=True).iloc[list(self._universe_stats.keys()).index(symbol)] if symbol in self._universe_stats else 0.5
-        
-        # But `list(keys()).index` is unstable if dict changes. 
-        # Better: Simple comparison
-        sorted_returns = sorted(returns)
+        sorted_scores = sorted(scores)
         try:
              # Find approximate rank
-             idx = next(i for i, x in enumerate(sorted_returns) if x >= my_return)
-             rank = (idx + 1) / len(sorted_returns)
+             idx = next(i for i, x in enumerate(sorted_scores) if x >= my_score)
+             rank = (idx + 1) / len(sorted_scores)
         except StopIteration:
             rank = 1.0
 
@@ -132,11 +134,11 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
         if rank >= (1.0 - self.top_n_percent):
             # Top Winner -> Long
             signal = 'buy'
-            reason = f"Cross-Sectional Mom: Top {self.top_n_percent:.0%} Winner (Rank {rank:.2f}, Ret {my_return:.1%})"
+            reason = f"CSM (Risk-Adj): Top {self.top_n_percent:.0%} Winner (Rank {rank:.2f}, Score {my_score:.2f}, Ret {my_return:.1%})"
         elif rank <= self.bottom_n_percent:
             # Bottom Loser -> Short
             signal = 'sell'
-            reason = f"Cross-Sectional Mom: Bottom {self.bottom_n_percent:.0%} Loser (Rank {rank:.2f}, Ret {my_return:.1%})"
+            reason = f"CSM (Risk-Adj): Bottom {self.bottom_n_percent:.0%} Loser (Rank {rank:.2f}, Score {my_score:.2f}, Ret {my_return:.1%})"
             
         if signal == 'sell':
             # Restrict shorting to higher timeframes (4h, 1d) to avoid whipsaws

@@ -84,13 +84,22 @@ class AdaptiveGridStrategy(BaseStrategy):
         ema = closes.ewm(span=self.ema_period, adjust=False).mean()
         current_ema = ema.iloc[-1]
         
-        # 2. Calculate Volatility (ATR)
+        # TREND DIRECTION FILTER
+        # Calculate slope of EMA to determine trend bias
+        if len(ema) >= 2:
+            prev_ema = ema.iloc[-2]
+            ema_slope = (current_ema - prev_ema) / prev_ema
+        else:
+            ema_slope = 0.0
+
+        # Slope Threshold (e.g. 0.01% change)
+        slope_threshold = 0.0001 
+        
         # 2. Calculate Volatility (ATR)
         atr = calculate_atr(highs, lows, closes, self.atr_period)
         current_atr = atr.iloc[-1]
         
-        # 3. Checker Regime (ADX)
-        # 3. Checker Regime (ADX & RSI)
+        # 3. Check Regime (ADX & RSI)
         adx = calculate_adx(highs, lows, closes)
         current_adx = adx.iloc[-1]
         
@@ -105,9 +114,7 @@ class AdaptiveGridStrategy(BaseStrategy):
         # 4. Define Grid Bands
         band_distance = current_atr * self.grid_spacing_atr
         
-        # COST-AWARE FILTER: Ensure band distance covers fees + min profit
-        # Estimated round-trip fees ~0.06% to 0.1%, slippage ~0.05%
-        # Target min profit 0.2%
+        # COST-AWARE FILTER
         min_distance_pct = 0.003
         if (band_distance / current_price) < min_distance_pct:
             band_distance = current_price * min_distance_pct
@@ -120,18 +127,24 @@ class AdaptiveGridStrategy(BaseStrategy):
         
         # 5. Generate Mean Reversion Signals
         # Entry Long: Price dips below Lower Band (oversold relative to trend) AND RSI is oversold
+        # FILTER: Only Buy if EMA Slope is Neutral or Positive (Don't catch falling knives)
         if current_price < lower_band:
-            if current_rsi < self.rsi_long_threshold:
+            if ema_slope < -slope_threshold:
+                self.logger.debug(f"{symbol}: Grid Long skipped - Downtrend (EMA Slope {ema_slope:.5f} < -{slope_threshold})")
+            elif current_rsi < self.rsi_long_threshold:
                 signal = 'buy'
-                reason = f"Adaptive Grid: Buy Dip (Price {current_price} < {lower_band:.2f}, RSI={current_rsi:.1f} < {self.rsi_long_threshold})"
+                reason = f"Adaptive Grid: Buy Dip (Price {current_price} < {lower_band:.2f}, RSI={current_rsi:.1f}, Trend Up/Neutral)"
             else:
                 self.logger.debug(f"{symbol}: Grid Long skipped (RSI {current_rsi:.1f} >= {self.rsi_long_threshold})")
             
         # Entry Short: Price spikes above Upper Band (overbought relative to trend) AND RSI is overbought
+        # FILTER: Only Sell if EMA Slope is Neutral or Negative (Don't short a moonshot)
         elif current_price > upper_band:
-            if current_rsi > self.rsi_short_threshold:
+            if ema_slope > slope_threshold:
+                self.logger.debug(f"{symbol}: Grid Short skipped - Uptrend (EMA Slope {ema_slope:.5f} > {slope_threshold})")
+            elif current_rsi > self.rsi_short_threshold:
                 signal = 'sell'
-                reason = f"Adaptive Grid: Sell Pump (Price {current_price} > {upper_band:.2f}, RSI={current_rsi:.1f} > {self.rsi_short_threshold})"
+                reason = f"Adaptive Grid: Sell Pump (Price {current_price} > {upper_band:.2f}, RSI={current_rsi:.1f}, Trend Down/Neutral)"
             else:
                 self.logger.debug(f"{symbol}: Grid Short skipped (RSI {current_rsi:.1f} <= {self.rsi_short_threshold})")
         

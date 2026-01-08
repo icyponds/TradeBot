@@ -293,7 +293,8 @@ def load_config() -> Dict[str, Any]:
                 # The StrategySelector will dynamically weight these based on live performance.
 
                 # Statistical Arbitrage (15m, 1h, 4h)
-                {"type": "stat_arb", "name": "stat_arb_15m", "timeframe": "15m"},
+                # stat_arb_15m disabled due to poor backtest performance (-$40)
+                # {"type": "stat_arb", "name": "stat_arb_15m", "timeframe": "15m"},
                 {"type": "stat_arb", "name": "stat_arb_1h",  "timeframe": "1h"},
                 {"type": "stat_arb", "name": "stat_arb_4h",  "timeframe": "4h"},
 
@@ -313,7 +314,8 @@ def load_config() -> Dict[str, Any]:
                 {"type": "adaptive_grid", "name": "adaptive_grid_4h", "timeframe": "4h"},
                 
                 # Sentiment ML (15m, 1h, 4h)
-                {"type": "sentiment_ml", "name": "sentiment_ml_15m", "timeframe": "15m"},
+                # sentiment_ml_15m disabled due to poor backtest performance (-$49)
+                # {"type": "sentiment_ml", "name": "sentiment_ml_15m", "timeframe": "15m"},
                 {"type": "sentiment_ml", "name": "sentiment_ml_1h", "timeframe": "1h"},
                 {"type": "sentiment_ml", "name": "sentiment_ml_4h", "timeframe": "4h"},
                 
