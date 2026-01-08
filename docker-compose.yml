@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  tradebot:
+    build: .
+    image: tradebot:latest
+    container_name: tradebot
+    restart: always
+    volumes:
+      # Bind Mount source code for Hot Reloading
+      - ./src:/app/src
+      # Persist Database and Logs
+      - ./data:/app/data
+      - ./logs:/app/logs
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+    # Interactive mode for potential debugging attached
+    stdin_open: true
+    tty: true

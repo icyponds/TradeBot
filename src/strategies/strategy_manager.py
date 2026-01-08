@@ -297,7 +297,10 @@ class StrategyManager:
                         
                     module_name, class_name = STRATEGY_CLASSES[stype]
                     try:
+                        # Import and force reload the module to pick up code changes
                         module = self._importlib.import_module(f"src.strategies.{module_name}")
+                        self._importlib.reload(module)
+                        
                         strategy_class = getattr(module, class_name)
                         
                         # Instantiate
