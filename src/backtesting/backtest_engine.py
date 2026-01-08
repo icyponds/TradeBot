@@ -177,8 +177,9 @@ class BacktestEngine:
             if i % 100 == 0:
                 print(f"Progress: {i}/{total_steps} ({i/total_steps*100:.1f}%)")
                 
-        # Clean shutdown
+        # Clean shutdown and forced cleanup
         self.strategy_manager.is_running = False
+        self._teardown()
         self.logger.info("Backtest completed")
         
         return self.generate_report()
@@ -240,3 +241,50 @@ class BacktestEngine:
             self.logger.warning(f"Failed to compute backtest DB-based stats: {e}")
         
         return report
+
+    def _teardown(self):
+        """
+        Force close all open positions at the end of backtest.
+        This ensures 'Mark-to-Market' for final equity and clears the live_positions table.
+        """
+        self.logger.info("Teardown: Force closing all open positions...")
+        engine = self.strategy_manager.execution_engine
+        
+        # Close Single-Leg Positions
+        # Convert keys to list to avoid runtime error during modification
+        for symbol in list(engine.positions.keys()):
+            pos = engine.positions[symbol]
+                
+            self.logger.info(f"Closing remaining position: {symbol}")
+            # close_position signature: (symbol, reason="manual", timestamp=None)
+            # It uses market_api to get current price internally
+            engine.close_position(
+                symbol=symbol, 
+                reason="Backtest End - Force Close"
+            )
+            
+        # Close Multi-Leg Positions
+        strategies_map = self.strategy_manager.strategies
+        for pid in list(engine.multi_leg_positions.keys()):
+            pos = engine.multi_leg_positions[pid]
+            if not pos.legs:
+                continue
+                
+            # execution_engine.execute_multi_leg_exit expects a symbol to look up the position
+            # We use the first leg's symbol as the primary key
+            primary_symbol = pos.legs[0].symbol
+            
+            self.logger.info(f"Closing remaining multi-leg position: {pid}")
+            
+            # execute_multi_leg_exit(symbol, signal, strategy_name, strategies_map, timestamp)
+            engine.execute_multi_leg_exit(
+                symbol=primary_symbol,
+                signal={'urgency': 'high', 'reason': 'Backtest End - Force Close'},
+                strategy_name=pos.strategy,
+                strategies_map=strategies_map
+            )
+            
+        self.logger.info("Teardown complete. All positions closed.")
+        
+        # Final safety cleanup for any ghosts
+        self.strategy_manager.execution_engine.performance_tracker.db.clear_open_positions()

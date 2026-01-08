@@ -52,8 +52,13 @@ class TradeDatabase:
     @contextmanager
     def _get_connection(self):
         """Context manager for database connections."""
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row  # Return rows as dict-like objects
+        
+        # Optimize performance and concurrency
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        
         try:
             yield conn
             conn.commit()
@@ -582,6 +587,10 @@ class TradeDatabase:
             cursor.execute(f"DELETE FROM {self.table_prefix}trades")
             cursor.execute(f"DELETE FROM {self.table_prefix}equity_snapshots")
             cursor.execute(f"DELETE FROM {self.table_prefix}daily_pnl")
+            
+            # Also clear live positions to ensure clean slate
+            cursor.execute(f"DELETE FROM {self.table_prefix}live_positions")
+            cursor.execute(f"DELETE FROM {self.table_prefix}live_position_legs")
     
     def get_strategies(self) -> List[str]:
         """Get list of all strategies with trades."""
@@ -908,3 +917,10 @@ class TradeDatabase:
             cursor.execute(f"DELETE FROM {self.table_prefix}live_positions WHERE position_id = ?", (position_id,))
 
             return pd.DataFrame()
+
+    def clear_open_positions(self):
+        """Clear all open positions (Teardown/Reset)."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"DELETE FROM {self.table_prefix}live_position_legs")
+            cursor.execute(f"DELETE FROM {self.table_prefix}live_positions")
