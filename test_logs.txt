@@ -1,0 +1,50 @@
+INFO:CrossSectionalMomentumStrategy:Initialized Cross-Sectional Momentum: Lookback=24h, Top/Bottom=10%, ADX_Min=25
+INFO:src.strategies.strategy_manager:Initialized strategy instance: csm_1h (cross_sectional_momentum) on 1h
+INFO:src.strategies.strategy_manager:Initialized strategy manager with 1 strategies
+INFO:src.strategies.strategy_manager:  csm_1h: timeframe=1h
+INFO:src.strategies.strategy_manager:Execution interval: 15s (based on fastest strategy)
+INFO:src.strategies.strategy_manager:Position limit: 50% of portfolio
+INFO:src.strategies.strategy_manager:Dynamic leverage management enabled
+INFO:src.strategies.strategy_manager:Checking for orphan positions...
+WARNING:src.strategies.strategy_manager:Found orphan position ETH-USD (strategy: old_strat). Closing...
+INFO:src.strategies.strategy_manager:Orphan position check complete.
+.INFO:CrossSectionalMomentumStrategy:Initialized Cross-Sectional Momentum: Lookback=24h, Top/Bottom=10%, ADX_Min=25
+INFO:src.strategies.strategy_manager:Initialized strategy instance: csm_1h (cross_sectional_momentum) on 1h
+INFO:src.strategies.strategy_manager:Initialized strategy manager with 1 strategies
+INFO:src.strategies.strategy_manager:  csm_1h: timeframe=1h
+INFO:src.strategies.strategy_manager:Execution interval: 15s (based on fastest strategy)
+INFO:src.strategies.strategy_manager:Position limit: 50% of portfolio
+INFO:src.strategies.strategy_manager:Dynamic leverage management enabled
+INFO:src.strategies.strategy_manager:Checking for orphan positions...
+WARNING:src.strategies.strategy_manager:Found orphan position BTC-USD (strategy: csm_1h). Closing...
+WARNING:src.strategies.strategy_manager:Found orphan multi-leg position ml_123 (strategy: old_ml_strat). Closing...
+INFO:src.strategies.strategy_manager:Orphan position check complete.
+.INFO:CrossSectionalMomentumStrategy:Initialized Cross-Sectional Momentum: Lookback=24h, Top/Bottom=10%, ADX_Min=25
+INFO:src.strategies.strategy_manager:Initialized strategy instance: csm_1h (cross_sectional_momentum) on 1h
+INFO:src.strategies.strategy_manager:Initialized strategy manager with 1 strategies
+INFO:src.strategies.strategy_manager:  csm_1h: timeframe=1h
+INFO:src.strategies.strategy_manager:Execution interval: 15s (based on fastest strategy)
+INFO:src.strategies.strategy_manager:Position limit: 50% of portfolio
+INFO:src.strategies.strategy_manager:Dynamic leverage management enabled
+INFO:src.strategies.strategy_manager:Configuration change detected. Added: set(), Removed: {'csm_1h'}
+INFO:src.strategies.strategy_manager:Removing strategy csm_1h...
+WARNING:src.strategies.strategy_manager:Closing position BTC-USD because strategy csm_1h is removed.
+INFO:src.strategies.strategy_manager:Strategy csm_1h removed.
+F
+======================================================================
+FAIL: test_reconcile_strategies_remove_add (tests.test_strategy_manager_reconciliation.TestStrategyManagerReconciliation.test_reconcile_strategies_remove_add)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/andreacerati/.pyenv/versions/3.11.13/lib/python3.11/unittest/mock.py", line 1378, in patched
+    return func(*newargs, **newkeywargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/andreacerati/projects/TradeBot/tests/test_strategy_manager_reconciliation.py", line 97, in test_reconcile_strategies_remove_add
+    self.assertIn('stat_arb_15m', self.manager.strategies)
+AssertionError: 'stat_arb_15m' not found in {}
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.010s
+
+FAILED (failures=1)
+DEBUG: Before reconcile: ['csm_1h']
+DEBUG: After reconcile: []

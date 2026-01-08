@@ -202,6 +202,7 @@ class TradeDatabase:
                 entry_time TIMESTAMP NOT NULL,
                 stop_loss REAL,
                 take_profit REAL,
+                order_id TEXT,  -- Exchange OID for single-leg positions
                 metadata TEXT,  -- JSON string
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -217,11 +218,23 @@ class TradeDatabase:
                 side TEXT NOT NULL, -- 'buy', 'sell'
                 size REAL NOT NULL,
                 entry_price REAL,
+                order_id TEXT,  -- Exchange OID for this leg
                 FOREIGN KEY (position_id) REFERENCES {self.table_prefix}live_positions(position_id) ON DELETE CASCADE
             )
         """)
         
         cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.table_prefix}live_pos_strat ON {self.table_prefix}live_positions(strategy)")
+        
+        # Migration: Add order_id column to existing tables (backwards compatibility)
+        try:
+            cursor.execute(f"ALTER TABLE {self.table_prefix}live_positions ADD COLUMN order_id TEXT")
+        except Exception:
+            pass  # Column already exists
+        
+        try:
+            cursor.execute(f"ALTER TABLE {self.table_prefix}live_position_legs ADD COLUMN order_id TEXT")
+        except Exception:
+            pass  # Column already exists
     
     def insert_trade(self, trade_data: Dict[str, Any]) -> int:
         """
@@ -815,7 +828,7 @@ class TradeDatabase:
         cols = [
             'position_id', 'strategy', 'symbol', 'side', 'size', 
             'leverage', 'entry_price', 'entry_time', 'stop_loss', 
-            'take_profit', 'metadata', 'updated_at'
+            'take_profit', 'order_id', 'metadata', 'updated_at'
         ]
         
         with self._get_connection() as conn:
@@ -839,6 +852,7 @@ class TradeDatabase:
                 position_data['entry_time'],
                 position_data.get('stop_loss'),
                 position_data.get('take_profit'),
+                position_data.get('order_id'),  # Exchange OID
                 metadata_json,
                 datetime.now().isoformat()
             )
@@ -860,13 +874,14 @@ class TradeDatabase:
                         leg['market_type'],
                         leg['side'],
                         leg['size'],
-                        leg.get('entry_price')
+                        leg.get('entry_price'),
+                        leg.get('order_id')  # Exchange OID for this leg
                     ))
                 
                 cursor.executemany(f"""
                     INSERT INTO {self.table_prefix}live_position_legs 
-                    (position_id, symbol, market_type, side, size, entry_price)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    (position_id, symbol, market_type, side, size, entry_price, order_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                 """, leg_data)
 
     def get_all_active_positions(self) -> List[Dict[str, Any]]:

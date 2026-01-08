@@ -243,13 +243,14 @@ class ExecutionEngine:
                     stop_loss=stop_loss,
                     take_profit=take_profit,
                     capital_at_risk=margin_required,
+                    leverage=leverage,
+                    order_id=order_id,  # Exchange OID for traceability
                     trailing_stop_enabled=trailing_config.get('enabled', False),
                     trailing_stop_pct=trailing_config.get('trail_pct', 0.0),
                     trailing_stop_activation_pct=trailing_config.get('activation_pct', 0.0),
                     highest_price=fill_price if position_side == 'long' else None,
                     lowest_price=fill_price if position_side == 'short' else None,
                     trailing_stop_active=False,
-                    leverage=leverage,  # Store leverage in position
                 )
                 
                 # Record in leverage manager
@@ -847,6 +848,7 @@ class ExecutionEngine:
                     'entry_time': position.entry_time.isoformat(),
                     'stop_loss': position.stop_loss,
                     'take_profit': position.take_profit,
+                    'order_id': getattr(position, 'order_id', None),  # Exchange OID
                     'metadata': metadata,
                     'legs': [] # Single leg has no sub-legs
                 }
@@ -941,6 +943,7 @@ class ExecutionEngine:
                             take_profit=pos_data.get('take_profit'),
                             capital_at_risk=metadata.get('capital_at_risk', 0.0),
                             leverage=pos_data.get('leverage'),
+                            order_id=pos_data.get('order_id'),  # Exchange OID
                             
                             # Trailing stop params from metadata
                             trailing_stop_enabled=metadata.get('trailing_stop_enabled', False),

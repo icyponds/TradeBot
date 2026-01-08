@@ -1662,6 +1662,34 @@ class HyperliquidAPI(MarketInterface):
         
         return self._rate_limited_call(_fetch)
     
+    def get_user_fills(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """
+        Get recent fills (trade history) for the user.
+        
+        Args:
+            limit: Maximum number of fills to return
+            
+        Returns:
+            List of fill dictionaries with keys: coin, side, px, sz, time, dir, etc.
+        """
+        cache_key = f"user_fills_{limit}"
+        cached = self.cache.get(cache_key)
+        if cached is not None:
+            return cached
+        
+        def _fetch():
+            try:
+                fills = self.info.user_fills(self.public_account_address)
+                # Sort by time descending and limit
+                fills = sorted(fills, key=lambda x: x.get('time', 0), reverse=True)[:limit]
+                self.cache.set(cache_key, fills, ttl=5.0)  # Short TTL for fills
+                return fills
+            except Exception as e:
+                self.logger.error(f"Error fetching user fills: {e}")
+                return []
+        
+        return self._rate_limited_call(_fetch)
+    
     # =========================================================================
     # FUND TRANSFERS & COLLATERAL MANAGEMENT
     # =========================================================================

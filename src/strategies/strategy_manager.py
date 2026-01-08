@@ -334,6 +334,104 @@ class StrategyManager:
             import traceback
             self.logger.error(traceback.format_exc())
 
+    def sync_positions_with_exchange(self):
+        """
+        Sync local positions with exchange reality.
+        Detects and closes "ghost" positions (in DB but not on exchange).
+        """
+        try:
+            # 1. Get real positions from exchange
+            exchange_positions = self.market_api.get_positions()
+            exchange_symbols = {p['symbol'] for p in exchange_positions if p.get('size', 0) != 0}
+            
+            # 2. Get local positions
+            local_positions = list(self.execution_engine.positions.keys())
+            
+            # 3. Find ghosts (in local but not on exchange)
+            ghost_symbols = [s for s in local_positions if s not in exchange_symbols]
+            
+            if not ghost_symbols:
+                return  # All synced
+            
+            self.logger.warning(f"Ghost positions detected: {ghost_symbols}")
+            
+            # 4. Close ghost positions locally
+            for symbol in ghost_symbols:
+                pos = self.execution_engine.positions.get(symbol)
+                if not pos:
+                    continue
+                    
+                # Try to find the closing fill from recent fills
+                exit_price = pos.entry_price  # Fallback
+                reason = "External Close"
+                
+                try:
+                    fills = self.market_api.get_user_fills(limit=100)
+                    # Look for a fill that closed this position (opposite side, after entry)
+                    close_side = 'Sell' if pos.side == 'long' else 'Buy'
+                    for fill in fills:
+                        if fill.get('coin') == symbol and fill.get('side') == close_side:
+                            fill_time = fill.get('time', 0)
+                            entry_ts = pos.entry_time.timestamp() * 1000 if pos.entry_time else 0
+                            if fill_time > entry_ts:
+                                exit_price = float(fill.get('px', exit_price))
+                                if 'liquidation' in str(fill.get('dir', '')).lower():
+                                    reason = "Liquidation"
+                                else:
+                                    reason = "External Close"
+                                break
+                except Exception as e:
+                    self.logger.debug(f"Could not fetch fills for ghost reconciliation: {e}")
+                
+                self.logger.warning(f"Closing ghost position {symbol} at {exit_price} ({reason})")
+                
+                # Record the trade for PnL tracking
+                self.performance_tracker.record_trade_from_position(
+                    symbol=symbol,
+                    strategy=pos.strategy,
+                    side=pos.side,
+                    entry_price=pos.entry_price,
+                    exit_price=exit_price,
+                    size=pos.size,
+                    entry_time=pos.entry_time,
+                    exit_time=datetime.now(),
+                    capital_at_risk=pos.capital_at_risk or 0,
+                    exit_reason=reason,
+                    stop_loss=pos.stop_loss,
+                    take_profit=pos.take_profit,
+                    leverage=pos.leverage
+                )
+                
+                # Remove from local state
+                del self.execution_engine.positions[symbol]
+                
+                # Remove from DB
+                try:
+                    position_id = f"pos_{pos.strategy}_{symbol}"
+                    self.performance_tracker.db.delete_position(position_id)
+                except Exception as e:
+                    self.logger.error(f"Failed to delete ghost position from DB: {e}")
+                    
+            # Persist updated state
+            self.execution_engine.save_positions_to_db()
+            
+        except Exception as e:
+            self.logger.error(f"Error syncing positions with exchange: {e}")
+
+    def _sync_positions_periodic(self):
+        """Periodically sync positions with exchange (every 5 minutes)."""
+        try:
+            now = time.time()
+            # Check every 300 seconds (5 minutes)
+            if now - getattr(self, 'last_position_sync', 0) < 300:
+                return
+            
+            self.last_position_sync = now
+            self.sync_positions_with_exchange()
+            
+        except Exception as e:
+            self.logger.error(f"Error in position sync loop: {e}")
+
     @property
     def positions(self):
         return self.execution_engine.positions
@@ -913,73 +1011,8 @@ class StrategyManager:
             except Exception as e:
                 self.logger.error(f"Error closing position {symbol}: {e}")
     
-    def sync_positions_with_exchange(self):
-        """
-        Synchronize local positions with actual exchange positions.
-        This ensures accuracy by comparing local state with exchange state.
-        """
-        try:
-            # Get actual positions from exchange
-            exchange_positions = self.market_api.get_positions()
-            self.logger.debug(f"Exchange positions: {len(exchange_positions)}")
-            exchange_position_symbols = {pos['symbol'] for pos in exchange_positions}
-            
-            # Get local position symbols
-            local_position_symbols = set(self.positions.keys())
-            
-            # Find positions that exist locally but not on exchange (closed positions)
-            closed_positions = local_position_symbols - exchange_position_symbols
-            for symbol in closed_positions:
-                self.logger.info(f"Position {symbol} no longer exists on exchange, removing from local state")
-                if symbol in self.positions:
-                    del self.positions[symbol]
-            
-            # Find positions that exist on exchange but not locally (new positions)
-            new_positions = exchange_position_symbols - local_position_symbols
-            for symbol in new_positions:
-                exchange_pos = next(pos for pos in exchange_positions if pos['symbol'] == symbol)
-                self.logger.info(f"Found new position {symbol} on exchange, adding to local state")
-                
-                # Create new position object
-                position = Position(
-                    symbol=symbol,
-                    side=exchange_pos['side'],
-                    size=abs(exchange_pos['size']),
-                    entry_price=exchange_pos['entry_price'],
-                    entry_time=datetime.now(),  # We don't have exact entry time from exchange
-                    strategy='unknown',  # We don't know which strategy opened this
-                    current_price=exchange_pos['mark_price']
-                )
-                self.positions[symbol] = position
-            
-            # Update existing positions with current exchange data
-            for exchange_pos in exchange_positions:
-                symbol = exchange_pos['symbol']
-                if symbol in self.positions:
-                    local_pos = self.positions[symbol]
-                    # Update current price and size
-                    local_pos.current_price = exchange_pos['mark_price']
-                    local_pos.size = abs(exchange_pos['size'])
-                    
-                    # Check for significant discrepancies
-                    size_diff = abs(local_pos.size - abs(exchange_pos['size']))
-                    if size_diff > 0.001:  # Allow for small floating point differences
-                        self.logger.warning(f"Size discrepancy for {symbol}: local={local_pos.size}, exchange={exchange_pos['size']}")
-                        local_pos.size = abs(exchange_pos['size'])
-            
-            # If there are local positions but no exchange positions, clear local positions
-            # This handles the case where orders were placed but not actually filled
-            if len(exchange_positions) == 0 and len(self.positions) > 0:
-                self.logger.warning(f"No exchange positions found but {len(self.positions)} local positions exist - clearing local positions")
-                self.positions.clear()
-            
-            # Save updated positions to DB
-            self.save_positions_to_db()
-            
-            self.logger.info(f"Position sync complete: {len(self.positions)} local positions, {len(exchange_positions)} exchange positions")
-            
-        except Exception as e:
-            self.logger.error(f"Error syncing positions with exchange: {e}")
+    # NOTE: sync_positions_with_exchange is now defined earlier in the class (around line 337)
+    # with improved PnL tracking for ghost positions.
 
     def _cleanup_stale_orders(self):
         """
@@ -1195,6 +1228,9 @@ class StrategyManager:
 
                 # Live Reconciliation: Check for config changes every 60s
                 self._reconcile_strategies_periodic()
+                
+                # Sync positions with exchange every 5 minutes
+                self._sync_positions_periodic()
                 
                 # Wait for next execution cycle
                 # We always sleep here to throttle the loop and mimic interval-based execution

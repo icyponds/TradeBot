@@ -216,6 +216,7 @@ class Position:
     current_price: Optional[float] = None
     capital_at_risk: Optional[float] = None  # Actual capital at risk
     leverage: Optional[float] = None  # Leverage used for the position
+    order_id: Optional[str] = None  # Exchange order ID for traceability
     
     # Trailing stop fields
     trailing_stop_enabled: bool = False

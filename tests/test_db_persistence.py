@@ -123,5 +123,73 @@ class TestTradeDatabasePersistence(unittest.TestCase):
         except AttributeError:
              self.skipTest("Methods not implemented yet")
 
+    def test_save_and_load_position_with_order_id(self):
+        """Test that order_id is persisted and retrieved correctly."""
+        # 1. Single-leg position with order_id
+        position = {
+            'position_id': 'pos_csm_4h_BTC',
+            'strategy': 'csm_4h',
+            'symbol': 'BTC',
+            'side': 'long',
+            'size': 0.5,
+            'leverage': 5.0,
+            'entry_price': 42000.0,
+            'entry_time': datetime.now().isoformat(),
+            'stop_loss': 40000.0,
+            'take_profit': 50000.0,
+            'order_id': '0x1234abcd',  # Exchange OID
+            'metadata': {}
+        }
+        
+        # 2. Save
+        self.db.save_position(position)
+        
+        # 3. Load
+        active_positions = self.db.get_all_active_positions()
+        
+        # 4. Verify order_id is preserved
+        self.assertEqual(len(active_positions), 1)
+        saved_pos = active_positions[0]
+        self.assertEqual(saved_pos['order_id'], '0x1234abcd')
+        self.assertEqual(saved_pos['position_id'], 'pos_csm_4h_BTC')
+
+    def test_save_and_load_multi_leg_with_order_ids(self):
+        """Test that order_id is persisted for each leg in multi-leg positions."""
+        position = {
+            'position_id': 'funding_arb_ETH_123',
+            'strategy': 'funding_rate_arbitrage',
+            'symbol': 'ETH',
+            'side': 'neutral',
+            'size': 1.0,
+            'leverage': 1.0,
+            'entry_price': 2200.0,
+            'entry_time': datetime.now().isoformat(),
+            'stop_loss': None,
+            'take_profit': None,
+            'order_id': None,  # Multi-leg head has no single order_id
+            'metadata': {},
+            'legs': [
+                {'symbol': 'ETH', 'market_type': 'perp', 'side': 'short', 'size': 1.0, 'entry_price': 2200.0, 'order_id': '0xAAAA1111'},
+                {'symbol': 'ETH', 'market_type': 'spot', 'side': 'long', 'size': 1.0, 'entry_price': 2198.0, 'order_id': '0xBBBB2222'},
+            ]
+        }
+        
+        # Save
+        self.db.save_position(position)
+        
+        # Load
+        active_positions = self.db.get_all_active_positions()
+        
+        # Verify
+        self.assertEqual(len(active_positions), 1)
+        saved_pos = active_positions[0]
+        self.assertEqual(len(saved_pos['legs']), 2)
+        
+        # Verify each leg has order_id
+        perp_leg = next(l for l in saved_pos['legs'] if l['market_type'] == 'perp')
+        spot_leg = next(l for l in saved_pos['legs'] if l['market_type'] == 'spot')
+        self.assertEqual(perp_leg['order_id'], '0xAAAA1111')
+        self.assertEqual(spot_leg['order_id'], '0xBBBB2222')
+
 if __name__ == '__main__':
     unittest.main()
