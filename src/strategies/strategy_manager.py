@@ -157,6 +157,182 @@ class StrategyManager:
         self.total_positions_closed = 0
         self.emergency_stops_triggered = 0
         self.last_emergency_check = 0
+        self.last_reconcile_check = 0
+        
+        # Load sys and importlib for reloading
+        import sys
+        import importlib
+        self._sys = sys
+        self._importlib = importlib
+
+    def _check_startup_orphans(self):
+        """Check for and close active positions belonging to disabled strategies on startup."""
+        self.logger.info("Checking for orphan positions...")
+        
+        # Single-leg positions
+        positions_to_close = []
+        for symbol, pos in self.positions.items():
+            strat = getattr(pos, 'strategy', None) or pos.get('strategy')
+            if strat and strat not in self.strategies:
+                positions_to_close.append((symbol, strat))
+        
+        for symbol, strat in positions_to_close:
+            self.logger.warning(f"Found orphan position {symbol} (strategy: {strat}). Closing...")
+            self.close_position(symbol, reason="startup_orphan_cleanup")
+            
+        # Multi-leg positions
+        ml_to_close = []
+        for pid, pos in self.multi_leg_positions.items():
+             if pos.strategy not in self.strategies:
+                 ml_to_close.append((pos.primary_symbol, pid, pos.strategy))
+        
+        for symbol, pid, strat in ml_to_close:
+             self.logger.warning(f"Found orphan multi-leg position {pid} (strategy: {strat}). Closing...")
+             dummy_signal = {'action': 'exit', 'type': 'startup_orphan_cleanup', 'urgency': 'high'}
+             self._handle_multi_leg_signal(symbol, dummy_signal, 0.0, strat, {}, timestamp=datetime.now())
+             
+        self.logger.info("Orphan position check complete.")
+
+    def _reconcile_strategies_periodic(self):
+        """Periodically check for configuration changes and reconcile strategies."""
+        try:
+             now = time.time()
+             # Check every 60 seconds
+             if now - getattr(self, 'last_reconcile_check', 0) < 60:
+                 return
+             
+             self.last_reconcile_check = now
+             self.reconcile_strategies()
+             
+        except Exception as e:
+            self.logger.error(f"Error in strategy reconciliation loop: {e}")
+
+    def reconcile_strategies(self):
+        """
+        Reload configuration and reconcile active strategies.
+        - Adds new strategies found in config.
+        - Removes strategies no longer in config (and ensures positions are closed).
+        """
+        try:
+            # Reload configuration
+            if 'src.config.settings' in self._sys.modules:
+                self._importlib.reload(self._sys.modules['src.config.settings'])
+                from src.config.settings import load_config
+                new_config = load_config()
+                
+                # Check if strategies config changed
+                new_instances_cfg = new_config['strategies'].get('instances', [])
+                # Convert to dict lookup for easier comparison: name -> def
+                new_strategies_def = {}
+                if new_instances_cfg:
+                    for sdef in new_instances_cfg:
+                        name = sdef.get('name', sdef['type'])
+                        new_strategies_def[name] = sdef
+                else:
+                    # Legacy list support
+                    for sname in new_config['strategies']['enabled']:
+                        sname = sname.strip()
+                        if sname:
+                            new_strategies_def[sname] = {"type": sname, "name": sname, "timeframe": None}
+
+                current_strategy_names = set(self.strategies.keys())
+                new_strategy_names = set(new_strategies_def.keys())
+                
+                # Identify changes
+                added = new_strategy_names - current_strategy_names
+                removed = current_strategy_names - new_strategy_names
+                
+                if not added and not removed:
+                    return # No changes
+
+                self.logger.info(f"Configuration change detected. Added: {added}, Removed: {removed}")
+                
+                # 1. Handle Removed Strategies
+                for name in removed:
+                    self.logger.info(f"Removing strategy {name}...")
+                    # Close all open positions for this strategy
+                    positions_to_close = []
+                    for symbol, pos in self.positions.items():
+                        s = getattr(pos, 'strategy', None) or pos.get('strategy')
+                        if s == name:
+                            positions_to_close.append(symbol)
+                    
+                    for symbol in positions_to_close:
+                        self.logger.warning(f"Closing position {symbol} because strategy {name} is removed.")
+                        self.close_position(symbol, reason="strategy_removed")
+                        
+                    # Also check multi-leg
+                    ml_to_close = []
+                    for pid, pos in self.multi_leg_positions.items():
+                        if pos.strategy == name:
+                            ml_to_close.append((pos.primary_symbol, pid))
+                    
+                    for symbol, pid in ml_to_close:
+                        self.logger.warning(f"Closing multi-leg position {pid} because strategy {name} is removed.")
+                        # Check if we have a close method for multi-leg or trigger via signal
+                        # Simulating exit signal
+                        dummy_signal = {'action': 'exit', 'type': 'strategy_removed', 'urgency': 'high'}
+                        self._handle_multi_leg_signal(symbol, dummy_signal, 0.0, name, {}, timestamp=datetime.now())
+
+                    # Remove from active strategies
+                    del self.strategies[name]
+                    self.logger.info(f"Strategy {name} removed.")
+
+                # 2. Handle Added Strategies
+                # We need to access _initialize_strategies helper or just replicate instantiation logic.
+                # Reusing _initialize_strategies is hard because it returns a full dict.
+                # We'll instantiate individually.
+                
+                # We need the factory map
+                from src.strategies.strategy_manager import STRATEGY_CLASSES
+                
+                for name in added:
+                    sdef = new_strategies_def[name]
+                    stype = sdef['type']
+                    stimeframe = sdef.get('timeframe')
+                    
+                    if stype not in STRATEGY_CLASSES:
+                        self.logger.error(f"Unknown strategy type {stype} for {name}")
+                        continue
+                        
+                    module_name, class_name = STRATEGY_CLASSES[stype]
+                    try:
+                        module = self._importlib.import_module(f"src.strategies.{module_name}")
+                        strategy_class = getattr(module, class_name)
+                        
+                        # Instantiate
+                        # Constructor typically takes config
+                        # We should use the NEW config
+                        instance = strategy_class(new_config)
+                        
+                        # Set timeframe if applicable
+                        if stimeframe:
+                            instance.timeframe = stimeframe
+                            
+                        self.strategies[name] = instance
+                        self.logger.info(f"Strategy {name} ({stype}/{stimeframe}) initialized and added.")
+                        
+                    except Exception as e:
+                        self.logger.error(f"Failed to instantiate {name}: {e}")
+
+                # Update self.config to new_config so we don't re-trigger
+                self.config = new_config
+                
+                # Re-init strategy selector? 
+                # StrategySelector takes 'strategies_map' in some methods, but it builds its own internal list?
+                # Actually StrategySelector logic might need a refresh.
+                # Looking at StrategySelector usage in existing code... 
+                # It seems it's passed 'self.strategies' in execution calls or initialized once.
+                # If StrategySelector keeps internal state, we might need to update it.
+                # But typically it calculates weights dynamically or based on DB history.
+                
+                # Update cooldowns config
+                self.strategies_cooldowns = (self.config.get("trading", {}) or {}).get("strategy_cooldowns", {}) or {}
+                
+        except Exception as e:
+            self.logger.error(f"Error reconciling strategies: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
 
     @property
     def positions(self):
@@ -654,6 +830,9 @@ class StrategyManager:
         self.performance_tracker.set_initial_equity(initial_equity)
         self.logger.info(f"Performance tracker initialized with ${initial_equity:.2f} initial equity")
         
+        # Check for orphan positions (strategies no longer enabled)
+        self._check_startup_orphans()
+        
         # Start trading loop
         self.is_running = True
         self._run_trading_loop()
@@ -794,8 +973,8 @@ class StrategyManager:
                 self.logger.warning(f"No exchange positions found but {len(self.positions)} local positions exist - clearing local positions")
                 self.positions.clear()
             
-            # Save updated positions to file
-            self.save_positions_to_file()
+            # Save updated positions to DB
+            self.save_positions_to_db()
             
             self.logger.info(f"Position sync complete: {len(self.positions)} local positions, {len(exchange_positions)} exchange positions")
             
@@ -1013,6 +1192,9 @@ class StrategyManager:
                 # Run one cycle of trading logic
                 # This has been extracted to allow step-by-step execution in backtesting
                 self.run_trading_cycle()
+
+                # Live Reconciliation: Check for config changes every 60s
+                self._reconcile_strategies_periodic()
                 
                 # Wait for next execution cycle
                 # We always sleep here to throttle the loop and mimic interval-based execution
@@ -1073,7 +1255,7 @@ class StrategyManager:
                 if symbol in self.positions:
                     self.logger.info(f"Real-time position update: {symbol} position closed (size: {position_size})")
                     del self.positions[symbol]
-                    self.save_positions_to_file()
+                    self.save_positions_to_db()
             else:
                 # Position was opened or modified
                 if symbol not in self.positions:
@@ -1089,7 +1271,7 @@ class StrategyManager:
                         current_price=float(position_data.get('mark_price', 0))
                     )
                     self.positions[symbol] = position
-                    self.save_positions_to_file()
+                    self.save_positions_to_db()
                 else:
                     # Existing position updated
                     local_position = self.positions[symbol]
@@ -1097,7 +1279,7 @@ class StrategyManager:
                     if abs(position_size - old_size) > 0.001:  # Significant size change
                         self.logger.info(f"Real-time position update: {symbol} size changed {old_size} → {position_size}")
                         local_position.size = position_size
-                        self.save_positions_to_file()
+                        self.save_positions_to_db()
             
         except Exception as e:
             self.logger.error(f"Error handling position update: {e}")
@@ -2375,13 +2557,14 @@ class StrategyManager:
         self.logger.warning(f"Position limit reached ({len(self.positions)} positions), skipping trade for {symbol}")
         return False 
 
-    def save_positions_to_file(self):
-        """Save current positions to a JSON file."""
-        return self.execution_engine.save_positions_to_file()
+    def save_positions_to_db(self):
+        """Save current positions to the database."""
+        # Delegate to execution engine which now uses DB
+        return self.execution_engine.save_positions_to_db()
     
-    def load_positions_from_file(self):
-        """Load positions from JSON file."""
-        return self.execution_engine.load_positions_from_file()
+    def load_positions_from_db(self):
+        """Load positions from database."""
+        return self.execution_engine.load_positions_from_db()
     
     def update_position_prices(self):
         """Update current prices for all open positions (single-leg and multi-leg)."""

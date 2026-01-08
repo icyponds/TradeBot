@@ -53,7 +53,8 @@ class ExecutionEngine:
         self.winning_trades = 0
         
         # Load persisted positions if available
-        self.load_positions_from_file()
+        # Load persisted positions if available
+        self.load_positions_from_db()
         
     def check_slippage_tolerance(self, symbol: str, current_price: float, volatility: float) -> bool:
         """
@@ -263,7 +264,8 @@ class ExecutionEngine:
                 self.logger.info(f"✅ Executed {side} trade for {symbol}: {fill_size} @ {fill_price:.6f}")
                 
                 # Save positions
-                self.save_positions_to_file()
+                # Save positions
+                self.save_positions_to_db()
                 
             else:
                 self.logger.error(f"Failed to fill order for {symbol}")
@@ -333,6 +335,13 @@ class ExecutionEngine:
                 # Close in leverage manager
                 self.leverage_manager.close_position(symbol, exit_price)
                 
+                # Delete from DB persistence
+                try:
+                    position_id = f"pos_{position.strategy}_{symbol}"
+                    self.performance_tracker.db.delete_position(position_id)
+                except Exception as e:
+                    self.logger.error(f"Failed to delete position {position_id} from DB: {e}")
+
                 # Remove from positions
                 del self.positions[symbol]
                 
@@ -675,6 +684,12 @@ class ExecutionEngine:
             # Close position in leverage manager
             self.leverage_manager.close_position(position.primary_symbol, 0)
             
+            # Delete from DB persistence
+            try:
+                self.performance_tracker.db.delete_position(position.position_id)
+            except Exception as e:
+                self.logger.error(f"Failed to delete multi-leg position {position.position_id} from DB: {e}")
+
             # Remove from active positions
             del self.multi_leg_positions[position.position_id]
             
@@ -685,7 +700,8 @@ class ExecutionEngine:
                 self.winning_trades += 1
             
             # Save positions
-            self.save_positions_to_file()
+            # Save positions
+            self.save_positions_to_db()
             
             self.logger.info(f"✅ Multi-leg position closed: {position.position_id}")
             self.logger.info(f"   P&L: ${pnl_to_record:.2f}")
@@ -798,82 +814,160 @@ class ExecutionEngine:
         volatility = returns.std() * math.sqrt(252)
         return min(1.0, volatility)
 
-    def save_positions_to_file(self):
-        """Save current positions to a JSON file."""
-        # Single-leg positions
-        positions_data = {}
-        for symbol, position in self.positions.items():
-            positions_data[symbol] = {
-                'side': position.side,
-                'size': position.size,
-                'entry_price': position.entry_price,
-                'entry_time': position.entry_time.isoformat(),
-                'strategy': position.strategy,
-                'stop_loss': position.stop_loss,
-                'take_profit': position.take_profit,
-                'capital_at_risk': position.capital_at_risk,
-                'trailing_stop_enabled': position.trailing_stop_enabled,
-                'trailing_stop_pct': getattr(position, 'trailing_stop_pct', 0.0), # Safety access
-                'trailing_stop_activation_pct': getattr(position, 'trailing_stop_activation_pct', 0.0),
-                'highest_price': getattr(position, 'highest_price', None),
-                'lowest_price': getattr(position, 'lowest_price', None),
-                'trailing_stop_active': getattr(position, 'trailing_stop_active', False),
-            }
-        
-        # Multi-leg positions
-        multi_leg_data = {}
-        for position_id, position in self.multi_leg_positions.items():
-            # Use to_dict() if available, otherwise manual serialization
-            if hasattr(position, 'to_dict'):
-                multi_leg_data[position_id] = position.to_dict()
-            else:
-                # Fallback manual serialization for MultiLegPosition
-                legs_data = []
-                for leg in position.legs:
-                    legs_data.append({
-                        'symbol': leg.symbol,
-                        'market_type': leg.market_type,
-                        'side': leg.side,
-                        'size': leg.size,
-                        'entry_price': leg.entry_price,
-                        'order_id': leg.order_id
-                    })
-                multi_leg_data[position_id] = {
-                    'position_id': position.position_id,
-                    'strategy': position.strategy,
-                    'entry_time': position.entry_time.isoformat(),
-                    'legs': legs_data,
-                    'capital_at_risk': position.capital_at_risk,
-                    'metadata': getattr(position, 'metadata', {})
-                }
-        
-        all_data = {
-            'single_leg': positions_data,
-            'multi_leg': multi_leg_data,
-        }
-        
+    def save_positions_to_db(self):
+        """Save current positions to the database."""
         try:
-            with open('positions.json', 'w') as f:
-                json.dump(all_data, f, indent=2, default=str)
-            total_positions = len(positions_data) + len(multi_leg_data)
-            self.logger.info(f"Saved {total_positions} positions to positions.json")
+            db = self.performance_tracker.db
+            
+            # Single-leg positions
+            for symbol, position in self.positions.items():
+                # Generate a stable ID for single-leg positions
+                # Using strategy and symbol ensures uniqueness
+                position_id = f"pos_{position.strategy}_{symbol}"
+                
+                metadata = {
+                    'capital_at_risk': position.capital_at_risk,
+                    'trailing_stop_enabled': position.trailing_stop_enabled,
+                    'trailing_stop_pct': getattr(position, 'trailing_stop_pct', 0.0),
+                    'trailing_stop_activation_pct': getattr(position, 'trailing_stop_activation_pct', 0.0),
+                    'highest_price': getattr(position, 'highest_price', None),
+                    'lowest_price': getattr(position, 'lowest_price', None),
+                    'trailing_stop_active': getattr(position, 'trailing_stop_active', False),
+                    'leverage': position.leverage
+                }
+                
+                position_data = {
+                    'position_id': position_id,
+                    'strategy': position.strategy,
+                    'symbol': position.symbol,
+                    'side': position.side,
+                    'size': position.size,
+                    'leverage': position.leverage,
+                    'entry_price': position.entry_price,
+                    'entry_time': position.entry_time.isoformat(),
+                    'stop_loss': position.stop_loss,
+                    'take_profit': position.take_profit,
+                    'metadata': metadata,
+                    'legs': [] # Single leg has no sub-legs
+                }
+                
+                db.save_position(position_data)
+        
+            # Multi-leg positions
+            for position_id, position in self.multi_leg_positions.items():
+                if hasattr(position, 'to_dict'):
+                    position_data = position.to_dict()
+                    # Ensure explicitly required fields map correctly if names differ
+                    # DB expects 'metadata' which is usually present
+                    db.save_position(position_data)
+                else:
+                    self.logger.error(f"MultiLegPosition {position_id} missing to_dict method")
+
+            # self.logger.debug("Saved positions to database")
+            
         except Exception as e:
-            self.logger.error(f"Failed to save positions: {e}")
+            self.logger.error(f"Failed to save positions to DB: {e}")
 
-    def load_positions_from_file(self):
-        """Load positions from JSON file."""
-        if not os.path.exists('positions.json'):
-            self.logger.info("No positions file found, starting with empty positions.")
-            return
+    def load_positions_from_db(self):
+        """
+        Load positions from database.
+        Includes backward compatibility migration from positions.json.
+        """
+        try:
+            db = self.performance_tracker.db
+            active_positions = db.get_all_active_positions()
+            
+            if not active_positions and os.path.exists('positions.json'):
+                self.logger.info("Found positions.json but DB is empty. Migrating...")
+                self._load_positions_from_json_legacy()
+                self.save_positions_to_db()
+                os.rename('positions.json', 'positions.json.bak')
+                self.logger.info("Migration complete. positions.json renamed to .bak")
+                return
 
+            entry_time_now = datetime.now()
+
+            for pos_data in active_positions:
+                try:
+                    # Restore Datetime objects
+                    entry_time_str = pos_data.get('entry_time')
+                    if isinstance(entry_time_str, str):
+                        try:
+                            entry_time = datetime.fromisoformat(entry_time_str)
+                        except ValueError:
+                            entry_time = entry_time_now
+                    else:
+                        entry_time = entry_time_now
+
+                    legs = pos_data.get('legs', [])
+                    metadata = pos_data.get('metadata', {}) or {}
+
+                    if legs:
+                        # Multi-Leg Position
+                        ml_legs = []
+                        for ld in legs:
+                            ml_legs.append(PositionLeg(
+                                symbol=ld['symbol'],
+                                market_type=ld['market_type'],
+                                side=ld['side'],
+                                size=ld['size'],
+                                entry_price=ld['entry_price'],
+                                order_id=ld.get('order_id')
+                            ))
+                        
+                        ml_pos = MultiLegPosition(
+                            position_id=pos_data['position_id'],
+                            strategy=pos_data['strategy'],
+                            entry_time=entry_time,
+                            legs=ml_legs,
+                            capital_at_risk=metadata.get('capital_at_risk') if isinstance(metadata, dict) else None,
+                            metadata=metadata
+                        )
+                        self.multi_leg_positions[pos_data['position_id']] = ml_pos
+                    
+                    else:
+                        # Single-Leg Position
+                        # Reconstruct from DB format + metadata
+                        symbol = pos_data['symbol']
+                        
+                        position = Position(
+                            symbol=symbol,
+                            side=pos_data['side'],
+                            size=pos_data['size'],
+                            entry_price=pos_data['entry_price'],
+                            entry_time=entry_time,
+                            strategy=pos_data['strategy'],
+                            stop_loss=pos_data.get('stop_loss'),
+                            take_profit=pos_data.get('take_profit'),
+                            capital_at_risk=metadata.get('capital_at_risk', 0.0),
+                            leverage=pos_data.get('leverage'),
+                            
+                            # Trailing stop params from metadata
+                            trailing_stop_enabled=metadata.get('trailing_stop_enabled', False),
+                            trailing_stop_pct=metadata.get('trailing_stop_pct', 0.0),
+                            trailing_stop_activation_pct=metadata.get('trailing_stop_activation_pct', 0.0),
+                            highest_price=metadata.get('highest_price'),
+                            lowest_price=metadata.get('lowest_price'),
+                            trailing_stop_active=metadata.get('trailing_stop_active', False),
+                        )
+                        self.positions[symbol] = position
+
+                except Exception as e:
+                    self.logger.error(f"Error loading position {pos_data.get('position_id')}: {e}")
+
+            self.logger.info(f"Loaded {len(self.positions)} single-leg and {len(self.multi_leg_positions)} multi-leg positions from DB")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to load positions from DB: {e}")
+
+    def _load_positions_from_json_legacy(self):
+        """Legacy loader for migration purposes only."""
         try:
             with open('positions.json', 'r') as f:
                 content = f.read().strip()
-                if not content:
-                    return
+                if not content: return
                 all_data = json.loads(content)
             
-            # Handle format detection
             if 'single_leg' in all_data:
                 positions_data = all_data['single_leg']
                 multi_leg_data = all_data.get('multi_leg', {})
@@ -881,20 +975,14 @@ class ExecutionEngine:
                 positions_data = all_data
                 multi_leg_data = {}
             
-            # Load single-leg positions
-            count = 0
+            # Load single-leg
             for symbol, pos_data in positions_data.items():
+                # (Simplified loading logic just for migration state population)
                 try:
-                    entry_time_str = pos_data.get('entry_time')
-                    if isinstance(entry_time_str, str):
-                        try:
-                            entry_time = datetime.fromisoformat(entry_time_str)
-                        except ValueError:
-                            # Try parsing legacy format if needed, or simple fallback
-                            entry_time = datetime.now()
-                    else:
-                        entry_time = datetime.now()
-
+                    entry_time = datetime.now()
+                    if pos_data.get('entry_time'):
+                        entry_time = datetime.fromisoformat(pos_data['entry_time'])
+                        
                     position = Position(
                         symbol=symbol,
                         side=pos_data['side'],
@@ -911,17 +999,14 @@ class ExecutionEngine:
                         highest_price=pos_data.get('highest_price'),
                         lowest_price=pos_data.get('lowest_price'),
                         trailing_stop_active=pos_data.get('trailing_stop_active', False),
+                        leverage=pos_data.get('leverage') 
                     )
                     self.positions[symbol] = position
-                    count += 1
-                except Exception as e:
-                    self.logger.error(f"Error loading position {symbol}: {e}")
-            
-            # Load multi-leg positions
-            ml_count = 0
+                except: pass
+
+            # Load multi-leg
             for pid, pdata in multi_leg_data.items():
                 try:
-                    # Parse legs
                     legs = []
                     for ld in pdata.get('legs', []):
                         legs.append(PositionLeg(
@@ -933,11 +1018,9 @@ class ExecutionEngine:
                             order_id=ld.get('order_id')
                         ))
                     
-                    entry_time_str = pdata.get('entry_time')
-                    if isinstance(entry_time_str, str):
-                        entry_time = datetime.fromisoformat(entry_time_str)
-                    else:
-                        entry_time = datetime.now()
+                    entry_time = datetime.now()
+                    if pdata.get('entry_time'):
+                        entry_time = datetime.fromisoformat(pdata['entry_time'])
 
                     ml_pos = MultiLegPosition(
                         position_id=pdata.get('position_id', pid),
@@ -948,21 +1031,8 @@ class ExecutionEngine:
                         metadata=pdata.get('metadata', {})
                     )
                     self.multi_leg_positions[pid] = ml_pos
-                    ml_count += 1
-                except Exception as e:
-                    self.logger.error(f"Error loading multi-leg position {pid}: {e}")
-
-            self.logger.info(f"Loaded {count} single-leg and {ml_count} multi-leg positions from file")
-            
-            # Re-register with leverage manager
-            for symbol, pos in self.positions.items():
-                # We essentially re-record them to update leverage manager state
-                # Note: leverage might be missing in saved data if not careful
-                # For safety, we can skip or assume default if not critical
-                pass
-
-        except Exception as e:
-            self.logger.error(f"Failed to load positions: {e}")
+                except: pass
+        except Exception: pass
 
     def get_leg_price(self, symbol: str, market_type: str) -> Optional[float]:
         """Get current price for a leg based on market type."""
@@ -1184,4 +1254,4 @@ class ExecutionEngine:
                 if self.market_api.transfer_usd_to_perp(transfer_amount):
                     self.market_api.add_position_margin(symbol, transfer_amount)
                 
-                self.save_positions_to_file()
+                self.save_positions_to_db()

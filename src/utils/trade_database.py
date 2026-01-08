@@ -66,114 +66,157 @@ class TradeDatabase:
     def _init_database(self):
         """Initialize database schema."""
         with self._get_connection() as conn:
-            cursor = conn.cursor()
-            
-            # Mutable Tables (Prefixed)
-            trades_table = f"{self.table_prefix}trades"
-            equity_table = f"{self.table_prefix}equity_snapshots"
-            pnl_table = f"{self.table_prefix}daily_pnl"
-            
-            # Create trades table
-            cursor.execute(f"""
-                CREATE TABLE IF NOT EXISTS {trades_table} (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    symbol TEXT NOT NULL,
-                    strategy TEXT NOT NULL,
-                    side TEXT NOT NULL,
-                    entry_price REAL NOT NULL,
-                    exit_price REAL NOT NULL,
-                    size REAL NOT NULL,
-                    entry_time TIMESTAMP NOT NULL,
-                    exit_time TIMESTAMP NOT NULL,
-                    pnl REAL NOT NULL,
-                    pnl_percentage REAL NOT NULL,
-                    capital_at_risk REAL NOT NULL,
-                    exit_reason TEXT NOT NULL,
-                    stop_loss REAL,
-                    take_profit REAL,
-                    leverage REAL,
-                    fees REAL DEFAULT 0.0,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            
-            # Create indexes for fast queries
-            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.table_prefix}trades_strategy ON {trades_table}(strategy)")
-            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.table_prefix}trades_symbol ON {trades_table}(symbol)")
-            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.table_prefix}trades_exit_time ON {trades_table}(exit_time)")
-            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.table_prefix}trades_entry_time ON {trades_table}(entry_time)")
-            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.table_prefix}trades_strategy_exit ON {trades_table}(strategy, exit_time)")
-            
-            # Create equity snapshots table
-            cursor.execute(f"""
-                CREATE TABLE IF NOT EXISTS {equity_table} (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TIMESTAMP NOT NULL,
-                    equity REAL NOT NULL,
-                    pnl REAL NOT NULL,
-                    trade_id INTEGER,
-                    trade_symbol TEXT,
-                    FOREIGN KEY (trade_id) REFERENCES {trades_table}(id)
-                )
-            """)
-            
-            cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.table_prefix}equity_timestamp ON {equity_table}(timestamp)")
-            
-            # Create daily PnL table (materialized for fast access)
-            cursor.execute(f"""
-                CREATE TABLE IF NOT EXISTS {pnl_table} (
-                    date TEXT PRIMARY KEY,
-                    pnl REAL NOT NULL,
-                    trade_count INTEGER NOT NULL,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-            
-            # Create metadata table for schema version and settings (Shared)
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS metadata (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL
-                )
-            """)
-            
-            # Set schema version
-            cursor.execute(
-                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
-                ("schema_version", str(self.SCHEMA_VERSION))
-            )
+            self._init_core_tables(conn)
+            self._init_live_positions_tables(conn)
 
-            # Market Data Table (Shared - Always Source of Truth)
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS market_data (
-                    symbol TEXT NOT NULL,
-                    timeframe TEXT NOT NULL,
-                    timestamp TIMESTAMP NOT NULL,
-                    open REAL NOT NULL,
-                    high REAL NOT NULL,
-                    low REAL NOT NULL,
-                    close REAL NOT NULL,
-                    volume REAL NOT NULL,
-                    PRIMARY KEY (symbol, timeframe, timestamp)
-                ) WITHOUT ROWID
-            """)
-            
-            # Index for fast range queries
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_market_data_range ON market_data(symbol, timeframe, timestamp)")
-            
-            # Funding Rates Table (Shared - Always Source of Truth)
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS funding_rates (
-                    symbol TEXT NOT NULL,
-                    timestamp TIMESTAMP NOT NULL,
-                    funding_rate REAL NOT NULL,
-                    PRIMARY KEY (symbol, timestamp)
-                ) WITHOUT ROWID
-            """)
-            
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_funding_rates_range ON funding_rates(symbol, timestamp)")
-            
-            self.logger.info("Database schema initialized")
+    def _init_core_tables(self, conn):
+        """Initialize core trade history and market data tables."""
+        cursor = conn.cursor()
+        
+        # Mutable Tables (Prefixed)
+        trades_table = f"{self.table_prefix}trades"
+        equity_table = f"{self.table_prefix}equity_snapshots"
+        pnl_table = f"{self.table_prefix}daily_pnl"
+        
+        # Create trades table
+        cursor.execute(f"""
+            CREATE TABLE IF NOT EXISTS {trades_table} (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                strategy TEXT NOT NULL,
+                side TEXT NOT NULL,
+                entry_price REAL NOT NULL,
+                exit_price REAL NOT NULL,
+                size REAL NOT NULL,
+                entry_time TIMESTAMP NOT NULL,
+                exit_time TIMESTAMP NOT NULL,
+                pnl REAL NOT NULL,
+                pnl_percentage REAL NOT NULL,
+                capital_at_risk REAL NOT NULL,
+                exit_reason TEXT NOT NULL,
+                stop_loss REAL,
+                take_profit REAL,
+                leverage REAL,
+                fees REAL DEFAULT 0.0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Create indexes for fast queries
+        cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.table_prefix}trades_strategy ON {trades_table}(strategy)")
+        cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.table_prefix}trades_symbol ON {trades_table}(symbol)")
+        cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.table_prefix}trades_exit_time ON {trades_table}(exit_time)")
+        cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.table_prefix}trades_entry_time ON {trades_table}(entry_time)")
+        cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.table_prefix}trades_strategy_exit ON {trades_table}(strategy, exit_time)")
+        
+        # Create equity snapshots table
+        cursor.execute(f"""
+            CREATE TABLE IF NOT EXISTS {equity_table} (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TIMESTAMP NOT NULL,
+                equity REAL NOT NULL,
+                pnl REAL NOT NULL,
+                trade_id INTEGER,
+                trade_symbol TEXT,
+                FOREIGN KEY (trade_id) REFERENCES {trades_table}(id)
+            )
+        """)
+        
+        cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.table_prefix}equity_timestamp ON {equity_table}(timestamp)")
+        
+        # Create daily PnL table (materialized for fast access)
+        cursor.execute(f"""
+            CREATE TABLE IF NOT EXISTS {pnl_table} (
+                date TEXT PRIMARY KEY,
+                pnl REAL NOT NULL,
+                trade_count INTEGER NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Create metadata table for schema version and settings (Shared)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        """)
+        
+        # Set schema version
+        cursor.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+            ("schema_version", str(self.SCHEMA_VERSION))
+        )
+
+        # Market Data Table (Shared - Always Source of Truth)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS market_data (
+                symbol TEXT NOT NULL,
+                timeframe TEXT NOT NULL,
+                timestamp TIMESTAMP NOT NULL,
+                open REAL NOT NULL,
+                high REAL NOT NULL,
+                low REAL NOT NULL,
+                close REAL NOT NULL,
+                volume REAL NOT NULL,
+                PRIMARY KEY (symbol, timeframe, timestamp)
+            ) WITHOUT ROWID
+        """)
+        
+        # Index for fast range queries
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_market_data_range ON market_data(symbol, timeframe, timestamp)")
+        
+        # Funding Rates Table (Shared - Always Source of Truth)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS funding_rates (
+                symbol TEXT NOT NULL,
+                timestamp TIMESTAMP NOT NULL,
+                funding_rate REAL NOT NULL,
+                PRIMARY KEY (symbol, timestamp)
+            ) WITHOUT ROWID
+        """)
+        
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_funding_rates_range ON funding_rates(symbol, timestamp)")
+        
+        self.logger.info("Database schema initialized")
+
+    def _init_live_positions_tables(self, conn):
+        """Initialize tables for live position persistence."""
+        cursor = conn.cursor()
+        
+        # 1. Live Positions (High-level container)
+        cursor.execute(f"""
+            CREATE TABLE IF NOT EXISTS {self.table_prefix}live_positions (
+                position_id TEXT PRIMARY KEY,
+                strategy TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,  -- 'long', 'short', 'neutral'
+                size REAL NOT NULL,
+                leverage REAL,
+                entry_price REAL,
+                entry_time TIMESTAMP NOT NULL,
+                stop_loss REAL,
+                take_profit REAL,
+                metadata TEXT,  -- JSON string
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # 2. Live Position Legs (Individual executions)
+        cursor.execute(f"""
+            CREATE TABLE IF NOT EXISTS {self.table_prefix}live_position_legs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                position_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                market_type TEXT NOT NULL, -- 'spot', 'perp'
+                side TEXT NOT NULL, -- 'buy', 'sell'
+                size REAL NOT NULL,
+                entry_price REAL,
+                FOREIGN KEY (position_id) REFERENCES {self.table_prefix}live_positions(position_id) ON DELETE CASCADE
+            )
+        """)
+        
+        cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{self.table_prefix}live_pos_strat ON {self.table_prefix}live_positions(strategy)")
     
     def insert_trade(self, trade_data: Dict[str, Any]) -> int:
         """
@@ -748,4 +791,120 @@ class TradeDatabase:
             
         except Exception as e:
             self.logger.error(f"Error fetching funding rates for {symbol}: {e}")
+
+    # ==================== LIVE POSITION PERSISTENCE ====================
+
+    def save_position(self, position_data: Dict[str, Any]):
+        """
+        Save an active position to the database (Upsert).
+        
+        Handles both single-leg and multi-leg positions.
+        Replaces any existing position with the same position_id.
+        """
+        import json
+        
+        cols = [
+            'position_id', 'strategy', 'symbol', 'side', 'size', 
+            'leverage', 'entry_price', 'entry_time', 'stop_loss', 
+            'take_profit', 'metadata', 'updated_at'
+        ]
+        
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # 1. Delete existing (clean slate for legs)
+            cursor.execute(f"DELETE FROM {self.table_prefix}live_positions WHERE position_id = ?", (position_data['position_id'],))
+            cursor.execute(f"DELETE FROM {self.table_prefix}live_position_legs WHERE position_id = ?", (position_data['position_id'],))
+            
+            # 2. Insert Head
+            metadata_json = json.dumps(position_data.get('metadata', {}))
+            
+            vals = (
+                position_data['position_id'],
+                position_data['strategy'],
+                position_data['symbol'],
+                position_data['side'],
+                position_data['size'],
+                position_data.get('leverage'),
+                position_data.get('entry_price'),
+                position_data['entry_time'],
+                position_data.get('stop_loss'),
+                position_data.get('take_profit'),
+                metadata_json,
+                datetime.now().isoformat()
+            )
+            
+            placeholders = ','.join(['?'] * len(cols))
+            cursor.execute(f"""
+                INSERT INTO {self.table_prefix}live_positions ({','.join(cols)})
+                VALUES ({placeholders})
+            """, vals)
+            
+            # 3. Insert Legs (if any)
+            legs = position_data.get('legs', [])
+            if legs:
+                leg_data = []
+                for leg in legs:
+                    leg_data.append((
+                        position_data['position_id'],
+                        leg['symbol'],
+                        leg['market_type'],
+                        leg['side'],
+                        leg['size'],
+                        leg.get('entry_price')
+                    ))
+                
+                cursor.executemany(f"""
+                    INSERT INTO {self.table_prefix}live_position_legs 
+                    (position_id, symbol, market_type, side, size, entry_price)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, leg_data)
+
+    def get_all_active_positions(self) -> List[Dict[str, Any]]:
+        """
+        Retrieve all active positions with their legs.
+        """
+        import json
+        
+        positions = {}
+        
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Get Heads
+            cursor.execute(f"SELECT * FROM {self.table_prefix}live_positions")
+            for row in cursor.fetchall():
+                pos = dict(row)
+                if pos['metadata']:
+                    try:
+                        pos['metadata'] = json.loads(pos['metadata'])
+                    except:
+                        pos['metadata'] = {}
+                pos['legs'] = []
+                positions[pos['position_id']] = pos
+                
+            # Get Legs
+            if positions:
+                placeholders = ','.join(['?'] * len(positions))
+                cursor.execute(f"""
+                    SELECT * FROM {self.table_prefix}live_position_legs 
+                    WHERE position_id IN ({placeholders})
+                """, list(positions.keys()))
+                
+                for row in cursor.fetchall():
+                    leg = dict(row)
+                    pid = leg['position_id']
+                    if pid in positions:
+                        # Remove redundant FK from leg object if desired, keeping for now
+                        positions[pid]['legs'].append(leg)
+        
+        return list(positions.values())
+
+    def delete_position(self, position_id: str):
+        """Delete a position and its legs."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"DELETE FROM {self.table_prefix}live_position_legs WHERE position_id = ?", (position_id,))
+            cursor.execute(f"DELETE FROM {self.table_prefix}live_positions WHERE position_id = ?", (position_id,))
+
             return pd.DataFrame()

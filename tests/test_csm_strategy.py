@@ -21,7 +21,7 @@ class TestCrossSectionalMomentumStrategy:
             'rebalance_interval': 4
         }
         
-        return CrossSectionalMomentumStrategy(mock_config, timeframe='1h')
+        return CrossSectionalMomentumStrategy(mock_config, timeframe='4h')
     
     def create_ohlcv(self, price_start, price_end, length=30):
         """Helper to create OHLCV dataframe."""
@@ -58,7 +58,7 @@ class TestCrossSectionalMomentumStrategy:
         
         # 1. Populate cache (call internal method or generate_signal to prime it)
         for sym, df in assets.items():
-            strategy.generate_signal(sym, {'1h': df})
+            strategy.generate_signal(sym, {'4h': df})
             
         # 2. Check signals
         # A should be Top 20% of 5 assets (Rank 1/5 = 0.2? No 0-indexed sorted)
@@ -68,15 +68,15 @@ class TestCrossSectionalMomentumStrategy:
         # The code implementation: idx / len(sorted_returns)
         # A: idx 4 / 5 = 0.8. >= (1 - 0.2 = 0.8). BUY signal.
         
-        sig_a = strategy.generate_signal('A', {'1h': df_a})
+        sig_a = strategy.generate_signal('A', {'4h': df_a})
         assert sig_a['signal'] == 'buy'
         
         # E: idx 0 / 5 = 0.0. <= 0.2. SELL signal.
-        sig_e = strategy.generate_signal('E', {'1h': df_e})
+        sig_e = strategy.generate_signal('E', {'4h': df_e})
         assert sig_e['signal'] == 'sell'
         
         # C: idx 2 / 5 = 0.4. Hold.
-        sig_c = strategy.generate_signal('C', {'1h': df_c})
+        sig_c = strategy.generate_signal('C', {'4h': df_c})
         assert sig_c is None
 
     def test_trend_filter(self, strategy):
@@ -118,7 +118,7 @@ class TestCrossSectionalMomentumStrategy:
         
         df = pd.DataFrame({'close': p, 'open': p, 'high': p, 'low': p, 'volume': [1]*300})
         
-        sig = strategy.generate_signal('Target', {'1h': df})
+        sig = strategy.generate_signal('Target', {'4h': df})
         
         # Should be a winner (stats return unknown vs fillers, but likely high since fillers are 0)
         # But filter should block it
@@ -127,5 +127,5 @@ class TestCrossSectionalMomentumStrategy:
     def test_insufficient_universe(self, strategy):
         """Test that nothing happens with too few assets."""
         df = self.create_ohlcv(100, 110, 30)
-        sig = strategy.generate_signal('A', {'1h': df})
+        sig = strategy.generate_signal('A', {'4h': df})
         assert sig is None
