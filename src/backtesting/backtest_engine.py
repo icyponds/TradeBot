@@ -49,6 +49,16 @@ class BacktestEngine:
         from src.utils.performance_tracker import PerformanceTracker
         self.prefixed_tracker = PerformanceTracker(config, table_prefix="backtest_")
         
+        # CRITICAL: Clear prior backtest results BEFORE StrategyManager init
+        # StrategyManager -> ExecutionEngine -> load_positions_from_db() loads stale positions
+        backtest_cfg = (self.config.get("backtesting") or {})
+        if bool(backtest_cfg.get("reset_results_db", True)):
+            try:
+                self.prefixed_tracker.db.delete_all_trades()
+                self.logger.info(f"Cleared existing backtest results in backtest_ tables")
+            except Exception as e:
+                self.logger.warning(f"Failed to clear backtest results: {e}")
+        
         self.strategy_manager = StrategyManager(
             config, 
             market_api=self.mock_api,
@@ -77,15 +87,8 @@ class BacktestEngine:
                 self.strategy_manager.performance_tracker.set_initial_equity(eq)
         except Exception as e:
             self.logger.warning(f"Failed to initialize backtest equity baseline: {e}")
-
-        # Optional: clear prior backtest results so analysis only reflects this run
-        backtest_cfg = (self.config.get("backtesting") or {})
-        if bool(backtest_cfg.get("reset_results_db", True)):
-            try:
-                self.strategy_manager.performance_tracker.db.delete_all_trades()
-                self.logger.info(f"Cleared existing backtest results in backtest_ tables")
-            except Exception as e:
-                self.logger.warning(f"Failed to clear backtest results: {e}")
+        
+        # Note: Backtest results are now cleared BEFORE StrategyManager init (above)
         
         # Results
         self.results = {

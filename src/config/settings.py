@@ -323,7 +323,8 @@ def load_config() -> Dict[str, Any]:
                 {"type": "liquidation_hunter", "name": "liquidation_hunter_1h", "timeframe": "1h"},
 
                 # Cross-Sectional Momentum (1h, 4h)
-                {"type": "cross_sectional_momentum", "name": "csm_1h", "timeframe": "1h"},
+                # csm_1h disabled due to poor backtest performance (8.8% win rate, -$345 PnL)
+                # {"type": "cross_sectional_momentum", "name": "csm_1h", "timeframe": "1h"},
                 {"type": "cross_sectional_momentum", "name": "csm_4h", "timeframe": "4h"},
             ],
             # Note: timeframe is now auto-selected per strategy instance

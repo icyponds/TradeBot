@@ -129,6 +129,12 @@ class MultiLegPosition:
             'metadata': self.metadata,
             'current_prices': self.current_prices,
             'primary_symbol': self.primary_symbol,
+            # DB Compatibility fields
+            'symbol': self.primary_symbol,
+            'side': 'neutral',  # Multi-leg positions are typically hedged/neutral
+            'size': self.total_notional,
+            'entry_price': 0.0,
+            'leverage': 1.0,    # Effective leverage varies, placeholder
             'net_delta': self.net_delta,
             'total_notional': self.total_notional,
             'unrealized_pnl': self.unrealized_pnl,
