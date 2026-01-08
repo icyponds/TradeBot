@@ -1,7 +1,7 @@
 import pytest
 import pandas as pd
 import numpy as np
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 from src.strategies.adaptive_grid_strategy import AdaptiveGridStrategy
 
 class TestAdaptiveGridOptimization:
@@ -46,16 +46,22 @@ class TestAdaptiveGridOptimization:
                 signal = strategy._generate_signal_internal(df, "BTC")
                 assert signal is None
 
-        # Case B: RSI = 25 (Low) -> Should Allow
+        # Case B: RSI = 25 (Low) -> Should Allow (if Trend is favorable)
         with patch('src.strategies.adaptive_grid_strategy.calculate_rsi') as mock_rsi:
             mock_rsi.return_value = pd.Series([25] * 100)
             with patch('src.strategies.adaptive_grid_strategy.calculate_adx') as mock_adx:
                 mock_adx.return_value = pd.Series([20] * 100)
-                
-                signal = strategy._generate_signal_internal(df, "BTC")
-                assert signal is not None
-                assert signal['signal'] == 'buy'
-                assert "RSI=25.0" in signal['reason']
+                # Mock EMA to be flat 100 (Neutral Slope) so drop to 90 is bought
+                with patch('pandas.Series.ewm') as mock_ewm:
+                    mock_mean = MagicMock()
+                    # Return a Series of 100s
+                    mock_mean.mean.return_value = pd.Series([100.0] * 100)
+                    mock_ewm.return_value = mock_mean
+            
+                    signal = strategy._generate_signal_internal(df, "BTC")
+                    assert signal is not None
+                    assert signal['signal'] == 'buy'
+                    assert "RSI=25.0" in signal['reason']
 
     def test_rsi_short_filter(self, strategy):
         """Test that Short signal is generated ONLY when RSI > threshold."""
@@ -76,13 +82,18 @@ class TestAdaptiveGridOptimization:
                 signal = strategy._generate_signal_internal(df, "BTC")
                 assert signal is None
 
-        # Case B: RSI = 75 (High) -> Should Allow
+        # Case B: RSI = 75 (High) -> Should Allow (if Trend is favorable)
         with patch('src.strategies.adaptive_grid_strategy.calculate_rsi') as mock_rsi:
             mock_rsi.return_value = pd.Series([75] * 100)
             with patch('src.strategies.adaptive_grid_strategy.calculate_adx') as mock_adx:
                 mock_adx.return_value = pd.Series([20] * 100)
+                # Mock EMA to be flat 100 (Neutral Slope) so spike to 110 is sold
+                with patch('pandas.Series.ewm') as mock_ewm:
+                    mock_mean = MagicMock()
+                    mock_mean.mean.return_value = pd.Series([100.0] * 100)
+                    mock_ewm.return_value = mock_mean
                 
-                signal = strategy._generate_signal_internal(df, "BTC")
-                assert signal is not None
-                assert signal['signal'] == 'sell'
-                assert "RSI=75.0" in signal['reason']
+                    signal = strategy._generate_signal_internal(df, "BTC")
+                    assert signal is not None
+                    assert signal['signal'] == 'sell'
+                    assert "RSI=75.0" in signal['reason']

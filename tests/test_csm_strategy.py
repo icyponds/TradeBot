@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 import pandas as pd
 import numpy as np
 from datetime import datetime
@@ -24,17 +24,28 @@ class TestCrossSectionalMomentumStrategy:
         return CrossSectionalMomentumStrategy(mock_config, timeframe='4h')
     
     def create_ohlcv(self, price_start, price_end, length=30):
-        """Helper to create OHLCV dataframe."""
-        prices = np.linspace(price_start, price_end, length)
+        """
+        Helper to create OHLCV dataframe with GEOMETRIC series.
+        This ensures 'pct_change' implies Volatility=0 (or constant small),
+        so Score = Return / 1.0 (if vol 0).
+        """
+        if price_start == price_end:
+             prices = np.array([float(price_start)] * length)
+        else:
+             # P_t = P_0 * r^t
+             ratio = price_end / price_start
+             r = ratio ** (1 / (length - 1))
+             prices = np.array([price_start * (r ** i) for i in range(length)])
+
         df = pd.DataFrame({
             'open': prices,
-            'high': prices,
+            'high': prices, # Flat candle
             'low': prices,
             'close': prices,
             'volume': [1000] * length
         })
         time_idx = pd.date_range("2024-01-01", periods=length, freq='1h')
-        df.index = time_idx # Although strategy might not use index directly if implicit
+        df.index = time_idx
         return df
 
     def test_ranking_logic(self, strategy):
@@ -57,27 +68,32 @@ class TestCrossSectionalMomentumStrategy:
         }
         
         # 1. Populate cache (call internal method or generate_signal to prime it)
-        for sym, df in assets.items():
-            strategy.generate_signal(sym, {'4h': df})
+        # Mock ADX to ensure market regime is "Trending" (ADX > 25) so signals are not filtered
+        with patch('src.strategies.cross_sectional_momentum_strategy.calculate_adx') as mock_adx:
+            mock_adx.return_value = pd.Series([30] * 30) # High ADX
             
-        # 2. Check signals
-        # A should be Top 20% of 5 assets (Rank 1/5 = 0.2? No 0-indexed sorted)
-        # Returns: [-0.1, -0.05, 0, 0.05, 0.10]
-        # A is 0.10. sorted index 4. Rank = 4/5 = 0.8. 
-        # (This logic depends on implementation details I read: idx/len or explicit rank)
-        # The code implementation: idx / len(sorted_returns)
-        # A: idx 4 / 5 = 0.8. >= (1 - 0.2 = 0.8). BUY signal.
-        
-        sig_a = strategy.generate_signal('A', {'4h': df_a})
-        assert sig_a['signal'] == 'buy'
-        
-        # E: idx 0 / 5 = 0.0. <= 0.2. SELL signal.
-        sig_e = strategy.generate_signal('E', {'4h': df_e})
-        assert sig_e['signal'] == 'sell'
-        
-        # C: idx 2 / 5 = 0.4. Hold.
-        sig_c = strategy.generate_signal('C', {'4h': df_c})
-        assert sig_c is None
+            for sym, df in assets.items():
+                strategy.generate_signal(sym, {'4h': df})
+                
+            # 2. Check signals
+            # A should be Top 20% of 5 assets (Rank 1/5 = 0.2? No 0-indexed sorted)
+            # Returns: [-0.1, -0.05, 0, 0.05, 0.10]
+            # A is 0.10. sorted index 4. Rank = 4/5 = 0.8. 
+            # (This logic depends on implementation details I read: idx/len or explicit rank)
+            # The code implementation: idx / len(sorted_returns)
+            # A: idx 4 / 5 = 0.8. >= (1 - 0.2 = 0.8). BUY signal.
+            
+            sig_a = strategy.generate_signal('A', {'4h': df_a})
+            assert sig_a['signal'] == 'buy'
+            
+            # E: idx 0 / 5 = 0.0. <= 0.2. SELL signal.
+            sig_e = strategy.generate_signal('E', {'4h': df_e})
+            assert sig_e is not None
+            assert sig_e['signal'] == 'sell'
+            
+            # C: idx 2 / 5 = 0.4. Hold.
+            sig_c = strategy.generate_signal('C', {'4h': df_c})
+            assert sig_c is None
 
     def test_trend_filter(self, strategy):
         """Test EMA trend filter."""

@@ -92,7 +92,6 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
             }
         
         # 1b. Check Market Regime (ADX)
-        # ... (ADX Logic Unchanged)
         if len(ohlcv) > 20 and 'high' in ohlcv.columns:
             adx = calculate_adx(ohlcv['high'], ohlcv['low'], ohlcv['close'])
             current_adx = adx.iloc[-1]
