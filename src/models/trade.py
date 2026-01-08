@@ -131,9 +131,9 @@ class MultiLegPosition:
             'primary_symbol': self.primary_symbol,
             # DB Compatibility fields
             'symbol': self.primary_symbol,
-            'side': 'neutral',  # Multi-leg positions are typically hedged/neutral
-            'size': self.total_notional,
-            'entry_price': 0.0,
+            'side': self.legs[0].side if self.legs else 'neutral', # Use primary leg side
+            'size': sum(l.size for l in self.legs), # Total size (sum of legs)
+            'entry_price': sum(l.entry_price * l.size for l in self.legs) / sum(l.size for l in self.legs) if sum(l.size for l in self.legs) > 0 else 0.0,
             'leverage': 1.0,    # Effective leverage varies, placeholder
             'net_delta': self.net_delta,
             'total_notional': self.total_notional,

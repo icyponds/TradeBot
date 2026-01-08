@@ -563,10 +563,18 @@ class ExecutionEngine:
                         entry_price=result['avg_fill_price'],
                         order_id=result.get('order_id'),
                     ))
+                    self.logger.debug(f"  Leg executed: {leg_symbol} {leg_spec['side']} x {result['filled_size']} @ {result['avg_fill_price']}")
                 else:
                     if is_atomic: self.unwind_executed_legs(executed_legs)
                     return
             
+            # Calculate composite entry price (Weighted Average of fills)
+            # Note: For StatArb spreading, this "price" is synthetic but better than 0.0 or 1.0
+            # Ideally we track PnL per leg, but for the 'Head' position in DB we need a number.
+            total_notional_filled = sum(l.size * l.entry_price for l in executed_legs)
+            total_size_filled = sum(l.size for l in executed_legs)
+            avg_entry_price = total_notional_filled / total_size_filled if total_size_filled > 0 else 0.0
+
             # Create position
             position_id = f"{strategy_name}_{symbol}_{int(current_time.timestamp() * 1000)}"
             multi_leg_position = MultiLegPosition(
@@ -578,10 +586,15 @@ class ExecutionEngine:
                 metadata=signal.get('metadata', {}),
             )
             
-            self.multi_leg_positions[position_id] = multi_leg_position
-            self.leverage_manager.record_position(symbol, 'multi_leg', position_size, current_price, leverage, margin_required)
+            # CRITICAL FIX: Ensure position has correct entry price for DB/PnL
+            # (Note: MultiLegPosition calculates properties from legs, but we can set metadata if needed)
             
-            self.logger.info(f"✅ Multi-leg position opened: {position_id}")
+            self.multi_leg_positions[position_id] = multi_leg_position
+            
+            # Record composite position for margin checks
+            self.leverage_manager.record_position(symbol, 'multi_leg', position_size, avg_entry_price, leverage, margin_required)
+            
+            self.logger.info(f"✅ Multi-leg position opened: {position_id} (Composite Price: {avg_entry_price:.6f})")
             
         except Exception as e:
             self.logger.error(f"Error executing multi-leg entry for {symbol}: {e}")
@@ -661,8 +674,8 @@ class ExecutionEngine:
                 symbol=position.primary_symbol,
                 strategy=strategy_name,
                 side=trade_side,
-                entry_price=sum(leg.entry_price * leg.size for leg in position.legs) / position.total_notional if position.total_notional > 0 else 0,
-                exit_price=sum(r['exit_price'] * r['filled_size'] for r in exit_results) / sum(r['filled_size'] for r in exit_results) if exit_results else 0,
+                entry_price=sum(leg.entry_price * leg.size for leg in position.legs) / sum(leg.size for leg in position.legs) if position.legs and sum(leg.size for leg in position.legs) > 0 else 0,
+                exit_price=sum(r['exit_price'] * r['filled_size'] for r in exit_results) / sum(r['filled_size'] for r in exit_results) if exit_results and sum(r['filled_size'] for r in exit_results) > 0 else 0,
                 size=sum(r['filled_size'] for r in exit_results),
                 entry_time=position.entry_time,
                 exit_time=exit_time,
