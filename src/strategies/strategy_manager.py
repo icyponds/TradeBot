@@ -739,7 +739,7 @@ class StrategyManager:
         # 2. Check cache exists for required timeframes
         for tf in required_timeframes:
             # Retrieve the inner dict for the symbol, then the specific timeframe DF
-            symbol_cache = self.market_api.ohlcv_cache.get(symbol)
+            symbol_cache = self.market_api.ohlcv_cache.cache.get(symbol)
             if not symbol_cache:
                 self.logger.debug(f"[{symbol}] No cache entry for symbol")
                 return False

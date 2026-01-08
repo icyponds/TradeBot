@@ -35,7 +35,15 @@ class TestStrategyManagerFreshness:
         # Mock other checks to pass
         strategy_manager.market_api.get_ohlcv = MagicMock(return_value=[1]*20)
         mock_cache_data = {'5m': [1]*5, '15m': [1]*5, '1h': [1]*5, '4h': [1]*5}
-        strategy_manager.market_api.ohlcv_cache.get = MagicMock(return_value=mock_cache_data)
+        # Update: Mock nested cache structure (ohlcv_cache.cache.get)
+        mock_cache_data = {'5m': [1]*5, '15m': [1]*5, '1h': [1]*5, '4h': [1]*5}
+        
+        # Create a mock for the cache attribute
+        mock_cache_attr = MagicMock()
+        mock_cache_attr.get.return_value = mock_cache_data
+        
+        # Assign it to strategy_manager.market_api.ohlcv_cache.cache
+        strategy_manager.market_api.ohlcv_cache.cache = mock_cache_attr
         strategy_manager.market_api._subscribed_symbols = {symbol}
         
         # Mock health monitor

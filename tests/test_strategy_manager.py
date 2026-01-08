@@ -413,7 +413,10 @@ class TestStrategyManager:
             
         # Set the cache on the market_api
         # Structure: { 'BTC/USD': { '5m': df, '1h': df, ... } }
-        strategy_manager.market_api.ohlcv_cache = {symbol: mock_cache}
+        # NEW: Production code accesses .cache attribute, so we must mock the object structure
+        mock_ohlcv_cache = MagicMock()
+        mock_ohlcv_cache.cache = {symbol: mock_cache}
+        strategy_manager.market_api.ohlcv_cache = mock_ohlcv_cache
         
         # Mock get_ohlcv to return valid data so the historical check passes
         strategy_manager.market_api.get_ohlcv.return_value = df_valid
@@ -434,7 +437,9 @@ class TestStrategyManager:
         # Counter-test: Verify it fails if DataFrame is actually too short
         df_short = pd.DataFrame(np.random.randn(2, 5), columns=['open', 'high', 'low', 'close', 'volume'])
         mock_cache_short = {tf: df_short for tf in required_timeframes}
-        strategy_manager.market_api.ohlcv_cache = {symbol: mock_cache_short}
+        
+        # Update the existing mock object's cache attribute
+        mock_ohlcv_cache.cache = {symbol: mock_cache_short}
         
         assert strategy_manager._is_data_ready_for_symbol(symbol) is False
 
