@@ -478,7 +478,204 @@
 
         /* ... existing styles ... */
 
-        <script> // ... existing format functions ...
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <!-- Header -->
+        <div class="header">
+            <div class="logo">
+                <div class="logo-icon">⚡</div>
+                <h1>TradeBot Dashboard</h1>
+            </div>
+            
+            <div class="status-badge">
+                <div id="status-dot" class="status-dot disconnected"></div>
+                <span id="status-text">Connecting...</span>
+                <span style="color: var(--text-muted); margin-left: 8px; font-size: 11px;">
+                    Next update in <span id="countdown">5</span>s
+                </span>
+            </div>
+        </div>
+
+        <!-- Summary Cards -->
+        <div class="summary-grid">
+            <div class="summary-card">
+                <div class="summary-label">Total Equity</div>
+                <div class="summary-value" id="total-equity">--</div>
+                <div class="summary-change" id="realized-scope"></div>
+            </div>
+            
+            <div class="summary-card">
+                <div class="summary-label">Realized PnL</div>
+                <div class="summary-value" id="realized-pnl">--</div>
+                <div class="summary-change" id="session-start" style="font-size: 10px; color: var(--text-muted);"></div>
+            </div>
+            
+            <div class="summary-card">
+                <div class="summary-label">Unrealized PnL</div>
+                <div class="summary-value" id="unrealized-pnl">--</div>
+                <div class="summary-change">Open Positions</div>
+            </div>
+            
+            <div class="summary-card">
+                <div class="summary-label">Open Positions</div>
+                <div class="summary-value" id="position-count">0</div>
+                <div class="summary-change">Notional: <span id="total-notional">--</span></div>
+            </div>
+            
+            <div class="summary-card">
+                <div class="summary-label">Win Rate</div>
+                <div class="summary-value" id="win-rate">--</div>
+                <div class="summary-change" id="trade-stats" style="font-size: 11px;"></div>
+            </div>
+            
+            <div class="summary-card">
+                <div class="summary-label">Bot Status</div>
+                <div class="summary-value" style="font-size: 18px;">
+                     Pairs: <span id="selected-pairs">0</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Multi-Leg Positions Section (Hidden by default) -->
+        <div id="multi-leg-section" class="section" style="display: none;">
+            <div class="section-header">
+                <div class="section-title">
+                    Arbitrage Positions <span class="count" id="multi-leg-count">0</span>
+                </div>
+            </div>
+            <div id="multi-leg-container">
+                <!-- Populated by JS -->
+            </div>
+        </div>
+
+        <!-- Single-Leg Positions Section -->
+        <div class="section">
+            <div class="section-header">
+                <div class="section-title">
+                    Active Positions <span class="count" id="single-leg-count">0</span>
+                </div>
+            </div>
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Symbol</th>
+                            <th>Side</th>
+                            <th>Size</th>
+                            <th>Entry</th>
+                            <th>Mark</th>
+                            <th>Liq. Price</th>
+                            <th>PnL</th>
+                            <th>PnL %</th>
+                            <th>Margin</th>
+                            <th>Leverage</th>
+                            <th>Duration</th>
+                            <th>Strategy</th>
+                        </tr>
+                    </thead>
+                    <tbody id="positions-body">
+                        <!-- Populated by JS -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Strategies Section -->
+        <div class="section">
+            <div class="section-header">
+                <div class="section-title">Active Strategies</div>
+            </div>
+            <div class="strategy-grid" id="strategies-container">
+                <!-- Populated by JS -->
+            </div>
+        </div>
+
+        <!-- Trade History Section -->
+        <div class="section">
+            <div class="section-header">
+                <div class="section-title">
+                    Recent Trades <span class="count" id="trade-count">0</span>
+                </div>
+            </div>
+            <div class="table-container" id="trades-table-container">
+                <!-- Populated by JS -->
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Helper functions
+        function formatCurrency(value) {
+            if (value === undefined || value === null) return '--';
+            return new Intl.NumberFormat('en-US', {
+                style: 'currency',
+                currency: 'USD'
+            }).format(value);
+        }
+
+        function formatPrice(value) {
+            if (value === undefined || value === null) return '--';
+            return new Intl.NumberFormat('en-US', {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 6
+            }).format(value);
+        }
+
+        function formatSize(value) {
+            if (value === undefined || value === null) return '--';
+            return new Intl.NumberFormat('en-US', {
+                minimumFractionDigits: 0,
+                maximumFractionDigits: 4
+            }).format(value);
+        }
+
+        function formatPct(value, decimals = 2) {
+            if (value === undefined || value === null) return '--';
+            return value.toFixed(decimals) + '%';
+        }
+
+        function getPnlClass(pnl) {
+            if (!pnl) return '';
+            return pnl >= 0 ? 'pnl-positive' : 'pnl-negative';
+        }
+
+        // Render positions table (missing function from original file)
+        function renderPositionsTable(positions) {
+            const tbody = document.getElementById('positions-body');
+            document.getElementById('single-leg-count').textContent = positions.length;
+            
+            if (positions.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="12" style="text-align: center; color: var(--text-muted);">No active positions</td></tr>';
+                return;
+            }
+
+            let html = '';
+            for (const pos of positions) {
+                const sideClass = pos.side === 'long' ? 'side-long' : 'side-short';
+                const pnlClass = getPnlClass(pos.unrealized_pnl);
+                
+                html += `<tr>
+                    <td><span class="symbol">${pos.symbol}</span></td>
+                    <td><span class="${sideClass}">${pos.side.toUpperCase()}</span></td>
+                    <td>${formatSize(pos.size)}</td>
+                    <td>${formatPrice(pos.entry_price)}</td>
+                    <td>${formatPrice(pos.current_price)}</td>
+                    <td>${pos.liquidation_price ? formatPrice(pos.liquidation_price) : '--'}</td>
+                    <td class="${pnlClass}">${formatCurrency(pos.unrealized_pnl)}</td>
+                    <td class="${pnlClass}">${formatPct(pos.unrealized_pnl_pct)}</td>
+                    <td>${formatCurrency(pos.margin)}</td>
+                    <td>${pos.leverage}x</td>
+                    <td class="text-muted">${pos.holding_time}</td>
+                    <td><span class="strategy-tag">${pos.strategy}</span></td>
+                </tr>`;
+            }
+            tbody.innerHTML = html;
+        }
+
+
 
         // Render multi-leg positions
         function renderMultiLegPositions(positions) {

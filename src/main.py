@@ -45,12 +45,23 @@ def _cleanup_positions():
     if _strategy_manager is not None:
         try:
             logger = logging.getLogger(__name__)
-            logger.warning("CLEANUP: Closing all positions before exit...")
+            close_on_shutdown = False
+            config = None
+            if hasattr(_strategy_manager, 'config'):
+                config = _strategy_manager.config
+            
+            if config:
+                close_on_shutdown = config.get('system', {}).get('close_on_shutdown', False)
+            
+            if close_on_shutdown:
+                logger.warning("CLEANUP: Closing all positions before exit (Configured to CLOSE)...")
+            else:
+                logger.info("CLEANUP: Preserving open positions for persistence (Configured to KEEP)...")
             
             if hasattr(_strategy_manager, 'is_running') and _strategy_manager.is_running:
-                _strategy_manager.stop(close_positions=True)
-            elif hasattr(_strategy_manager, 'close_all_positions'):
-                # Even if not running, try to close positions
+                _strategy_manager.stop(close_positions=close_on_shutdown)
+            elif hasattr(_strategy_manager, 'close_all_positions') and close_on_shutdown:
+                # Even if not running, try to close positions if configured to do so
                 _strategy_manager.sync_positions_with_exchange()
                 _strategy_manager.close_all_positions("emergency_cleanup")
                 

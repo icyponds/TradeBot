@@ -445,6 +445,12 @@ def load_config() -> Dict[str, Any]:
             "status_timeout": int(os.getenv("ORDER_STATUS_TIMEOUT", "30")),
         },
         
+        # System Configuration
+        "system": {
+            # Whether to close all positions on shutdown (default: False for upgrade safety)
+            "close_on_shutdown": os.getenv("CLOSE_ON_SHUTDOWN", "false").lower() == "true",
+        },
+        
         
         # Data Collection Configuration
         "data_collection": {

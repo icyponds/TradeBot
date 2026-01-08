@@ -838,6 +838,10 @@ class HyperliquidAPI(MarketInterface):
         from eth_account import Account
         
         try:
+            from hyperliquid.info import Info
+            from hyperliquid.exchange import Exchange
+            from eth_account import Account
+
             # Auto-discover HIP-3 dexes if enabled but not specified
             if self.hip3_enabled and self.perp_dexs is None:
                 self.perp_dexs = self._discover_perp_dexs()
@@ -913,6 +917,7 @@ class HyperliquidAPI(MarketInterface):
     def _discover_perp_dexs(self) -> List[str]:
         """Discover available perp dexes."""
         try:
+            from hyperliquid.info import Info
             temp_info = Info(self.base_url, skip_ws=True)
             dexs = temp_info.perp_dexs()
             

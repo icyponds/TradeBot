@@ -997,9 +997,32 @@ class StrategyManager:
         self.logger.info(f"Closing all positions (Reason: {reason})...")
         
         # Get list of symbols to avoid dictionary size change checks
+        # Close multi-leg positions first
+        multi_leg_ids = list(self.multi_leg_positions.keys())
+        if multi_leg_ids:
+             self.logger.info(f"Closing {len(multi_leg_ids)} multi-leg positions...")
+             for pos_id in multi_leg_ids:
+                 try:
+                     self.logger.info(f"Closing multi-leg position: {pos_id}")
+                     if hasattr(self, 'execution_engine'):
+                         # Assuming close_multi_leg_position exists - user confirmed this logic
+                         # If it doesn't exist, we'll catch the attribute error
+                         if hasattr(self.execution_engine, 'close_multi_leg_position'):
+                            self.execution_engine.close_multi_leg_position(pos_id, reason=reason)
+                         else:
+                             # Fallback: close legs individually if method missing
+                             self.logger.warning("close_multi_leg_position not found, closing legs individually")
+                             pos = self.multi_leg_positions.get(pos_id)
+                             if pos:
+                                 for leg in pos.legs:
+                                     self.execution_engine.close_position(leg.symbol, reason=reason)
+                 except Exception as e:
+                     self.logger.error(f"Error closing multi-leg position {pos_id}: {e}")
+
+        # Get list of symbols to avoid dictionary size change checks
         symbols = list(self.positions.keys())
         
-        if not symbols:
+        if not symbols and not multi_leg_ids:
             self.logger.info("No open positions to close.")
             return
 
