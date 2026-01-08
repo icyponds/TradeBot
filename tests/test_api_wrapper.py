@@ -1,14 +1,16 @@
 import pytest
 from unittest.mock import MagicMock, patch
-from src.api.hyperliquid_api import HyperliquidAPI
 import time
+
 
 class TestHyperliquidAPI:
 
     @pytest.fixture
-    def api_client(self, mock_config):
-        """Creates an API client instance."""
-        return HyperliquidAPI(mock_config)
+    def api_client(self, shared_api_client):
+        """Use shared module-scoped client, reset mocks before each test."""
+        shared_api_client.exchange.reset_mock()
+        shared_api_client.info.reset_mock()
+        return shared_api_client
 
     def test_initialization(self, api_client, mock_config):
         """Test API client initialization."""

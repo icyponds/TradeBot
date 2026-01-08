@@ -16,9 +16,10 @@ class TestHIP3OrderExecution(unittest.TestCase):
             }
         }
 
-    @patch('src.api.hyperliquid_api.Info')
-    @patch('src.api.hyperliquid_api.Exchange')
-    @patch('src.api.hyperliquid_api.Account')
+    # Patch at actual module locations since we use lazy imports
+    @patch('hyperliquid.info.Info')
+    @patch('hyperliquid.exchange.Exchange')
+    @patch('eth_account.Account')
     def test_hip3_asset_map_update(self, mock_account, mock_exchange_cls, mock_info_cls):
         # Setup mocks
         mock_info = MagicMock()

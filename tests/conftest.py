@@ -74,3 +74,58 @@ def mock_market_api():
     mock.get_position.return_value = None
     mock.get_account_summary.return_value = {"equity": 10000, "asset_value": 10000}
     return mock
+
+
+# =============================================================================
+# MODULE-SCOPED FIXTURES (shared across tests in a module for performance)
+# =============================================================================
+
+@pytest.fixture(scope="module")
+def shared_api_client():
+    """
+    Module-scoped HyperliquidAPI instance shared across tests in the same file.
+    
+    This dramatically speeds up tests by avoiding repeated expensive initialization.
+    
+    WARNING: Do NOT mutate this fixture's internal state. Use reset_mock() to
+    clear call history between tests.
+    """
+    from unittest.mock import MagicMock, patch
+    
+    # Need module-scoped config too
+    config = {
+        "api": {
+            "base_url": "https://api.hyperliquid.xyz",
+            "wallet_address": "0x123",
+            "private_key": "0xabc"
+        },
+        "trading": {
+            "base_currency": "USDC",
+            "max_position_size_percentage": 20.0,
+            "max_positions_percentage": 100.0,
+            "max_account_loss_per_trade": 3.0,
+            "use_portfolio_based_sizing": True,
+            "symbols": ["BTC", "ETH", "SOL"],
+            "leverage": 1
+        },
+        "risk_management": {
+            "strategy_exploration": {"reserve_capital_pct": 0.10},
+            "max_drawdown_percentage": 15.0,
+            "max_leverage": 20.0,
+            "margin_buffer_percentage": 0.05,
+            "liquidation_risk_threshold": 0.10
+        },
+        "strategies": {"ohlcv_limit": 100}
+    }
+    
+    # Patch at the actual module locations since we use lazy imports
+    with patch('hyperliquid.info.Info'), \
+         patch('hyperliquid.exchange.Exchange'), \
+         patch('eth_account.Account'):
+        from src.api.hyperliquid_api import HyperliquidAPI
+        client = HyperliquidAPI(config)
+        client.exchange = MagicMock()
+        client.info = MagicMock()
+        client.market_db = MagicMock()
+        client.meta = {'universe': [{'name': 'BTC', 'szDecimals': 3}]}
+        yield client

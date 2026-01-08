@@ -1,31 +1,15 @@
 import pytest
 from unittest.mock import MagicMock, patch
-from src.api.hyperliquid_api import HyperliquidAPI
+
 
 class TestOrderFallback:
     
     @pytest.fixture
-    def mock_config(self):
-        return {
-            'api': {
-                'base_url': 'https://api.hyperliquid.xyz',
-                'wallet_address': '0x123',
-                'private_key': '0xabc'
-            },
-            'trading': {
-                'leverage': 1
-            }
-        }
-
-    @pytest.fixture
-    def api_client(self, mock_config):
-        with patch('src.api.hyperliquid_api.Account'):
-            client = HyperliquidAPI(mock_config)
-            client.exchange = MagicMock()
-            client.info = MagicMock()
-            # Mock precision info check
-            client.meta = {'universe': [{'name': 'BTC', 'szDecimals': 3}]}
-            return client
+    def api_client(self, shared_api_client):
+        """Use shared module-scoped client, reset mocks before each test."""
+        shared_api_client.exchange.reset_mock()
+        shared_api_client.info.reset_mock()
+        return shared_api_client
 
     def test_market_order_fallback_triggered(self, api_client):
         """Test that market order fallback is triggered for reduce_only orders after limit failures."""

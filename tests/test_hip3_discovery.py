@@ -11,7 +11,7 @@ class TestHIP3Discovery:
     
     @pytest.fixture
     def mock_info(self):
-        with patch('src.api.hyperliquid_api.Info') as MockInfo:
+        with patch('hyperliquid.info.Info') as MockInfo:
             mock_info_instance = MockInfo.return_value
             # Mock default native response
             mock_info_instance.meta_and_asset_ctxs.return_value = (

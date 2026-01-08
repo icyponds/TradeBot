@@ -2,34 +2,17 @@ import pytest
 import time
 from unittest.mock import MagicMock, patch, ANY
 import pandas as pd
-from src.api.hyperliquid_api import HyperliquidAPI
+
 
 class TestDataIntegrity:
     
     @pytest.fixture
-    def mock_config(self):
-        return {
-            'api': {
-                'base_url': 'https://api.hyperliquid.xyz',
-                'wallet_address': '0x123',
-                'private_key': '0xabc'
-            },
-            'trading': {
-                'leverage': 1
-            }
-        }
-
-    @pytest.fixture
-    def api_client(self, mock_config):
-        with patch('src.api.hyperliquid_api.Account'):
-            client = HyperliquidAPI(mock_config)
-            client.exchange = MagicMock()
-            client.info = MagicMock()
-            client.market_db = MagicMock()
-            # Mock executor to run synchronously or inspect calls
-            # For unit tests, we want to test the logic inside _fetch_and_persist_candle separately from threading
-            # But _on_bar_complete uses submit.
-            return client
+    def api_client(self, shared_api_client):
+        """Use shared module-scoped client, reset mocks before each test."""
+        shared_api_client.exchange.reset_mock()
+        shared_api_client.info.reset_mock()
+        shared_api_client.market_db.reset_mock()
+        return shared_api_client
 
     def test_on_bar_complete_delegation(self, api_client):
         """Verify _on_bar_complete submits task to executor and does NOT write directly."""

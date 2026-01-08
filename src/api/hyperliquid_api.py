@@ -14,7 +14,7 @@ import logging
 import time
 import threading
 import math
-from typing import Dict, List, Optional, Any, Callable, Tuple
+from typing import Dict, List, Optional, Any, Callable, Tuple, TYPE_CHECKING
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from collections import defaultdict, deque
@@ -23,9 +23,14 @@ from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 import pandas as pd
 
-from hyperliquid.info import Info
-from hyperliquid.exchange import Exchange
-from eth_account import Account
+# Lazy imports for SDK modules - these are expensive and should only be
+# imported when actually needed. This speeds up test setup significantly.
+# The actual imports happen in _init_sdk_clients() and _get_account_class()
+if TYPE_CHECKING:
+    from hyperliquid.info import Info
+    from hyperliquid.exchange import Exchange
+    from eth_account import Account
+
 from .interface import MarketInterface
 
 # =============================================================================
@@ -827,6 +832,11 @@ class HyperliquidAPI(MarketInterface):
     
     def _init_sdk_clients(self):
         """Initialize SDK Info and Exchange clients."""
+        # Lazy imports - these are expensive SDK modules
+        from hyperliquid.info import Info
+        from hyperliquid.exchange import Exchange
+        from eth_account import Account
+        
         try:
             # Auto-discover HIP-3 dexes if enabled but not specified
             if self.hip3_enabled and self.perp_dexs is None:
@@ -872,6 +882,7 @@ class HyperliquidAPI(MarketInterface):
         
         def init_ws():
             try:
+                from hyperliquid.info import Info  # Lazy import
                 ws_info[0] = Info(
                     self.base_url,
                     skip_ws=False,

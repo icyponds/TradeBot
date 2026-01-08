@@ -11,9 +11,10 @@ class TestHyperliquidApiCompliance(MarketApiContract):
     
     @pytest.fixture
     def api(self):
-        with patch('src.api.hyperliquid_api.Info') as MockInfo, \
-             patch('src.api.hyperliquid_api.Exchange') as MockExchange, \
-             patch('src.api.hyperliquid_api.Account') as MockAccount:
+        # Patch at actual module locations since we use lazy imports
+        with patch('hyperliquid.info.Info') as MockInfo, \
+             patch('hyperliquid.exchange.Exchange') as MockExchange, \
+             patch('eth_account.Account') as MockAccount:
             
             # Setup Mock Returns to satisfy Contract Checks
             mock_info_instance = MockInfo.return_value
