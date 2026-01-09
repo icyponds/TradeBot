@@ -97,6 +97,7 @@
             font-weight: 700;
             background: linear-gradient(135deg, var(--text-primary), var(--accent));
             -webkit-background-clip: text;
+            background-clip: text;
             -webkit-text-fill-color: transparent;
         }
 
@@ -477,7 +478,6 @@
         }
 
         /* ... existing styles ... */
-
     </style>
 </head>
 
@@ -489,7 +489,7 @@
                 <div class="logo-icon">⚡</div>
                 <h1>TradeBot Dashboard</h1>
             </div>
-            
+
             <div class="status-badge">
                 <div id="status-dot" class="status-dot disconnected"></div>
                 <span id="status-text">Connecting...</span>
@@ -506,35 +506,35 @@
                 <div class="summary-value" id="total-equity">--</div>
                 <div class="summary-change" id="realized-scope"></div>
             </div>
-            
+
             <div class="summary-card">
                 <div class="summary-label">Realized PnL</div>
                 <div class="summary-value" id="realized-pnl">--</div>
                 <div class="summary-change" id="session-start" style="font-size: 10px; color: var(--text-muted);"></div>
             </div>
-            
+
             <div class="summary-card">
                 <div class="summary-label">Unrealized PnL</div>
                 <div class="summary-value" id="unrealized-pnl">--</div>
                 <div class="summary-change">Open Positions</div>
             </div>
-            
+
             <div class="summary-card">
                 <div class="summary-label">Open Positions</div>
                 <div class="summary-value" id="position-count">0</div>
                 <div class="summary-change">Notional: <span id="total-notional">--</span></div>
             </div>
-            
+
             <div class="summary-card">
                 <div class="summary-label">Win Rate</div>
                 <div class="summary-value" id="win-rate">--</div>
                 <div class="summary-change" id="trade-stats" style="font-size: 11px;"></div>
             </div>
-            
+
             <div class="summary-card">
                 <div class="summary-label">Bot Status</div>
                 <div class="summary-value" style="font-size: 18px;">
-                     Pairs: <span id="selected-pairs">0</span>
+                    Pairs: <span id="selected-pairs">0</span>
                 </div>
             </div>
         </div>
@@ -646,7 +646,7 @@
         function renderPositionsTable(positions) {
             const tbody = document.getElementById('positions-body');
             document.getElementById('single-leg-count').textContent = positions.length;
-            
+
             if (positions.length === 0) {
                 tbody.innerHTML = '<tr><td colspan="12" style="text-align: center; color: var(--text-muted);">No active positions</td></tr>';
                 return;
@@ -656,7 +656,7 @@
             for (const pos of positions) {
                 const sideClass = pos.side === 'long' ? 'side-long' : 'side-short';
                 const pnlClass = getPnlClass(pos.unrealized_pnl);
-                
+
                 html += `<tr>
                     <td><span class="symbol">${pos.symbol}</span></td>
                     <td><span class="${sideClass}">${pos.side.toUpperCase()}</span></td>
@@ -679,240 +679,224 @@
 
         // Render multi-leg positions
         function renderMultiLegPositions(positions) {
-            const section=document.getElementById('multi-leg-section');
-            const container=document.getElementById('multi-leg-container');
-            document.getElementById('multi-leg-count').textContent=positions.length;
+            const section = document.getElementById('multi-leg-section');
+            const container = document.getElementById('multi-leg-container');
+            document.getElementById('multi-leg-count').textContent = positions.length;
 
-            if (positions.length===0) {
-                section.style.display='none';
+            if (positions.length === 0) {
+                section.style.display = 'none';
                 return;
             }
 
-            section.style.display='block';
-            let html='';
+            section.style.display = 'block';
+            let html = '';
 
             for (const pos of positions) {
-                const netPnlClass=getPnlClass(pos.unrealized_pnl);
-
-                let legsRows='';
+                const netPnlClass = getPnlClass(pos.unrealized_pnl);
+                let legsRows = '';
 
                 for (const leg of (pos.legs || [])) {
-                    const sideClass=leg.side==='long' ? 'side-long': 'side-short';
-                    const legPnlClass=getPnlClass(leg.unrealized_pnl);
-                    const spotBadge=leg.is_spot ? '<span class="spot-badge">SPOT</span>': '';
+                    const sideClass = leg.side === 'long' ? 'side-long' : 'side-short';
+                    const legPnlClass = getPnlClass(leg.unrealized_pnl);
+                    const spotBadge = leg.is_spot ? '<span class="spot-badge">SPOT</span>' : '';
 
-                    legsRows+=` <tr><td><span class="symbol">$ {
-                        leg.symbol
-                    }
-
-                    </span>$ {
-                        spotBadge
-                    }
-
-                    </td><td><span class="${sideClass}">$ {
-                        leg.side.toUpperCase()
-                    }
-
-                    </span></td><td>$ {
-                        formatSize(leg.size)
-                    }
-
-                    </td><td>$ {
-                        formatPrice(leg.entry_price)
-                    }
-
-                    </td><td>$ {
-                        formatPrice(leg.current_price)
-                    }
-
-                    </td><td class="${legPnlClass}">$ {
-                        formatCurrency(leg.unrealized_pnl)
-                    }
-
-                    </td></tr>`;
+                    legsRows += `
+                    <tr>
+                        <td>
+                            <span class="symbol">${leg.symbol}</span>${spotBadge}
+                        </td>
+                        <td><span class="${sideClass}">${leg.side.toUpperCase()}</span></td>
+                        <td>${formatSize(leg.size)}</td>
+                        <td>${formatPrice(leg.entry_price)}</td>
+                        <td>${formatPrice(leg.current_price)}</td>
+                        <td class="${legPnlClass}">${formatCurrency(leg.unrealized_pnl)}</td>
+                    </tr>`;
                 }
 
-                html+=` <div class="multi-leg-card"><div class="multi-leg-header"><div><div class="multi-leg-title">$ {
-                    pos.primary_symbol
-                }
-
-                Arbitrage <span class="strategy-tag">$ {
-                    pos.strategy
-                }
-
-                </span></div></div><div class="text-muted"><small>Held for</small>$ {
-                    pos.holding_time
-                }
-
-                </div></div><table class="legs-table"><thead><tr><th>Leg</th><th>Side</th><th>Size</th><th>Entry</th><th>Mark</th><th>PnL</th></tr></thead><tbody>$ {
-                    legsRows
-                }
-
-                </tbody></table><div class="multi-leg-metrics"><div class="strategy-metric"><div class="strategy-metric-label">Net Unrealized PnL</div><div class="strategy-metric-value ${netPnlClass}" style="font-size: 16px;">$ {
-                    formatCurrency(pos.unrealized_pnl)
-                }
-
-                </div></div><div class="strategy-metric"><div class="strategy-metric-label">Capital at Risk</div><div class="strategy-metric-value">$ {
-                    formatCurrency(pos.capital_at_risk)
-                }
-
-                </div></div><div class="strategy-metric"><div class="strategy-metric-label">Funding Collected</div><div class="strategy-metric-value pnl-positive">$ {
-                    formatCurrency(pos.funding_collected)
-                }
-
-                </div></div><div class="strategy-metric"><div class="strategy-metric-label">Current Rate</div><div class="strategy-metric-value">$ {
-                    pos.current_funding_rate ? formatPct(pos.current_funding_rate * 100, 4): '--'
-                }
-
-                </div></div></div></div>`;
+                html += `
+                <div class="multi-leg-card">
+                    <div class="multi-leg-header">
+                        <div>
+                            <div class="multi-leg-title">
+                                ${pos.primary_symbol} Arbitrage 
+                                <span class="strategy-tag">${pos.strategy}</span>
+                            </div>
+                        </div>
+                        <div class="text-muted">
+                            <small>Held for</small> ${pos.holding_time}
+                        </div>
+                    </div>
+                    
+                    <table class="legs-table">
+                        <thead>
+                            <tr>
+                                <th>Leg</th>
+                                <th>Side</th>
+                                <th>Size</th>
+                                <th>Entry</th>
+                                <th>Mark</th>
+                                <th>PnL</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${legsRows}
+                        </tbody>
+                    </table>
+                    
+                    <div class="multi-leg-metrics">
+                        <div class="strategy-metric">
+                            <div class="strategy-metric-label">Net Unrealized PnL</div>
+                            <div class="strategy-metric-value ${netPnlClass}" style="font-size: 16px;">
+                                ${formatCurrency(pos.unrealized_pnl)}
+                            </div>
+                        </div>
+                        <div class="strategy-metric">
+                            <div class="strategy-metric-label">Capital at Risk</div>
+                            <div class="strategy-metric-value">
+                                ${formatCurrency(pos.capital_at_risk)}
+                            </div>
+                        </div>
+                        <div class="strategy-metric">
+                            <div class="strategy-metric-label">Funding Collected</div>
+                            <div class="strategy-metric-value pnl-positive">
+                                ${formatCurrency(pos.funding_collected)}
+                            </div>
+                        </div>
+                        <div class="strategy-metric">
+                            <div class="strategy-metric-label">Current Rate</div>
+                            <div class="strategy-metric-value">
+                                ${pos.current_funding_rate ? formatPct(pos.current_funding_rate * 100, 4) : '--'}
+                            </div>
+                        </div>
+                    </div>
+                </div>`;
             }
 
-            container.innerHTML=html;
+            container.innerHTML = html;
         }
 
         // Render strategies
         function renderStrategies(strategies) {
-            const container=document.getElementById('strategies-container');
+            const container = document.getElementById('strategies-container');
 
-            if (strategies.length===0) {
-                container.innerHTML=` <div class="empty-state"><div class="empty-state-icon">🎯</div><p>No strategies configured</p></div>`;
+            if (strategies.length === 0) {
+                container.innerHTML = `<div class="empty-state"><div class="empty-state-icon">🎯</div><p>No strategies configured</p></div>`;
                 return;
             }
 
-            let html='';
+            let html = '';
 
             for (const strat of strategies) {
-                const statusClass=strat.on_probation ? 'probation': (strat.enabled ? 'enabled' : 'disabled');
-                const statusText=strat.on_probation ? 'PROBATION': (strat.enabled ? 'ACTIVE' : 'DISABLED');
-                const cardClass=strat.on_probation ? 'probation': (strat.enabled ? '' : 'disabled');
-                const pnlClass=getPnlClass(strat.recent_pnl);
+                const statusClass = strat.on_probation ? 'probation' : (strat.enabled ? 'enabled' : 'disabled');
+                const statusText = strat.on_probation ? 'PROBATION' : (strat.enabled ? 'ACTIVE' : 'DISABLED');
+                const cardClass = strat.on_probation ? 'probation' : (strat.enabled ? '' : 'disabled');
+                const pnlClass = getPnlClass(strat.recent_pnl);
 
-                html+=` <div class="strategy-card ${cardClass}"><div class="strategy-header"><div class="strategy-name">$ {
-                    strat.name
-                }
-
-                </div><span class="strategy-status ${statusClass}">$ {
-                    statusText
-                }
-
-                </span></div><div class="strategy-metrics"><div class="strategy-metric"><div class="strategy-metric-label">Weight</div><div class="strategy-metric-value">$ {
-                    formatPct(strat.weight * 100, 0)
-                }
-
-                </div></div><div class="strategy-metric"><div class="strategy-metric-label">Recent PnL</div><div class="strategy-metric-value ${pnlClass}">$ {
-                    formatCurrency(strat.recent_pnl)
-                }
-
-                </div></div><div class="strategy-metric"><div class="strategy-metric-label">Win Rate</div><div class="strategy-metric-value">$ {
-                    formatPct(strat.win_rate)
-                }
-
-                </div></div><div class="strategy-metric"><div class="strategy-metric-label">Trades</div><div class="strategy-metric-value">$ {
-                    strat.trade_count || 0
-                }
-
-                </div></div></div></div>`;
+                html += `
+                <div class="strategy-card ${cardClass}">
+                    <div class="strategy-header">
+                        <div class="strategy-name">${strat.name}</div>
+                        <span class="strategy-status ${statusClass}">${statusText}</span>
+                    </div>
+                    <div class="strategy-metrics">
+                        <div class="strategy-metric">
+                            <div class="strategy-metric-label">Weight</div>
+                            <div class="strategy-metric-value">${formatPct(strat.weight * 100, 0)}</div>
+                        </div>
+                        <div class="strategy-metric">
+                            <div class="strategy-metric-label">Recent PnL</div>
+                            <div class="strategy-metric-value ${pnlClass}">${formatCurrency(strat.recent_pnl)}</div>
+                        </div>
+                        <div class="strategy-metric">
+                            <div class="strategy-metric-label">Win Rate</div>
+                            <div class="strategy-metric-value">${formatPct(strat.win_rate)}</div>
+                        </div>
+                        <div class="strategy-metric">
+                            <div class="strategy-metric-label">Trades</div>
+                            <div class="strategy-metric-value">${strat.trade_count || 0}</div>
+                        </div>
+                    </div>
+                </div>`;
             }
 
-            container.innerHTML=html;
+            container.innerHTML = html;
         }
 
         // Render trade history table
         function renderTradesTable(trades) {
-            const container=document.getElementById('trades-table-container');
-            document.getElementById('trade-count').textContent=trades.length;
+            const container = document.getElementById('trades-table-container');
+            document.getElementById('trade-count').textContent = trades.length;
 
-            if (trades.length===0) {
-                container.innerHTML=` <div class="empty-state"><div class="empty-state-icon">📜</div><p>No trade history yet</p></div>`;
+            if (trades.length === 0) {
+                container.innerHTML = `<div class="empty-state"><div class="empty-state-icon">📜</div><p>No trade history yet</p></div>`;
                 return;
             }
 
-            let html=` <table><thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Entry</th><th>Exit</th><th>Size</th><th>PnL</th><th>PnL %</th><th>Duration</th><th>Exit Reason</th><th>Strategy</th></tr></thead><tbody>`;
+            let html = `<table>
+                <thead>
+                    <tr>
+                        <th>Time</th>
+                        <th>Symbol</th>
+                        <th>Side</th>
+                        <th>Entry</th>
+                        <th>Exit</th>
+                        <th>Size</th>
+                        <th>PnL</th>
+                        <th>PnL %</th>
+                        <th>Duration</th>
+                        <th>Exit Reason</th>
+                        <th>Strategy</th>
+                    </tr>
+                </thead>
+                <tbody>`;
 
             for (const trade of trades) {
-                const sideClass=trade.side==='long' ? 'side-long': 'side-short';
-                const pnlClass=getPnlClass(trade.realized_pnl);
-                const exitTime=trade.exit_time ? formatTime(trade.exit_time): '--';
-                const exitReason=formatExitReason(trade.exit_reason);
+                const sideClass = trade.side === 'long' ? 'side-long' : 'side-short';
+                const pnlClass = getPnlClass(trade.realized_pnl);
+                const exitTime = trade.exit_time ? formatTime(trade.exit_time) : '--';
+                const exitReason = formatExitReason(trade.exit_reason);
 
-                html+=` <tr><td class="text-muted">$ {
-                    exitTime
-                }
-
-                </td><td class="symbol">$ {
-                    trade.symbol
-                }
-
-                </td><td><span class="${sideClass}">$ {
-                    (trade.side || 'unknown').toUpperCase()
-                }
-
-                </span></td><td>$ {
-                    formatPrice(trade.entry_price)
-                }
-
-                </td><td>$ {
-                    formatPrice(trade.exit_price)
-                }
-
-                </td><td>$ {
-                    formatSize(trade.size)
-                }
-
-                </td><td class="${pnlClass}">$ {
-                    formatCurrency(trade.realized_pnl)
-                }
-
-                </td><td class="${pnlClass}">$ {
-                    formatPct(trade.realized_pnl_pct)
-                }
-
-                </td><td class="text-muted">$ {
-                    trade.holding_time || '--'
-                }
-
-                </td><td><span class="exit-reason-tag ${getExitReasonClass(trade.exit_reason)}">$ {
-                    exitReason
-                }
-
-                </span></td><td><span class="strategy-tag">$ {
-                    trade.strategy || 'unknown'
-                }
-
-                </span></td></tr>`;
+                html += `
+                <tr>
+                    <td class="text-muted">${exitTime}</td>
+                    <td class="symbol">${trade.symbol}</td>
+                    <td><span class="${sideClass}">${(trade.side || 'unknown').toUpperCase()}</span></td>
+                    <td>${formatPrice(trade.entry_price)}</td>
+                    <td>${formatPrice(trade.exit_price)}</td>
+                    <td>${formatSize(trade.size)}</td>
+                    <td class="${pnlClass}">${formatCurrency(trade.realized_pnl)}</td>
+                    <td class="${pnlClass}">${formatPct(trade.realized_pnl_pct)}</td>
+                    <td class="text-muted">${trade.holding_time || '--'}</td>
+                    <td><span class="exit-reason-tag ${getExitReasonClass(trade.exit_reason)}">${exitReason}</span></td>
+                    <td><span class="strategy-tag">${trade.strategy || 'unknown'}</span></td>
+                </tr>`;
             }
 
-            html+='</tbody></table>';
-            container.innerHTML=html;
+            html += '</tbody></table>';
+            container.innerHTML = html;
         }
 
         // Format exit time
         function formatTime(timeStr) {
-            if ( !timeStr) return '--';
-
+            if (!timeStr) return '--';
             try {
-                const date=new Date(timeStr);
-
+                const date = new Date(timeStr);
                 return date.toLocaleString('en-US', {
                     month: 'short',
                     day: 'numeric',
                     hour: '2-digit',
                     minute: '2-digit'
                 });
-        }
-
-        catch {
-            return '--';
-        }
+            } catch {
+                return '--';
+            }
         }
 
         // Format date time
         function formatDateTime(timeStr) {
-            if ( !timeStr) return '--';
-
+            if (!timeStr) return '--';
             try {
-                const date=new Date(timeStr);
-
+                const date = new Date(timeStr);
                 return date.toLocaleString('en-US', {
                     month: 'short',
                     day: 'numeric',
@@ -920,148 +904,112 @@
                     minute: '2-digit',
                     second: '2-digit'
                 });
-        }
-
-        catch {
-            return '--';
-        }
+            } catch {
+                return '--';
+            }
         }
 
         // Format exit reason
         function formatExitReason(reason) {
-            if ( !reason) return 'Unknown';
-
-            const reasonMap= {
+            if (!reason) return 'Unknown';
+            const reasonMap = {
                 'take_profit': 'Take Profit',
-                    'stop_loss': 'Stop Loss',
-                    'trailing_stop': 'Trail Stop',
-                    'strategy_exit': 'Strategy',
-                    'position_limit': 'Pos. Limit',
-                    'manual': 'Manual',
-                    'timeout': 'Timeout',
-                    'unknown': 'Unknown'
-            }
-
-            ;
+                'stop_loss': 'Stop Loss',
+                'trailing_stop': 'Trail Stop',
+                'strategy_exit': 'Strategy',
+                'position_limit': 'Pos. Limit',
+                'manual': 'Manual',
+                'timeout': 'Timeout',
+                'unknown': 'Unknown'
+            };
             return reasonMap[reason] || reason.replace(/_/g, ' ');
         }
 
         // Get exit reason class for styling
         function getExitReasonClass(reason) {
-            if ( !reason) return '';
-            if (reason==='take_profit') return 'reason-profit';
-            if (reason==='stop_loss' || reason==='trailing_stop') return 'reason-loss';
+            if (!reason) return '';
+            if (reason === 'take_profit') return 'reason-profit';
+            if (reason === 'stop_loss' || reason === 'trailing_stop') return 'reason-loss';
             return 'reason-neutral';
         }
 
         // Update summary
         function updateSummary(summary, positionTotals) {
-            const account=summary.account || {}
+            const account = summary.account || {};
+            const performance = summary.performance || {};
+            const botStatus = summary.bot_status || {};
 
-            ;
-
-            const performance=summary.performance || {}
-
-            ;
-
-            const botStatus=summary.bot_status || {}
-
-            ;
-
-            document.getElementById('total-equity').textContent=formatCurrency(account.total_equity);
+            document.getElementById('total-equity').textContent = formatCurrency(account.total_equity);
 
             // Session label for realized pnl
-            const sessionStartTime=performance.session_start_time || null;
-            const realizedScopeEl=document.getElementById('realized-scope');
-            const sessionStartEl=document.getElementById('session-start');
+            const sessionStartTime = performance.session_start_time || null;
+            const realizedScopeEl = document.getElementById('realized-scope');
+            const sessionStartEl = document.getElementById('session-start');
 
             if (sessionStartTime) {
-                if (realizedScopeEl) realizedScopeEl.textContent='(since bot start)';
-
-                if (sessionStartEl) sessionStartEl.textContent=`Start: $ {
-                    formatDateTime(sessionStartTime)
-                }
-
-                `;
-            }
-
-            else {
-                if (realizedScopeEl) realizedScopeEl.textContent='';
-                if (sessionStartEl) sessionStartEl.textContent='';
+                if (realizedScopeEl) realizedScopeEl.textContent = '(since bot start)';
+                if (sessionStartEl) sessionStartEl.textContent = `Start: ${formatDateTime(sessionStartTime)}`;
+            } else {
+                if (realizedScopeEl) realizedScopeEl.textContent = '';
+                if (sessionStartEl) sessionStartEl.textContent = '';
             }
 
             // Realized PnL
-            const realizedPnl=performance.total_realized_pnl || 0;
-            const realizedPnlEl=document.getElementById('realized-pnl');
-            realizedPnlEl.textContent=formatCurrency(realizedPnl);
-            realizedPnlEl.className='summary-value '+(realizedPnl >=0 ? 'positive' : 'negative');
+            const realizedPnl = performance.total_realized_pnl || 0;
+            const realizedPnlEl = document.getElementById('realized-pnl');
+            realizedPnlEl.textContent = formatCurrency(realizedPnl);
+            realizedPnlEl.className = 'summary-value ' + (realizedPnl >= 0 ? 'positive' : 'negative');
 
             // Unrealized PnL
-            const unrealizedPnl=positionTotals.total_unrealized_pnl || 0;
-            const unrealizedPnlEl=document.getElementById('unrealized-pnl');
-            unrealizedPnlEl.textContent=formatCurrency(unrealizedPnl);
-            unrealizedPnlEl.className='summary-value '+(unrealizedPnl >=0 ? 'positive' : 'negative');
+            const unrealizedPnl = positionTotals.total_unrealized_pnl || 0;
+            const unrealizedPnlEl = document.getElementById('unrealized-pnl');
+            unrealizedPnlEl.textContent = formatCurrency(unrealizedPnl);
+            unrealizedPnlEl.className = 'summary-value ' + (unrealizedPnl >= 0 ? 'positive' : 'negative');
 
-            document.getElementById('position-count').textContent=positionTotals.position_count || 0;
-            document.getElementById('total-notional').textContent=formatCurrency(positionTotals.total_notional);
-            document.getElementById('win-rate').textContent=formatPct(performance.win_rate);
+            document.getElementById('position-count').textContent = positionTotals.position_count || 0;
+            document.getElementById('total-notional').textContent = formatCurrency(positionTotals.total_notional);
+            document.getElementById('win-rate').textContent = formatPct(performance.win_rate);
 
             // Trade statistics
-            const wins=performance.winning_trades || 0;
-            const losses=performance.losing_trades || 0;
-            const total=performance.total_trades || 0;
+            const wins = performance.winning_trades || 0;
+            const losses = performance.losing_trades || 0;
+            const total = performance.total_trades || 0;
 
-            document.getElementById('trade-stats').textContent=`$ {
-                wins
-            }
+            document.getElementById('trade-stats').textContent = `${wins} W / ${losses} L (${total} total)`;
 
-            W / $ {
-                losses
-            }
-
-            L ($ {
-                    total
-                }
-
-                total)`;
-
-            document.getElementById('selected-pairs').textContent=botStatus.selected_pairs || 0;
+            document.getElementById('selected-pairs').textContent = botStatus.selected_pairs || 0;
 
             // Update status
-            const statusDot=document.getElementById('status-dot');
-            const statusText=document.getElementById('status-text');
+            const statusDot = document.getElementById('status-dot');
+            const statusText = document.getElementById('status-text');
 
             if (botStatus.is_running) {
-                statusDot.className='status-dot connected';
-                statusText.textContent='Bot Running';
-            }
-
-            else {
-                statusDot.className='status-dot disconnected';
-                statusText.textContent='Bot Stopped';
+                statusDot.className = 'status-dot connected';
+                statusText.textContent = 'Bot Running';
+            } else {
+                statusDot.className = 'status-dot disconnected';
+                statusText.textContent = 'Bot Stopped';
             }
         }
 
         // Fetch all data
         async function fetchData() {
             try {
-                const [positionsRes,
-                summaryRes,
-                strategiesRes,
-                tradesRes]=await Promise.all([ fetch('/api/positions'),
+                const [positionsRes, summaryRes, strategiesRes, tradesRes] = await Promise.all([
+                    fetch('/api/positions'),
                     fetch('/api/summary'),
                     fetch('/api/strategies'),
-                    fetch('/api/trades')]);
+                    fetch('/api/trades')
+                ]);
 
-                const positions=await positionsRes.json();
-                const summary=await summaryRes.json();
-                const strategies=await strategiesRes.json();
-                const trades=await tradesRes.json();
+                const positions = await positionsRes.json();
+                const summary = await summaryRes.json();
+                const strategies = await strategiesRes.json();
+                const trades = await tradesRes.json();
 
                 if (positions.success) {
                     renderPositionsTable(positions.data.single_leg || []);
                     renderMultiLegPositions(positions.data.multi_leg || []);
-
                     if (summary.success) {
                         updateSummary(summary.data, positions.data.totals || {});
                     }
@@ -1076,26 +1024,23 @@
                 }
 
                 // Update status on success
-                document.getElementById('status-dot').className='status-dot connected';
+                document.getElementById('status-dot').className = 'status-dot connected';
+                document.getElementById('status-text').textContent = 'Bot Running';
 
-            }
-
-            catch (error) {
+            } catch (error) {
                 console.error('Failed to fetch data:', error);
-                document.getElementById('status-dot').className='status-dot disconnected';
-                document.getElementById('status-text').textContent='Connection Error';
+                document.getElementById('status-dot').className = 'status-dot disconnected';
+                document.getElementById('status-text').textContent = 'Connection Error';
             }
         }
 
         // Countdown timer
-        let countdown=5;
-
+        let countdown = 5;
         function updateCountdown() {
             countdown--;
-            document.getElementById('countdown').textContent=countdown;
-
-            if (countdown <=0) {
-                countdown=5;
+            document.getElementById('countdown').textContent = countdown;
+            if (countdown <= 0) {
+                countdown = 5;
                 fetchData();
             }
         }
@@ -1103,4 +1048,510 @@
         // Initial fetch and start refresh
         fetchData();
         setInterval(updateCountdown, 1000);
-        </script></body></html>
+    </script>
+</body>
+
+</html>
+const legPnlClass=getPnlClass(leg.unrealized_pnl);
+const spotBadge=leg.is_spot ? '<span class="spot-badge">SPOT</span>': '';
+
+legsRows+=` <tr>
+    <td><span class="symbol">$ {
+            leg.symbol
+            }
+
+        </span>$ {
+        spotBadge
+        }
+
+    </td>
+    <td><span class="${sideClass}">$ {
+            leg.side.toUpperCase()
+            }
+
+        </span></td>
+    <td>$ {
+        formatSize(leg.size)
+        }
+
+    </td>
+    <td>$ {
+        formatPrice(leg.entry_price)
+        }
+
+    </td>
+    <td>$ {
+        formatPrice(leg.current_price)
+        }
+
+    </td>
+    <td class="${legPnlClass}">$ {
+        formatCurrency(leg.unrealized_pnl)
+        }
+
+    </td>
+</tr>`;
+}
+
+html+=` <div class="multi-leg-card">
+    <div class="multi-leg-header">
+        <div>
+            <div class="multi-leg-title">$ {
+                pos.primary_symbol
+                }
+
+                Arbitrage <span class="strategy-tag">$ {
+                    pos.strategy
+                    }
+
+                </span></div>
+        </div>
+        <div class="text-muted"><small>Held for</small>$ {
+            pos.holding_time
+            }
+
+        </div>
+    </div>
+    <table class="legs-table">
+        <thead>
+            <tr>
+                <th>Leg</th>
+                <th>Side</th>
+                <th>Size</th>
+                <th>Entry</th>
+                <th>Mark</th>
+                <th>PnL</th>
+            </tr>
+        </thead>
+        <tbody>$ {
+            legsRows
+            }
+
+        </tbody>
+    </table>
+    <div class="multi-leg-metrics">
+        <div class="strategy-metric">
+            <div class="strategy-metric-label">Net Unrealized PnL</div>
+            <div class="strategy-metric-value ${netPnlClass}" style="font-size: 16px;">$ {
+                formatCurrency(pos.unrealized_pnl)
+                }
+
+            </div>
+        </div>
+        <div class="strategy-metric">
+            <div class="strategy-metric-label">Capital at Risk</div>
+            <div class="strategy-metric-value">$ {
+                formatCurrency(pos.capital_at_risk)
+                }
+
+            </div>
+        </div>
+        <div class="strategy-metric">
+            <div class="strategy-metric-label">Funding Collected</div>
+            <div class="strategy-metric-value pnl-positive">$ {
+                formatCurrency(pos.funding_collected)
+                }
+
+            </div>
+        </div>
+        <div class="strategy-metric">
+            <div class="strategy-metric-label">Current Rate</div>
+            <div class="strategy-metric-value">$ {
+                pos.current_funding_rate ? formatPct(pos.current_funding_rate * 100, 4): '--'
+                }
+
+            </div>
+        </div>
+    </div>
+</div>`;
+}
+
+container.innerHTML=html;
+}
+
+// Render strategies
+function renderStrategies(strategies) {
+const container=document.getElementById('strategies-container');
+
+if (strategies.length===0) {
+container.innerHTML=` <div class="empty-state">
+    <div class="empty-state-icon">🎯</div>
+    <p>No strategies configured</p>
+</div>`;
+return;
+}
+
+let html='';
+
+for (const strat of strategies) {
+const statusClass=strat.on_probation ? 'probation': (strat.enabled ? 'enabled' : 'disabled');
+const statusText=strat.on_probation ? 'PROBATION': (strat.enabled ? 'ACTIVE' : 'DISABLED');
+const cardClass=strat.on_probation ? 'probation': (strat.enabled ? '' : 'disabled');
+const pnlClass=getPnlClass(strat.recent_pnl);
+
+html+=` <div class="strategy-card ${cardClass}">
+    <div class="strategy-header">
+        <div class="strategy-name">$ {
+            strat.name
+            }
+
+        </div><span class="strategy-status ${statusClass}">$ {
+            statusText
+            }
+
+        </span>
+    </div>
+    <div class="strategy-metrics">
+        <div class="strategy-metric">
+            <div class="strategy-metric-label">Weight</div>
+            <div class="strategy-metric-value">$ {
+                formatPct(strat.weight * 100, 0)
+                }
+
+            </div>
+        </div>
+        <div class="strategy-metric">
+            <div class="strategy-metric-label">Recent PnL</div>
+            <div class="strategy-metric-value ${pnlClass}">$ {
+                formatCurrency(strat.recent_pnl)
+                }
+
+            </div>
+        </div>
+        <div class="strategy-metric">
+            <div class="strategy-metric-label">Win Rate</div>
+            <div class="strategy-metric-value">$ {
+                formatPct(strat.win_rate)
+                }
+
+            </div>
+        </div>
+        <div class="strategy-metric">
+            <div class="strategy-metric-label">Trades</div>
+            <div class="strategy-metric-value">$ {
+                strat.trade_count || 0
+                }
+
+            </div>
+        </div>
+    </div>
+</div>`;
+}
+
+container.innerHTML=html;
+}
+
+// Render trade history table
+function renderTradesTable(trades) {
+const container=document.getElementById('trades-table-container');
+document.getElementById('trade-count').textContent=trades.length;
+
+if (trades.length===0) {
+container.innerHTML=` <div class="empty-state">
+    <div class="empty-state-icon">📜</div>
+    <p>No trade history yet</p>
+</div>`;
+return;
+}
+
+let html=` <table>
+    <thead>
+        <tr>
+            <th>Time</th>
+            <th>Symbol</th>
+            <th>Side</th>
+            <th>Entry</th>
+            <th>Exit</th>
+            <th>Size</th>
+            <th>PnL</th>
+            <th>PnL %</th>
+            <th>Duration</th>
+            <th>Exit Reason</th>
+            <th>Strategy</th>
+        </tr>
+    </thead>
+    <tbody>`;
+
+        for (const trade of trades) {
+        const sideClass=trade.side==='long' ? 'side-long': 'side-short';
+        const pnlClass=getPnlClass(trade.realized_pnl);
+        const exitTime=trade.exit_time ? formatTime(trade.exit_time): '--';
+        const exitReason=formatExitReason(trade.exit_reason);
+
+        html+=` <tr>
+            <td class="text-muted">$ {
+                exitTime
+                }
+
+            </td>
+            <td class="symbol">$ {
+                trade.symbol
+                }
+
+            </td>
+            <td><span class="${sideClass}">$ {
+                    (trade.side || 'unknown').toUpperCase()
+                    }
+
+                </span></td>
+            <td>$ {
+                formatPrice(trade.entry_price)
+                }
+
+            </td>
+            <td>$ {
+                formatPrice(trade.exit_price)
+                }
+
+            </td>
+            <td>$ {
+                formatSize(trade.size)
+                }
+
+            </td>
+            <td class="${pnlClass}">$ {
+                formatCurrency(trade.realized_pnl)
+                }
+
+            </td>
+            <td class="${pnlClass}">$ {
+                formatPct(trade.realized_pnl_pct)
+                }
+
+            </td>
+            <td class="text-muted">$ {
+                trade.holding_time || '--'
+                }
+
+            </td>
+            <td><span class="exit-reason-tag ${getExitReasonClass(trade.exit_reason)}">$ {
+                    exitReason
+                    }
+
+                </span></td>
+            <td><span class="strategy-tag">$ {
+                    trade.strategy || 'unknown'
+                    }
+
+                </span></td>
+        </tr>`;
+        }
+
+        html+='</tbody>
+</table>';
+container.innerHTML=html;
+}
+
+// Format exit time
+function formatTime(timeStr) {
+if ( !timeStr) return '--';
+
+try {
+const date=new Date(timeStr);
+
+return date.toLocaleString('en-US', {
+month: 'short',
+day: 'numeric',
+hour: '2-digit',
+minute: '2-digit'
+});
+}
+
+catch {
+return '--';
+}
+}
+
+// Format date time
+function formatDateTime(timeStr) {
+if ( !timeStr) return '--';
+
+try {
+const date=new Date(timeStr);
+
+return date.toLocaleString('en-US', {
+month: 'short',
+day: 'numeric',
+hour: '2-digit',
+minute: '2-digit',
+second: '2-digit'
+});
+}
+
+catch {
+return '--';
+}
+}
+
+// Format exit reason
+function formatExitReason(reason) {
+if ( !reason) return 'Unknown';
+
+const reasonMap= {
+'take_profit': 'Take Profit',
+'stop_loss': 'Stop Loss',
+'trailing_stop': 'Trail Stop',
+'strategy_exit': 'Strategy',
+'position_limit': 'Pos. Limit',
+'manual': 'Manual',
+'timeout': 'Timeout',
+'unknown': 'Unknown'
+}
+
+;
+return reasonMap[reason] || reason.replace(/_/g, ' ');
+}
+
+// Get exit reason class for styling
+function getExitReasonClass(reason) {
+if ( !reason) return '';
+if (reason==='take_profit') return 'reason-profit';
+if (reason==='stop_loss' || reason==='trailing_stop') return 'reason-loss';
+return 'reason-neutral';
+}
+
+// Update summary
+function updateSummary(summary, positionTotals) {
+const account=summary.account || {}
+
+;
+
+const performance=summary.performance || {}
+
+;
+
+const botStatus=summary.bot_status || {}
+
+;
+
+document.getElementById('total-equity').textContent=formatCurrency(account.total_equity);
+
+// Session label for realized pnl
+const sessionStartTime=performance.session_start_time || null;
+const realizedScopeEl=document.getElementById('realized-scope');
+const sessionStartEl=document.getElementById('session-start');
+
+if (sessionStartTime) {
+if (realizedScopeEl) realizedScopeEl.textContent='(since bot start)';
+
+if (sessionStartEl) sessionStartEl.textContent=`Start: $ {
+formatDateTime(sessionStartTime)
+}
+
+`;
+}
+
+else {
+if (realizedScopeEl) realizedScopeEl.textContent='';
+if (sessionStartEl) sessionStartEl.textContent='';
+}
+
+// Realized PnL
+const realizedPnl=performance.total_realized_pnl || 0;
+const realizedPnlEl=document.getElementById('realized-pnl');
+realizedPnlEl.textContent=formatCurrency(realizedPnl);
+realizedPnlEl.className='summary-value '+(realizedPnl >=0 ? 'positive' : 'negative');
+
+// Unrealized PnL
+const unrealizedPnl=positionTotals.total_unrealized_pnl || 0;
+const unrealizedPnlEl=document.getElementById('unrealized-pnl');
+unrealizedPnlEl.textContent=formatCurrency(unrealizedPnl);
+unrealizedPnlEl.className='summary-value '+(unrealizedPnl >=0 ? 'positive' : 'negative');
+
+document.getElementById('position-count').textContent=positionTotals.position_count || 0;
+document.getElementById('total-notional').textContent=formatCurrency(positionTotals.total_notional);
+document.getElementById('win-rate').textContent=formatPct(performance.win_rate);
+
+// Trade statistics
+const wins=performance.winning_trades || 0;
+const losses=performance.losing_trades || 0;
+const total=performance.total_trades || 0;
+
+document.getElementById('trade-stats').textContent=`$ {
+wins
+}
+
+W / $ {
+losses
+}
+
+L ($ {
+total
+}
+
+total)`;
+
+document.getElementById('selected-pairs').textContent=botStatus.selected_pairs || 0;
+
+// Update status
+const statusDot=document.getElementById('status-dot');
+const statusText=document.getElementById('status-text');
+
+if (botStatus.is_running) {
+statusDot.className='status-dot connected';
+statusText.textContent='Bot Running';
+}
+
+else {
+statusDot.className='status-dot disconnected';
+statusText.textContent='Bot Stopped';
+}
+}
+
+// Fetch all data
+async function fetchData() {
+try {
+const [positionsRes,
+summaryRes,
+strategiesRes,
+tradesRes]=await Promise.all([ fetch('/api/positions'),
+fetch('/api/summary'),
+fetch('/api/strategies'),
+fetch('/api/trades')]);
+
+const positions=await positionsRes.json();
+const summary=await summaryRes.json();
+const strategies=await strategiesRes.json();
+const trades=await tradesRes.json();
+
+if (positions.success) {
+renderPositionsTable(positions.data.single_leg || []);
+renderMultiLegPositions(positions.data.multi_leg || []);
+
+if (summary.success) {
+updateSummary(summary.data, positions.data.totals || {});
+}
+}
+
+if (strategies.success) {
+renderStrategies(strategies.data || []);
+}
+
+if (trades.success) {
+renderTradesTable(trades.data || []);
+}
+
+// Update status on success
+document.getElementById('status-dot').className='status-dot connected';
+
+}
+
+catch (error) {
+console.error('Failed to fetch data:', error);
+document.getElementById('status-dot').className='status-dot disconnected';
+document.getElementById('status-text').textContent='Connection Error';
+}
+}
+
+// Countdown timer
+let countdown=5;
+
+function updateCountdown() {
+countdown--;
+document.getElementById('countdown').textContent=countdown;
+
+if (countdown <=0) { countdown=5; fetchData(); } } // Initial fetch and start refresh fetchData();
+    setInterval(updateCountdown, 1000); </script>
+    </body>
+
+    </html>

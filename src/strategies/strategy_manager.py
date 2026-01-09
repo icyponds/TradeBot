@@ -352,13 +352,13 @@ class StrategyManager:
             
             # 3. Find ghosts (in local but not on exchange)
             ghost_symbols = [s for s in local_positions if s not in exchange_symbols]
+            changes_made = False
             
-            if not ghost_symbols:
-                return  # All synced
+            if ghost_symbols:
+                changes_made = True
+                self.logger.warning(f"Ghost positions detected: {ghost_symbols}")
             
-            self.logger.warning(f"Ghost positions detected: {ghost_symbols}")
-            
-            # 4. Close ghost positions locally
+            # 4. Close ghost positions locally (Single-Leg)
             for symbol in ghost_symbols:
                 pos = self.execution_engine.positions.get(symbol)
                 if not pos:
@@ -414,9 +414,41 @@ class StrategyManager:
                     self.performance_tracker.db.delete_position(position_id)
                 except Exception as e:
                     self.logger.error(f"Failed to delete ghost position from DB: {e}")
+
+            # 5. Multi-Leg Ghost Detection
+            ml_ghosts = []
+            
+            for pos_id, pos in self.multi_leg_positions.items():
+                # Check if ALL legs are missing from exchange
+                legs_on_exchange = [leg.symbol for leg in pos.legs if leg.symbol in exchange_symbols]
+                
+                # If NO legs are on exchange, it's a ghost
+                # (A partial fill is tricky, but usually 0 legs means fully closed)
+                if not legs_on_exchange:
+                    ml_ghosts.append(pos_id)
+            
+            if ml_ghosts:
+                changes_made = True
+                self.logger.warning(f"Ghost multi-leg positions detected: {ml_ghosts}")
+                for pos_id in ml_ghosts:
+                    pos = self.multi_leg_positions.get(pos_id)
+                    if not pos: continue
+                    
+                    self.logger.warning(f"Closing ghost multi-leg position {pos_id} (External Close)")
+                    
+                    # Remove from DB
+                    try:
+                        self.performance_tracker.db.delete_position(pos_id)
+                    except Exception as e:
+                        self.logger.error(f"Failed to delete ghost ML position {pos_id} from DB: {e}")
+                        
+                    # Remove from local state
+                    del self.execution_engine.multi_leg_positions[pos_id]
+                    self.consecutive_errors = 0 # Reset error counter on successful cleanup
                     
             # Persist updated state
-            self.execution_engine.save_positions_to_db()
+            if changes_made:
+                self.execution_engine.save_positions_to_db()
             
         except Exception as e:
             self.logger.error(f"Error syncing positions with exchange: {e}")
@@ -933,6 +965,9 @@ class StrategyManager:
         
         # Check for orphan positions (strategies no longer enabled)
         self._check_startup_orphans()
+        
+        # Sync with exchange to clear any ghost positions (closed while bot was off)
+        self.sync_positions_with_exchange()
         
         # Start trading loop
         self.is_running = True

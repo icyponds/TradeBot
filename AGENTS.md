@@ -21,4 +21,28 @@ Whenever you add, modify, delete, or rename a public method in `HyperliquidAPI`:
 Both `HyperliquidAPI` and `MockMarketAPI` inherit from `MarketInterface`. Python will raise a `TypeError` at instantiation if ANY abstract method is missing implementation.
 
 ## 2. Configuration Management
-...
+(Configuration section omitted for brevity but preserved in file)
+
+## 3. Position Logic Parity
+
+### Rule: Single-Leg vs Multi-Leg Symmetry
+When implementing or modifying logic for position management (e.g., `close_position`, `unwind`, `exit_strategy`, `stop_loss`, `take_profit`, or database persistence):
+1.  **Check Both Types**: You MUST explicitly check if the logic needs to apply to both `SingleLegPosition` and `MultiLegPosition`.
+2.  **Apply to Both**: If a logic change (e.g., "Close all positions on shutdown") applies to one, it almost certainly applies to the other. Ensure you implement the handling for both dictionaries (`self.positions` and `self.multi_leg_positions`).
+3.  **Verify**: Verify that your changes affect both position types correctly.
+
+**Example Failure Mode**:
+*   Implementing a "Close All" feature that iterates `self.positions` but forgets `self.multi_leg_positions`.
+*   Implementing a Ghost Position check that syncs single-leg positions but ignores multi-leg ones.
+
+### Implementation Pattern
+When iterating positions, always consider:
+```python
+# 1. Single-Leg
+for symbol, pos in self.positions.items():
+    check_logic(pos)
+
+# 2. Multi-Leg
+for pos_id, pos in self.multi_leg_positions.items():
+    check_logic(pos)
+```

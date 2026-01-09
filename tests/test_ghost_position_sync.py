@@ -34,6 +34,7 @@ class TestGhostPositionSync(unittest.TestCase):
             manager.execution_engine = self.mock_execution_engine
             manager.performance_tracker = self.mock_performance_tracker
             manager.logger = MagicMock()
+            manager.consecutive_errors = 0
             
             # Import the real method
             manager.sync_positions_with_exchange = StrategyManager.sync_positions_with_exchange.__get__(manager, StrategyManager)
@@ -171,6 +172,49 @@ class TestGhostPositionSync(unittest.TestCase):
         call_kwargs = self.mock_performance_tracker.record_trade_from_position.call_args[1]
         self.assertEqual(call_kwargs['exit_reason'], 'Liquidation')
         self.assertEqual(call_kwargs['exit_price'], 38000.0)
+
+    def test_ghost_multi_leg_position_detected(self):
+        """Test that ghost multi-leg position is detected and closed."""
+        manager = self._create_mock_strategy_manager()
+        
+        # Setup: Multi-Leg Position exists locally
+        from src.strategies.execution_engine import MultiLegPosition
+        
+        # Create a mock MultiLegPosition
+        # structure of MultiLegPosition is simpler, usually has .legs list
+        mock_leg = MagicMock()
+        mock_leg.symbol = 'BTC'
+        mock_pos = MagicMock()
+        mock_pos.position_id = 'ml_123'
+        mock_pos.legs = [mock_leg]
+        
+        # execution_engine.multi_leg_positions is where they live
+        ml_dict = {'ml_123': mock_pos}
+        # Use configure_mock to ensure it sticks
+        self.mock_execution_engine.configure_mock(multi_leg_positions=ml_dict)
+        
+        # Also try explicitly setting the MagicMock return value if it's being treated as a method (unlikely but possible)
+        # self.mock_execution_engine.multi_leg_positions = ml_dict
+        
+        # Setup: Exchange has NO positions (BTC is missing)
+        self.mock_market_api.get_positions.return_value = []
+        
+        # Mock DB
+        mock_db = MagicMock()
+        self.mock_performance_tracker.db = mock_db
+        
+        # Execution Engine needs positions dict too (single leg)
+        self.mock_execution_engine.positions = {}
+        
+        # Execute
+        manager.sync_positions_with_exchange()
+        
+        # Verify: Position removed from local dict
+        self.assertNotIn('ml_123', ml_dict)
+        
+        # Verify: DB delete called
+        mock_db.delete_position.assert_called_with('ml_123')
+
 
 
 class TestSyncPositionsPeriodic(unittest.TestCase):
