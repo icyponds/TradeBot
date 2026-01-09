@@ -53,27 +53,35 @@ class LeverageManager:
         self.logger.info("Portfolio manager set for leverage manager")
     
     def calculate_dynamic_leverage(self, symbol: str, strategy_name: str, signal_strength: float, 
-                                 market_volatility: float, current_price: float) -> float:
+                                 market_volatility: float, current_price: float, asset_max_leverage: float = 100.0,
+                                 strategy_leverage: Optional[float] = None) -> float:
         """
-        Calculate dynamic leverage based on market conditions and signal strength.
+        Calculate dynamic leverage based on market conditions, signal strength, and strategy preference.
         
         Args:
             symbol: Trading symbol
             strategy_name: Name of the strategy
             signal_strength: Signal strength (0-1)
+            signal_strength: Signal strength (0-1)
             market_volatility: Market volatility measure
             current_price: Current asset price
+            asset_max_leverage: Maximum leverage allowed for this asset (default: 100.0)
+            strategy_leverage: Leverage requested by strategy signal (default: None -> 1.0)
             
         Returns:
             Dynamic leverage value
         """
         # Get configuration values
         leverage_config = self.config.get('leverage_management', {})
-        base_leverage = leverage_config.get('base_leverage', 2.0)
+        
+        # Use strategy-provided leverage or default to 1.0 (safe/unleveraged) if not provided
+        base_leverage = strategy_leverage if strategy_leverage is not None else 1.0
+        
         signal_adjustment_max = leverage_config.get('signal_adjustment_max', 0.5)
         volatility_min = leverage_config.get('volatility_min', 0.1)
         min_leverage = leverage_config.get('min_leverage', 1.0)
-        max_leverage = leverage_config.get('max_leverage', 10.0)
+        # max_leverage from config is removed in favor of asset_max_leverage
+        
         ma_strategy_adjustment = leverage_config.get('ma_strategy_adjustment', 1.1)
         rsi_strategy_adjustment = leverage_config.get('rsi_strategy_adjustment', 0.9)
         
@@ -97,16 +105,16 @@ class LeverageManager:
         # Calculate final leverage
         dynamic_leverage = base_leverage * signal_adjustment * volatility_adjustment * strategy_adjustment
         
-        # Apply limits
+        # Apply limits - strictly respect asset max
+        dynamic_leverage = max(min_leverage, min(asset_max_leverage, dynamic_leverage))
         
-        dynamic_leverage = max(min_leverage, min(max_leverage, dynamic_leverage))
-        
-        self.logger.debug(f"Dynamic leverage for {symbol} ({strategy_name}): {dynamic_leverage:.1f}x")
+        self.logger.debug(f"Dynamic leverage for {symbol} ({strategy_name}): {dynamic_leverage:.1f}x (Asset Max: {asset_max_leverage}x)")
         
         return dynamic_leverage
     
     def calculate_leveraged_position_size(self, symbol: str, current_price: float, available_capital: float,
-                                        strategy_name: str, signal_strength: float, market_volatility: float) -> Tuple[float, float, float]:
+                                        strategy_name: str, signal_strength: float, market_volatility: float, 
+                                        asset_max_leverage: float = 100.0) -> Tuple[float, float, float]:
         """
         Calculate leveraged position size based on capital at risk, not notional value.
         
@@ -117,12 +125,15 @@ class LeverageManager:
             strategy_name: Name of the strategy
             signal_strength: Signal strength (0-1)
             market_volatility: Market volatility measure
+            asset_max_leverage: Maximum leverage allowed for this asset
             
         Returns:
             Tuple of (position_size, margin_required, leverage)
         """
         # Calculate dynamic leverage
-        leverage = self.calculate_dynamic_leverage(symbol, strategy_name, signal_strength, market_volatility, current_price)
+        leverage = self.calculate_dynamic_leverage(
+            symbol, strategy_name, signal_strength, market_volatility, current_price, asset_max_leverage
+        )
         
         # Get maximum position size from portfolio manager if available (ceiling)
         if self.portfolio_manager:

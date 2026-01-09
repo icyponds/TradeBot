@@ -1289,7 +1289,10 @@ class StrategyManager:
 
                 # Live Reconciliation: Check for config changes every 60s
                 self._reconcile_strategies_periodic()
-                
+            
+                # Update account balance periodically (every 5 minutes)
+                self._update_account_balance_periodic()
+            
                 # Sync positions with exchange every 5 minutes
                 self._sync_positions_periodic()
                 

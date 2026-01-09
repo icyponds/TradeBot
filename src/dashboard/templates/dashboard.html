@@ -564,7 +564,7 @@
                         <tr>
                             <th>Symbol</th>
                             <th>Side</th>
-                            <th>Size</th>
+                            <th>Notional</th>
                             <th>Entry</th>
                             <th>Mark</th>
                             <th>Liq. Price</th>
@@ -660,7 +660,7 @@
                 html += `<tr>
                     <td><span class="symbol">${pos.symbol}</span></td>
                     <td><span class="${sideClass}">${pos.side.toUpperCase()}</span></td>
-                    <td>${formatSize(pos.size)}</td>
+                    <td>${formatCurrency(pos.size * pos.current_price)}</td>
                     <td>${formatPrice(pos.entry_price)}</td>
                     <td>${formatPrice(pos.current_price)}</td>
                     <td>${pos.liquidation_price ? formatPrice(pos.liquidation_price) : '--'}</td>
@@ -1052,117 +1052,71 @@
 </body>
 
 </html>
-const legPnlClass=getPnlClass(leg.unrealized_pnl);
-const spotBadge=leg.is_spot ? '<span class="spot-badge">SPOT</span>': '';
-
-legsRows+=` <tr>
-    <td><span class="symbol">$ {
-            leg.symbol
-            }
-
-        </span>$ {
-        spotBadge
-        }
-
-    </td>
-    <td><span class="${sideClass}">$ {
-            leg.side.toUpperCase()
-            }
-
-        </span></td>
-    <td>$ {
-        formatSize(leg.size)
-        }
-
-    </td>
-    <td>$ {
-        formatPrice(leg.entry_price)
-        }
-
-    </td>
-    <td>$ {
-        formatPrice(leg.current_price)
-        }
-
-    </td>
-    <td class="${legPnlClass}">$ {
-        formatCurrency(leg.unrealized_pnl)
-        }
-
-    </td>
-</tr>`;
 }
 
-html+=` <div class="multi-leg-card">
-    <div class="multi-leg-header">
-        <div>
-            <div class="multi-leg-title">$ {
-                pos.primary_symbol
-                }
+Arbitrage <span class="strategy-tag">$ {
+    pos.strategy
+    }
 
-                Arbitrage <span class="strategy-tag">$ {
-                    pos.strategy
-                    }
+</span></div>
+</div>
+<div class="text-muted"><small>Held for</small>$ {
+    pos.holding_time
+    }
 
-                </span></div>
-        </div>
-        <div class="text-muted"><small>Held for</small>$ {
-            pos.holding_time
+</div>
+</div>
+<table class="legs-table">
+    <thead>
+        <tr>
+            <th>Leg</th>
+            <th>Side</th>
+            <th>Size</th>
+            <th>Entry</th>
+            <th>Mark</th>
+            <th>PnL</th>
+        </tr>
+    </thead>
+    <tbody>$ {
+        legsRows
+        }
+
+    </tbody>
+</table>
+<div class="multi-leg-metrics">
+    <div class="strategy-metric">
+        <div class="strategy-metric-label">Net Unrealized PnL</div>
+        <div class="strategy-metric-value ${netPnlClass}" style="font-size: 16px;">$ {
+            formatCurrency(pos.unrealized_pnl)
             }
 
         </div>
     </div>
-    <table class="legs-table">
-        <thead>
-            <tr>
-                <th>Leg</th>
-                <th>Side</th>
-                <th>Size</th>
-                <th>Entry</th>
-                <th>Mark</th>
-                <th>PnL</th>
-            </tr>
-        </thead>
-        <tbody>$ {
-            legsRows
+    <div class="strategy-metric">
+        <div class="strategy-metric-label">Capital at Risk</div>
+        <div class="strategy-metric-value">$ {
+            formatCurrency(pos.capital_at_risk)
             }
 
-        </tbody>
-    </table>
-    <div class="multi-leg-metrics">
-        <div class="strategy-metric">
-            <div class="strategy-metric-label">Net Unrealized PnL</div>
-            <div class="strategy-metric-value ${netPnlClass}" style="font-size: 16px;">$ {
-                formatCurrency(pos.unrealized_pnl)
-                }
-
-            </div>
-        </div>
-        <div class="strategy-metric">
-            <div class="strategy-metric-label">Capital at Risk</div>
-            <div class="strategy-metric-value">$ {
-                formatCurrency(pos.capital_at_risk)
-                }
-
-            </div>
-        </div>
-        <div class="strategy-metric">
-            <div class="strategy-metric-label">Funding Collected</div>
-            <div class="strategy-metric-value pnl-positive">$ {
-                formatCurrency(pos.funding_collected)
-                }
-
-            </div>
-        </div>
-        <div class="strategy-metric">
-            <div class="strategy-metric-label">Current Rate</div>
-            <div class="strategy-metric-value">$ {
-                pos.current_funding_rate ? formatPct(pos.current_funding_rate * 100, 4): '--'
-                }
-
-            </div>
         </div>
     </div>
+    <div class="strategy-metric">
+        <div class="strategy-metric-label">Funding Collected</div>
+        <div class="strategy-metric-value pnl-positive">$ {
+            formatCurrency(pos.funding_collected)
+            }
+
+        </div>
+    </div>
+    <div class="strategy-metric">
+        <div class="strategy-metric-label">Current Rate</div>
+        <div class="strategy-metric-value">$ {
+            pos.current_funding_rate ? formatPct(pos.current_funding_rate * 100, 4): '--'
+            }
+
+        </div>
+    </div>
+</div>
 </div>`;
 }
 

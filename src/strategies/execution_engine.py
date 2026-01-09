@@ -109,9 +109,57 @@ class ExecutionEngine:
                 return
             
             # Get leverage and position details
-            position_size = signal['size']
-            leverage = signal['leverage']
-            margin_required = signal['margin_required']
+            # 1. Fetch Asset Limits
+            asset_meta = self.market_api.get_asset_meta(symbol)
+            asset_max_leverage = float(asset_meta.get('maxLeverage', 100.0)) if asset_meta else 100.0
+            
+            # 2. Calculate Dynamic Leverage (Respecting Asset Max & Strategy Request)
+            passed_leverage = float(signal.get('leverage')) if signal.get('leverage') is not None else None
+            
+            leverage = self.leverage_manager.calculate_dynamic_leverage(
+                symbol, strategy_name, signal['signal_strength'], 
+                signal.get('market_volatility', 0.0), current_price,
+                asset_max_leverage=asset_max_leverage,
+                strategy_leverage=passed_leverage
+            )
+            # Explicitly cast to int as exchange requires integer leverage
+            leverage = int(leverage)
+            
+            # 3. Enforce Leverage on Exchange
+            try:
+                # Check current leverage state
+                current_positions = self.market_api.get_positions()
+                current_pos = next((p for p in current_positions if p['symbol'] == symbol), None)
+                
+                needs_update = True
+                if current_pos:
+                    # Parse current leverage from position data
+                    # Structure usually: {'type': 'cross', 'value': 20}
+                    curr_lev_data = current_pos.get('leverage', {})
+                    if isinstance(curr_lev_data, dict):
+                        curr_lev_val = int(curr_lev_data.get('value', -1))
+                    else:
+                        curr_lev_val = int(curr_lev_data)
+                        
+                    if curr_lev_val == leverage:
+                        needs_update = False
+                        
+                if needs_update:
+                    # Update leverage on exchange BEFORE placing order
+                    self.market_api.update_leverage(symbol, leverage, is_cross=True)
+                    
+            except Exception as e:
+                self.logger.warning(f"Leverage update check failed for {symbol}: {e}. Proceeding with calculated leverage {leverage}x.")
+
+            # 4. Recalculate Sizing with Final Leverage
+            # We must recalculate because the signal's original size estimation might have used a different leverage assumption
+            position_size, margin_required, _ = self.leverage_manager.calculate_leveraged_position_size(
+                symbol, current_price, 
+                self.portfolio_manager.calculate_available_capital_for_trading() if self.portfolio_manager else 10000,
+                strategy_name, signal['signal_strength'], signal.get('market_volatility', 0.0),
+                asset_max_leverage=asset_max_leverage
+            )
+
             signal_strength = signal['signal_strength']
             market_volatility = signal['market_volatility']
             

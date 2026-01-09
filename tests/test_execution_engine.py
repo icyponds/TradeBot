@@ -61,6 +61,7 @@ class TestExecutionEngine:
         execution_engine.leverage_manager.calculate_stop_loss_with_leverage.return_value = 48000
         execution_engine.leverage_manager.calculate_take_profit_with_leverage.return_value = 55000
         execution_engine.leverage_manager.calculate_take_profit_with_capital_at_risk.return_value = 55000
+        execution_engine.leverage_manager.calculate_leveraged_position_size.return_value = (0.1, 5000.0, 1.0)
         
         # Mock Portfolio Manager equity to avoid MagicMock math errors
         execution_engine.portfolio_manager.total_equity = 10000.0
@@ -128,6 +129,7 @@ class TestExecutionEngine:
         execution_engine.leverage_manager.calculate_stop_loss_with_leverage.return_value = 98.4
         execution_engine.leverage_manager.calculate_take_profit_with_leverage.return_value = 105.0
         execution_engine.leverage_manager.calculate_take_profit_with_capital_at_risk.return_value = 105.0
+        execution_engine.leverage_manager.calculate_leveraged_position_size.return_value = (1.0, 100.0, 1.0)
         
         execution_engine.portfolio_manager.total_equity = 10000.0
         

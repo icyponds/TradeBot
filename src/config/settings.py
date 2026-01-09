@@ -101,8 +101,8 @@ def load_config() -> Dict[str, Any]:
             
             # Portfolio-based position sizing
             "use_portfolio_based_sizing": os.getenv("USE_PORTFOLIO_BASED_SIZING", "true").lower() == "true",
-            "max_position_size_percentage": float(os.getenv("MAX_POSITION_SIZE_PERCENTAGE", "10.0")),  # Max % of portfolio per position
-            "max_positions_percentage": float(os.getenv("MAX_POSITIONS_PERCENTAGE", "80.0")),  # Max % of portfolio in all positions
+            "max_position_size_percentage": float(os.getenv("MAX_POSITION_SIZE_PERCENTAGE", "25.0")),  # Max % of portfolio per position
+            "max_positions_percentage": float(os.getenv("MAX_POSITIONS_PERCENTAGE", "90.0")),  # Max % of portfolio in all positions
             
             # Order monitoring settings
             "order_timeout_minutes": float(os.getenv("ORDER_TIMEOUT_MINUTES", ".05")),
@@ -200,7 +200,7 @@ def load_config() -> Dict[str, Any]:
                 # Treat strategies with < N trades as "under-sampled"
                 "min_trades_per_strategy": int(os.getenv("STRATEGY_EXPLORATION_MIN_TRADES", "20")),
                 # Scale down position size on exploration executions
-                "position_size_scale": float(os.getenv("STRATEGY_EXPLORATION_SIZE_SCALE", "0.30")),
+                "position_size_scale": float(os.getenv("STRATEGY_EXPLORATION_SIZE_SCALE", "1.0")),
                 # If winner is only marginally stronger than runner-up, prefer exploring
                 "close_strength_delta": float(os.getenv("STRATEGY_EXPLORATION_CLOSE_DELTA", "0.10")),
                 # Reserve some capital for exploration trades so we can always gather sample size
@@ -265,11 +265,11 @@ def load_config() -> Dict[str, Any]:
         
         # Leverage Management Configuration
         "leverage_management": {
-            "base_leverage": float(os.getenv("LEVERAGE_BASE", "3.0")),  # Increased from 2.0
+            # "base_leverage" removed - strategies must specify explicitly or default to 1.0
             "signal_adjustment_max": float(os.getenv("LEVERAGE_SIGNAL_ADJUSTMENT_MAX", "0.5")),
             "volatility_min": float(os.getenv("LEVERAGE_VOLATILITY_MIN", "0.1")),
             "min_leverage": float(os.getenv("LEVERAGE_MIN", "1.5")),  # Increased from 1.0
-            "max_leverage": float(os.getenv("LEVERAGE_MAX", "5.0")),  # Reduced from 10.0 for safety
+            # "max_leverage" removed - now fully dynamic based on asset limits
             "ma_strategy_adjustment": float(os.getenv("LEVERAGE_MA_STRATEGY_ADJUSTMENT", "1.1")),
             "rsi_strategy_adjustment": float(os.getenv("LEVERAGE_RSI_STRATEGY_ADJUSTMENT", "0.9")),
 

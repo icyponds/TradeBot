@@ -1614,6 +1614,67 @@ class HyperliquidAPI(MarketInterface):
             return None
     
     # =========================================================================
+    # LEVERAGE & RISK
+    # =========================================================================
+    
+    def get_asset_meta(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """
+        Get metadata for a specific asset (including max leverage).
+        
+        Args:
+            symbol: Asset symbol (e.g. "BTC")
+            
+        Returns:
+            Dict containing asset metadata or None if not found
+        """
+        try:
+            meta = self.info.meta()
+            if not meta or 'universe' not in meta:
+                return None
+            
+            for asset_info in meta['universe']:
+                if asset_info['name'] == symbol:
+                    return asset_info
+            
+            return None
+        except Exception as e:
+            self.logger.error(f"Error getting asset meta for {symbol}: {e}")
+            return None
+
+    def update_leverage(self, symbol: str, leverage: int, is_cross: bool = True) -> bool:
+        """
+        Update leverage for a specific asset.
+        
+        Args:
+            symbol: Asset symbol
+            leverage: Target leverage (integer)
+            is_cross: Whether to use cross margin (default: True)
+            
+        Returns:
+            True if successful
+        """
+        if not self.exchange:
+            self.logger.error("Exchange client not initialized")
+            return False
+            
+        try:
+            self.logger.info(f"Updating leverage for {symbol} to {leverage}x (Cross: {is_cross})")
+            result = self.exchange.update_leverage(leverage, symbol, is_cross)
+            
+            if result.get('status') == 'ok':
+                self.logger.info(f"Successfully updated leverage for {symbol}")
+                # Invalidate positions cache as leverage changes affect margin calculation
+                self.cache.invalidate("positions") 
+                return True
+            else:
+                self.logger.error(f"Failed to update leverage: {result}")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Error updating leverage for {symbol}: {e}")
+            return False
+    
+    # =========================================================================
     # ACCOUNT & POSITIONS
     # =========================================================================
     

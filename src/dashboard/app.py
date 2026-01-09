@@ -139,12 +139,12 @@ def _get_positions_data() -> Dict[str, Any]:
         _strategy_manager.update_position_prices()
         
         # Single-leg positions
-        for symbol, position in _strategy_manager.positions.items():
+        for symbol, position in list(_strategy_manager.positions.items()):
             pos_data = _format_position(position)
             single_leg.append(pos_data)
         
         # Multi-leg positions (funding arb, etc.)
-        for pos_id, multi_pos in _strategy_manager.multi_leg_positions.items():
+        for pos_id, multi_pos in list(_strategy_manager.multi_leg_positions.items()):
             multi_data = _format_multi_leg_position(multi_pos)
             multi_leg.append(multi_data)
     else:
