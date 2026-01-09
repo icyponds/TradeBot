@@ -2273,11 +2273,16 @@ class HyperliquidAPI(MarketInterface):
                 else:
                     exec_price = current_price * (1 - slippage_mult)
                 
-                # Round to tick size
+                # CRITICAL FIX: Round to valid tick size
                 if market_type == "spot":
-                    # For spot, use basic rounding
+                    # For spot, use basic rounding (Hyperliquid spot is often 6-8 decimals, 
+                    # but _round_to_tick is 5 sig figs. Sticking to safer 6 decimals for now 
+                    # as spot tick sizes vary wildly)
                     exec_price = round(exec_price, 6)
+                    # Also try _round_to_tick for spot if it's producing better results
+                    # exec_price = self._round_to_tick(exec_price, trading_symbol) 
                 else:
+                    # For Perps (Native + HIP-3), strictly use 5 sig figs logic
                     exec_price = self._round_to_tick(exec_price, trading_symbol)
                 
                 self.logger.debug(
@@ -2285,7 +2290,8 @@ class HyperliquidAPI(MarketInterface):
                     f"{display_symbol} @ {exec_price:.6f} (slippage: {slippage_bps}bps)"
                 )
                 
-                # Place IOC order
+                # Place limit order (using 'Ioc' effectively makes it a market order with protection)
+                # Note: We use execute_order mainly for "Smart Market" behavior
                 if market_type == "spot":
                     # Spot order
                     response = self._rate_limited_call(
