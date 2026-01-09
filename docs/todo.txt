@@ -1,0 +1,4 @@
+combine ingest_historical_data.py with fill_data_gaps.py - first make a COPY of the market_data table in trades.db and let's test on that to validate, and then if it works we can do it on the non-live table
+
+
+ask about deploy email from git - is it bc it's expecting a vps deployment which would automatically run new code instances. how does that functionally work step by step in terms of how the old version of the running bot handles the upgrade?

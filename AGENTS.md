@@ -21,7 +21,17 @@ Whenever you add, modify, delete, or rename a public method in `HyperliquidAPI`:
 Both `HyperliquidAPI` and `MockMarketAPI` inherit from `MarketInterface`. Python will raise a `TypeError` at instantiation if ANY abstract method is missing implementation.
 
 ## 2. Configuration Management
-(Configuration section omitted for brevity but preserved in file)
+
+### Best Practices (Logic vs. Secrets)
+
+*   **`.env` File**: 
+    *   **Purpose**: Credentials and Infrastructure endpoints ONLY.
+    *   **Content**: Private Keys, API URLs, Wallet Addresses.
+    *   **Rule**: Never commit `.env`. Use `env.example` as a template. ABSOLUTELY NO strategy logic, risk parameters, or feature flags should go here.
+*   **`src/config/settings.py`**: 
+    *   **Purpose**: Strategy Logic and Algorithms.
+    *   **Content**: Indicators (RSI/EMA), Timeframes, Thresholds (Z-Score), Lookbacks.
+    *   **Rule**: These parameters define "How the bot thinks". They should be version-controlled in code. Do NOT expose them in `.env`.
 
 ## 3. Position Logic Parity
 
