@@ -1130,7 +1130,7 @@ class DynamicPairSelector:
             self.logger.info("Backtest mode detected: Disabling rate limits and initial load caps")
         else:
             RATE_LIMIT_DELAY = 1.5  # seconds between OHLCV fetches (~40/min)
-            MAX_INITIAL_LOAD = 10   # Load top 10 assets initially (~15 seconds)
+            MAX_INITIAL_LOAD = 20   # Load top 20 assets initially (~30 seconds)
         
         # Note: No max_pairs limit - all assets passing quality filters are traded
         loaded_symbols = set()  # Track what we've loaded
@@ -1168,7 +1168,10 @@ class DynamicPairSelector:
                 
                 # STEP 2b: Now fetch historical data (includes current candle)
                 # WebSocket is already connected, so any new ticks will update the current bar
+                t0 = time.time()
                 self._get_price_history(symbol)
+                fetch_duration = time.time() - t0
+                
                 loaded_symbols.add(symbol)
                 assets_with_data.append(asset)
                 
@@ -1183,14 +1186,31 @@ class DynamicPairSelector:
                             # Subscribe to spot WebSocket first
                             if hasattr(self.market_api, 'subscribe_symbol'):
                                 self.market_api.subscribe_symbol(spot_token)
-                            time.sleep(RATE_LIMIT_DELAY)
+                            
+                            # Smart sleep before spot fetch if needed
+                            if fetch_duration > 0.2:
+                                time.sleep(RATE_LIMIT_DELAY)
+                                
+                            t0_spot = time.time()
                             self._get_price_history(spot_token)
+                            spot_fetch_duration = time.time() - t0_spot
+                            
                             loaded_symbols.add(spot_key)  # Use spot_key to track
+                            
+                            # Update main duration to include spot if it was a heavy fetch
+                            if spot_fetch_duration > 0.2:
+                                fetch_duration = spot_fetch_duration
+                                
                         except Exception as e:
                             self.logger.warning(f"       -> Failed to load spot {spot_token}: {e}")
                 
-                # Rate limit delay before next fetch
-                time.sleep(RATE_LIMIT_DELAY)
+                # Smart Rate Limiting:
+                # If fetch was fast (< 0.2s), it likely came from Cache/DB -> No API weight used -> Minimal sleep
+                # If fetch was slow (>= 0.2s), it likely hit the API -> Sleep to respect rate limits
+                if fetch_duration < 0.2:
+                    time.sleep(0.01) # Micro-sleep for thread safety
+                else:
+                    time.sleep(RATE_LIMIT_DELAY)
                 
             except Exception as e:
                 msg = str(e)

@@ -101,7 +101,7 @@ class StrategyManager:
 
         
         # Trading pairs management
-        self.max_pairs_to_trade = 20  # Default value, can be updated dynamically
+        self.max_pairs_to_trade = 40  # Default value, can be updated dynamically
         
         # Calculate execution interval based on timeframe
         self.execution_interval = self._get_execution_interval()
