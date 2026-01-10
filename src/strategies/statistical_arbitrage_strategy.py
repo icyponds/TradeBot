@@ -269,6 +269,16 @@ class StatisticalArbitrageStrategy(BaseStrategy):
             y = prices_a.iloc[-1]
             x = prices_b.iloc[-1]
             _, _, dynamic_beta = kf.update(y, x)
+            
+            # Cap hedge ratio to sane limits to prevent massive sizing
+            if dynamic_beta > 10.0:
+                self.logger.warning(f"StatArb: Capping Hedge Ratio {dynamic_beta:.2f} -> 10.0")
+                dynamic_beta = 10.0
+            elif dynamic_beta < 0.1 and dynamic_beta > -0.1: # Avoid near-zero/negative mess (though negative might be valid for inverse corr)
+                # If negative, we might be short-short, which is fine, but needs logic check.
+                # Assuming positive correlation for now.
+                pass
+            
             return dynamic_beta
         
         return base_hedge_ratio

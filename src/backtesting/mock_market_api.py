@@ -211,18 +211,30 @@ class MockMarketAPI(MarketInterface):
         return self.perp_balance
         
     def ensure_perp_funds(self, amount: float) -> bool:
-        # Simplistic transfer mock
-        if self.balances['USDC'] >= amount:
-            self.balances['USDC'] -= amount
-            self.perp_balance['withdrawable'] += amount
+        """Ensure perp account has at least 'amount' withdrawable."""
+        current_balance = self.perp_balance['withdrawable']
+        if current_balance >= amount:
+            return True
+            
+        deficit = amount - current_balance
+        # Try to transfer deficit from spot
+        if self.balances['USDC'] >= deficit:
+            self.balances['USDC'] -= deficit
+            self.perp_balance['withdrawable'] += deficit
             return True
         return False
         
     def ensure_spot_funds(self, amount: float) -> bool:
-        # Simplistic transfer mock
-        if self.perp_balance['withdrawable'] >= amount:
-            self.perp_balance['withdrawable'] -= amount
-            self.balances['USDC'] += amount
+        """Ensure spot account has at least 'amount' USDC."""
+        current_balance = self.balances.get('USDC', 0.0)
+        if current_balance >= amount:
+            return True
+            
+        deficit = amount - current_balance
+        # Try to transfer deficit from perp
+        if self.perp_balance['withdrawable'] >= deficit:
+            self.perp_balance['withdrawable'] -= deficit
+            self.balances['USDC'] = self.balances.get('USDC', 0.0) + deficit
             return True
         return False
 
@@ -268,10 +280,13 @@ class MockMarketAPI(MarketInterface):
                 
         elif market_type == 'perp':
             # Simple margin check
-            margin_required = cost / 3.0 # Assuming 3x leverage for check
+            margin_required = cost / 50.0  # Assuming 50x max leverage for check (generous but safe)
+            # Use 'available' margin logic. In mock, 'withdrawable' is essentially free margin.
+            # But we must check against total account value for cross margin, or withdrawable for isolated?
+            # Keeping it simple: If available balance < req margin, reject.
             if self.perp_balance['withdrawable'] < margin_required and not reduce_only:
-                 # In reality, this is complex (cross margin etc), keeping simple for mock
-                 pass 
+                 self.logger.warning(f"REJECTED Perp Order {symbol}: Rec Margin ${margin_required:.2f} > Avail ${self.perp_balance['withdrawable']:.2f}")
+                 return {'status': 'rejected', 'reason': 'Insufficient Margin'} 
 
             # Update position tracking
             pos_key = symbol
@@ -541,9 +556,22 @@ class MockMarketAPI(MarketInterface):
         }
 
     def get_asset_meta(self, symbol: str) -> Dict[str, Any]:
-        """Mock asset metadata."""
+        """Mock asset metadata with realistic leverage limits."""
+        # Determine leverage based on asset class
+        max_leverage = 20 # Default Altcoin
+        
+        base = symbol.split('/')[0].split('_')[0]
+        
+        majors = {'BTC', 'ETH'}
+        memes = {'BONK', 'PEPE', 'TRUMP', 'SHIB', 'DOGE', 'WIF', 'kBONK', 'kPEPE'}
+        
+        if base in majors:
+            max_leverage = 50
+        elif base in memes:
+            max_leverage = 5
+            
         return {
-            'maxLeverage': 50,
+            'maxLeverage': max_leverage,
             'szDecimals': 4,
             'onlyIsolated': False,
             'name': symbol

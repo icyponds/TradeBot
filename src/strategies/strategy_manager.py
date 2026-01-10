@@ -3124,7 +3124,14 @@ class StrategyManager:
                     validation_results['warnings'].append(f"Position {symbol} has been open for {time_open_hours:.1f} hours")
             
             # Check for positions on exchange that aren't tracked locally
+            # Check for positions on exchange that aren't tracked locally
             local_symbols = set(self.positions.keys())
+            
+            # Add symbols from multi-leg positions
+            for ml_pos in self.multi_leg_positions.values():
+                for leg in ml_pos.legs:
+                    local_symbols.add(leg.symbol)
+                    
             exchange_symbols = set(exchange_positions_dict.keys())
             untracked_positions = exchange_symbols - local_symbols
             
