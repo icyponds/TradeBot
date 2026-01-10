@@ -1249,7 +1249,8 @@ class HyperliquidAPI(MarketInterface):
                 })
             
             result = {'universe': universe, 'meta': meta}
-            self.cache.set(cache_key, result, ttl=self.cache_ttl_asset_info)
+            # Cache for 5 minutes (300s) to prevent 429
+            self.cache.set(cache_key, result, ttl=300)
             return result
         
         return self._rate_limited_call(_fetch)
@@ -2805,10 +2806,20 @@ class HyperliquidAPI(MarketInterface):
     # SPOT TRADING
     # =========================================================================
     
+    @with_retry(max_attempts=3, base_delay=0.5)
     def get_spot_meta(self) -> Optional[Dict[str, Any]]:
         """Get spot market metadata."""
         try:
-            return self.info.spot_meta()
+            cache_key = "spot_meta"
+            cached = self.cache.get(cache_key)
+            if cached:
+                return cached
+                
+            data = self.info.spot_meta()
+            
+            # Cache for 5 minutes
+            self.cache.set(cache_key, data, ttl=300)
+            return data
         except Exception as e:
             self.logger.error(f"Error fetching spot meta: {e}")
             return None
