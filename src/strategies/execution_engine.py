@@ -970,6 +970,13 @@ class ExecutionEngine:
         except Exception as e:
             self.logger.error(f"Failed to save positions to DB: {e}")
 
+    def delete_position_from_db(self, position_id: str):
+        """Delete a position from the database."""
+        try:
+            self.performance_tracker.db.delete_position(position_id)
+        except Exception as e:
+            self.logger.error(f"Failed to delete position {position_id} from DB: {e}")
+
     def load_positions_from_db(self):
         """
         Load positions from database.

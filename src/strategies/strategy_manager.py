@@ -8,7 +8,7 @@ import signal
 import sys
 import json
 import random
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime, timedelta
 import pandas as pd
 import math
@@ -177,19 +177,80 @@ class StrategyManager:
                 positions_to_close.append((symbol, strat))
         
         for symbol, strat in positions_to_close:
-            self.logger.warning(f"Found orphan position {symbol} (strategy: {strat}). Closing...")
-            self.close_position(symbol, reason="startup_orphan_cleanup")
+            # Check if position exists on exchange
+            exchange_pos = self.market_api.get_position(symbol)
+            exchange_sz = float((exchange_pos or {}).get('size', 0.0))
+            
+            if abs(exchange_sz) > 0:
+                self.logger.warning(f"Found orphan position {symbol} (strategy: {strat}) on exchange (size={exchange_sz}). Closing...")
+                self.close_position(symbol, reason="startup_orphan_cleanup")
+            else:
+                self.logger.warning(f"Found orphan position {symbol} (strategy: {strat}) LOCAL ONLY. Already closed on exchange. Archiving and removing.")
+                
+                if symbol in self.positions:
+                    pos_obj = self.positions[symbol]
+                    
+                    # Try to find the closing fill to log accurate history
+                    exit_price, exit_time, reason = self._find_closing_fill(symbol, pos_obj.side, pos_obj.entry_time)
+                    if exit_price == 0.0:
+                         exit_price = pos_obj.entry_price # Fallback
+                    
+                    # Log the trade
+                    self.performance_tracker.record_trade_from_position(
+                        symbol=symbol,
+                        strategy=pos_obj.strategy,
+                        side=pos_obj.side,
+                        entry_price=pos_obj.entry_price,
+                        exit_price=exit_price,
+                        size=pos_obj.size,
+                        entry_time=pos_obj.entry_time,
+                        exit_time=exit_time,
+                        capital_at_risk=pos_obj.capital_at_risk or 0,
+                        exit_reason=f"Startup Cleanup ({reason})",
+                        stop_loss=pos_obj.stop_loss,
+                        take_profit=pos_obj.take_profit,
+                        leverage=pos_obj.leverage
+                    )
+                    
+                    # Construct Position ID (same logic as ExecutionEngine.save_positions_to_db)
+                    pos_id = f"pos_{pos_obj.strategy}_{symbol}"
+                    del self.positions[symbol]
+                    
+                    # Explicitly delete from DB to prevent resurrection
+                    if hasattr(self.execution_engine, 'delete_position_from_db'):
+                        self.execution_engine.delete_position_from_db(pos_id)
             
         # Multi-leg positions
         ml_to_close = []
         for pid, pos in self.multi_leg_positions.items():
              if pos.strategy not in self.strategies:
-                 ml_to_close.append((pos.primary_symbol, pid, pos.strategy))
+                 ml_to_close.append((pos.primary_symbol, pid, pos.strategy, pos))
         
-        for symbol, pid, strat in ml_to_close:
-             self.logger.warning(f"Found orphan multi-leg position {pid} (strategy: {strat}). Closing...")
-             dummy_signal = {'action': 'exit', 'type': 'startup_orphan_cleanup', 'urgency': 'high'}
-             self._handle_multi_leg_signal(symbol, dummy_signal, 0.0, strat, {}, timestamp=datetime.now())
+        for symbol, pid, strat, pos in ml_to_close:
+             # Check if legs exist on exchange
+             legs_active = False
+             
+             # Check legs if available on position object
+             if hasattr(pos, 'legs'):
+                 for leg in pos.legs:
+                     leg_symbol = leg.get('symbol')
+                     if leg_symbol:
+                         exch_pos = self.market_api.get_position(leg_symbol)
+                         if float((exch_pos or {}).get('size', 0.0)) != 0:
+                             legs_active = True
+                             break
+             
+             if legs_active:
+                 self.logger.warning(f"Found orphan multi-leg position {pid} (strategy: {strat}) active on exchange. Closing...")
+                 dummy_signal = {'action': 'exit', 'type': 'startup_orphan_cleanup', 'urgency': 'high'}
+                 self._handle_multi_leg_signal(symbol, dummy_signal, 0.0, strat, {}, timestamp=datetime.now())
+             else:
+                 self.logger.warning(f"Found orphan multi-leg position {pid} (strategy: {strat}) LOCAL ONLY. Already closed on exchange. Removing local record.")
+                 if pid in self.multi_leg_positions:
+                     del self.multi_leg_positions[pid]
+                     # Delete from DB
+                     if hasattr(self.execution_engine, 'delete_position_from_db'):
+                         self.execution_engine.delete_position_from_db(pid)
              
         self.logger.info("Orphan position check complete.")
 
@@ -365,26 +426,9 @@ class StrategyManager:
                     continue
                     
                 # Try to find the closing fill from recent fills
-                exit_price = pos.entry_price  # Fallback
-                reason = "External Close"
-                
-                try:
-                    fills = self.market_api.get_user_fills(limit=100)
-                    # Look for a fill that closed this position (opposite side, after entry)
-                    close_side = 'Sell' if pos.side == 'long' else 'Buy'
-                    for fill in fills:
-                        if fill.get('coin') == symbol and fill.get('side') == close_side:
-                            fill_time = fill.get('time', 0)
-                            entry_ts = pos.entry_time.timestamp() * 1000 if pos.entry_time else 0
-                            if fill_time > entry_ts:
-                                exit_price = float(fill.get('px', exit_price))
-                                if 'liquidation' in str(fill.get('dir', '')).lower():
-                                    reason = "Liquidation"
-                                else:
-                                    reason = "External Close"
-                                break
-                except Exception as e:
-                    self.logger.debug(f"Could not fetch fills for ghost reconciliation: {e}")
+                exit_price, exit_time, reason = self._find_closing_fill(symbol, pos.side, pos.entry_time)
+                if exit_price == 0.0:
+                     exit_price = pos.entry_price # Fallback
                 
                 self.logger.warning(f"Closing ghost position {symbol} at {exit_price} ({reason})")
                 
@@ -397,7 +441,7 @@ class StrategyManager:
                     exit_price=exit_price,
                     size=pos.size,
                     entry_time=pos.entry_time,
-                    exit_time=datetime.now(),
+                    exit_time=exit_time,
                     capital_at_risk=pos.capital_at_risk or 0,
                     exit_reason=reason,
                     stop_loss=pos.stop_loss,
@@ -410,11 +454,15 @@ class StrategyManager:
                 
                 # Remove from DB
                 try:
-                    position_id = f"pos_{pos.strategy}_{symbol}"
-                    self.performance_tracker.db.delete_position(position_id)
+                    if hasattr(self.execution_engine, 'delete_position_from_db'):
+                        # Using delete_position cleans up completely
+                        pos_id = f"pos_{pos.strategy}_{symbol}"
+                        self.execution_engine.delete_position_from_db(pos_id)
+                    else:
+                        self.save_positions_to_db() 
                 except Exception as e:
-                    self.logger.error(f"Failed to delete ghost position from DB: {e}")
-
+                    self.logger.error(f"Error removing ghost position from DB: {e}")
+                    
             # 5. Multi-Leg Ghost Detection
             ml_ghosts = []
             
@@ -438,7 +486,10 @@ class StrategyManager:
                     
                     # Remove from DB
                     try:
-                        self.performance_tracker.db.delete_position(pos_id)
+                        if hasattr(self.execution_engine, 'delete_position_from_db'):
+                             self.execution_engine.delete_position_from_db(pos_id)
+                        else:
+                             self.performance_tracker.db.delete_position(pos_id)
                     except Exception as e:
                         self.logger.error(f"Failed to delete ghost ML position {pos_id} from DB: {e}")
                         
@@ -452,6 +503,47 @@ class StrategyManager:
             
         except Exception as e:
             self.logger.error(f"Error syncing positions with exchange: {e}")
+
+    def _find_closing_fill(self, symbol: str, side: str, entry_time: datetime) -> Tuple[float, datetime, str]:
+        """
+        Find the closing fill for a position.
+        
+        Args:
+            symbol: Asset symbol
+            side: Position side ('long' or 'short')
+            entry_time: Time of entry
+            
+        Returns:
+            Tuple of (exit_price, exit_time, reason)
+        """
+        exit_price = 0.0
+        reason = "External Close"
+        fill_time_dt = datetime.now()
+        
+        try:
+            fills = self.market_api.get_user_fills(limit=100)
+            # Look for a fill that closed this position (opposite side, after entry)
+            close_side = 'Sell' if side == 'long' else 'Buy'
+            
+            entry_ts = entry_time.timestamp() * 1000 if entry_time else 0
+            
+            for fill in fills:
+                if fill.get('coin') == symbol and fill.get('side') == close_side:
+                    fill_time = fill.get('time', 0)
+                    if fill_time > entry_ts:
+                        exit_price = float(fill.get('px', 0.0))
+                        fill_time_dt = datetime.fromtimestamp(fill_time / 1000)
+                        
+                        if 'liquidation' in str(fill.get('dir', '')).lower():
+                            reason = "Liquidation"
+                        else:
+                            reason = "External Close"
+                        return exit_price, fill_time_dt, reason
+                        
+        except Exception as e:
+            self.logger.debug(f"Could not fetch fills for ghost reconciliation: {e}")
+            
+        return exit_price, fill_time_dt, reason
 
     def _sync_positions_periodic(self):
         """Periodically sync positions with exchange (every 5 minutes)."""

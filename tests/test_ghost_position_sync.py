@@ -97,7 +97,8 @@ class TestGhostPositionSync(unittest.TestCase):
         self.assertNotIn('BTC', positions_dict)
         
         # Verify: DB delete called
-        mock_db.delete_position.assert_called_once_with('pos_csm_4h_BTC')
+        # Verify: ExecutionEngine delete called (which handles DB)
+        self.mock_execution_engine.delete_position_from_db.assert_called_once_with('pos_csm_4h_BTC')
 
     def test_ghost_position_with_fills_gets_correct_exit_price(self):
         """Test that exit price is extracted from fills when available."""
@@ -213,7 +214,8 @@ class TestGhostPositionSync(unittest.TestCase):
         self.assertNotIn('ml_123', ml_dict)
         
         # Verify: DB delete called
-        mock_db.delete_position.assert_called_with('ml_123')
+        # Verify: ExecutionEngine delete called (which handles DB)
+        self.mock_execution_engine.delete_position_from_db.assert_called_with('ml_123')
 
 
 

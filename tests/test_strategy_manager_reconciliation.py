@@ -108,9 +108,17 @@ class TestStrategyManagerReconciliation(unittest.TestCase):
         position_mock.strategy = 'old_strat'
         self.manager.execution_engine.positions = {'ETH-USD': position_mock}
         
+        # Mock exchange position as empty (Local Only)
+        self.manager.market_api.get_position.return_value = {'size': 0}
+        
         self.manager._check_startup_orphans()
         
-        self.manager.execution_engine.close_position.assert_called_with('ETH-USD', 'startup_orphan_cleanup', timestamp=ANY)
+        # "LOCAL ONLY" orphan -> delete from DB, no close order
+        self.manager.execution_engine.close_position.assert_not_called()
+        # pos_id for single leg might be constructed, need to verify implementation logic
+        # Implementation: pos_id = f"pos_{pos_obj.strategy}_{symbol}"
+        pos_id = "pos_old_strat_ETH-USD" 
+        self.manager.execution_engine.delete_position_from_db.assert_called_with(pos_id)
 
     def test_check_startup_orphans_multileg(self):
         # Setup orphan multi-leg
@@ -127,11 +135,9 @@ class TestStrategyManagerReconciliation(unittest.TestCase):
         
         self.manager._check_startup_orphans()
         
-        self.manager._handle_multi_leg_signal.assert_called_with(
-            'SOL-USD', 
-            {'action': 'exit', 'type': 'startup_orphan_cleanup', 'urgency': 'high'}, 
-            0.0, 
-            'old_ml_strat', 
-            {}, 
-            timestamp=ANY
-        )
+        # "LOCAL ONLY" orphan should be deleted silently from DB, no signal sent
+        self.manager._handle_multi_leg_signal.assert_not_called()
+        self.manager.execution_engine.delete_position_from_db.assert_called_with('ml_123')
+        
+        # Verify removed from local state
+        self.assertNotIn('ml_123', self.manager.execution_engine.multi_leg_positions)

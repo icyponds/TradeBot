@@ -1747,6 +1747,14 @@ class HyperliquidAPI(MarketInterface):
         
         return self._rate_limited_call(_fetch)
     
+    def get_position(self, symbol: str) -> Dict[str, Any]:
+        """Get current position for a specific symbol."""
+        positions = self.get_positions()
+        for pos in positions:
+            if pos['symbol'] == symbol:
+                return pos
+        return {'symbol': symbol, 'size': 0.0, 'side': 'neutral', 'entry_price': 0.0, 'unrealized_pnl': 0.0}
+    
     def get_user_fills(self, limit: int = 100) -> List[Dict[str, Any]]:
         """
         Get recent fills (trade history) for the user.

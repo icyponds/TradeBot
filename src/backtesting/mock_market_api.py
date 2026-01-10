@@ -32,6 +32,7 @@ class MockMarketAPI(MarketInterface):
         # Trading State
         self.orders = {}  # order_id -> order_dict
         self.positions = {}  # symbol -> position_dict
+        self.fills = [] # List of executed trades/fills
         self.balances = {'USDC': 0.0} # Spot wallet (Zero Equity for Backtest Parity)
         
         # NOTE: Removed pre-seeding of 1000 units per asset to ensure clean equity tracking.
@@ -404,6 +405,18 @@ class MockMarketAPI(MarketInterface):
         
         self.orders[order_id] = result
         
+        # Record fill
+        fill_record = {
+            'coin': symbol,
+            'side': 'Buy' if side.lower() in ('buy', 'long') else 'Sell', # Match API format (Buy/Sell)
+            'px': fill_price,
+            'sz': size,
+            'time': int(self.current_time.timestamp() * 1000) if self.current_time else int(datetime.now().timestamp() * 1000),
+            'oid': order_id,
+            'dir': f"Open {side.capitalize()}" if result.get('status') == 'filled' else "Close" # Simplified dir
+        }
+        self.fills.append(fill_record)
+        
         return result
 
     def get_execution_fee(self, order_id: Any) -> float:
@@ -414,16 +427,24 @@ class MockMarketAPI(MarketInterface):
         return 0.0
 
     def get_positions(self) -> List[Dict[str, Any]]:
-        return [
-            {
-                'symbol': p['symbol'], 
-                'size': abs(p['size']), 
-                'side': 'buy' if p['size'] > 0 else 'sell',
-                'entry_price': p['entry_price'],
-                'mark_price': self.get_current_price(p['symbol']) or p['entry_price']
-            }
-            for p in self.positions.values() if p['size'] != 0
-        ]
+        """Return list of current positions."""
+        result = []
+        for symbol, pos in self.positions.items():
+            if pos['size'] != 0:
+                result.append(pos)
+        return result
+
+    def get_position(self, symbol: str) -> Dict[str, Any]:
+        """Get current position for a specific symbol."""
+        pos = self.positions.get(symbol, {})
+        if not pos or pos.get('size', 0) == 0:
+             return {'symbol': symbol, 'size': 0.0, 'side': 'neutral', 'entry_price': 0.0, 'unrealized_pnl': 0.0}
+        return pos
+
+    def get_user_fills(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """Get recent fills/trades."""
+        # Return last N fills, sorted by time desc (usually API returns newest first)
+        return sorted(self.fills, key=lambda x: x['time'], reverse=True)[:limit]
         
     def check_liquidation_risk(self, symbol, threshold_pct=0.0):
         # Mock safe
