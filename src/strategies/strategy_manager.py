@@ -1962,6 +1962,52 @@ class StrategyManager:
                 return False
             elif position.side == 'short' and signal['signal'] == 'sell':
                 return False
+
+        # Multi-Leg Collision Check (The "Blind Spot")
+        # Check if this symbol is a leg of an existing multi-leg position
+        ml_position = self.execution_engine.get_multi_leg_position_by_leg_symbol(symbol)
+        if ml_position:
+            # COLLISION DETECTED
+            try:
+                # Retrieve signal strengths
+                new_strength = float(signal.get('signal_strength', 0) or 0)
+                # Parse old strength from metadata if available (fallback to 0.5)
+                # Note: metadata might be on the position or leg. 
+                # StatArb stores 'z_score' etc in metadata usually.
+                old_strength = float(ml_position.metadata.get('signal_strength', 0.5) or 0.5)
+                
+                # NUCLEAR SWITCH LOGIC
+                # Override only if new signal is 2x stronger than the holding signal
+                NUCLEAR_THRESHOLD = 2.0
+                
+                if new_strength > (old_strength * NUCLEAR_THRESHOLD):
+                    self.logger.warning(
+                        f"☢️ NUCLEAR SWITCH TRIGGERED: {symbol} Single-Leg Strength ({new_strength:.2f}) "
+                        f"> 2.0x Multi-Leg ({old_strength:.2f}). "
+                        f"Closing Arb Position {ml_position.position_id}..."
+                    )
+                    
+                    # Force Close the Multi-Leg Position
+                    # We use the execution engine directly to ensure all legs are closed
+                    self.execution_engine.execute_multi_leg_exit(
+                        symbol=ml_position.primary_symbol, # Important: Use primary symbol for lookup inside exit
+                        signal={'urgency': 'high', 'reason': 'nuclear_displacement'},
+                        strategy_name=ml_position.strategy,
+                        strategies_map=self.strategies
+                    )
+                    
+                    # Allow new trade to proceed (it will open into a clean slate)
+                    return True
+                else:
+                    self.logger.info(
+                        f"🛡️ Multi-Leg Collision Blocked: {symbol} is locked by Arb {ml_position.position_id}. "
+                        f"New Strength ({new_strength:.2f}) <= 2.0x Old ({old_strength:.2f})."
+                    )
+                    return False
+                    
+            except Exception as e:
+                self.logger.error(f"Error handling multi-leg collision for {symbol}: {e}")
+                return False
         
     def _force_close_position_for_displacement(self, symbol: str):
         """

@@ -862,6 +862,14 @@ class ExecutionEngine:
             if position.primary_symbol == symbol:
                 return position
         return None
+
+    def get_multi_leg_position_by_leg_symbol(self, leg_symbol: str) -> Optional[MultiLegPosition]:
+        """Find a multi-leg position that contains the specified symbol as a leg."""
+        for position in self.multi_leg_positions.values():
+            for leg in position.legs:
+                if leg.symbol == leg_symbol:
+                    return position
+        return None
         
     def calculate_market_volatility(self, ohlcv: Dict[str, pd.DataFrame]) -> float:
         """Calculate market volatility."""
