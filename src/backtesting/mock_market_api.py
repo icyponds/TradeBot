@@ -32,15 +32,10 @@ class MockMarketAPI(MarketInterface):
         # Trading State
         self.orders = {}  # order_id -> order_dict
         self.positions = {}  # symbol -> position_dict
-        self.balances = {'USDC': 10000.0} # Spot wallet
+        self.balances = {'USDC': 0.0} # Spot wallet (Zero Equity for Backtest Parity)
         
-        # Populate initial balances for all potential spot assets to verify shorting logic
-        # In a real scenario, you'd need to own the asset or borrow. 
-        # For backtesting StatArb/Arbitrage that implies holding spot, we grant initial inventory.
-        for symbol in self.historical_data.keys():
-            if symbol.endswith('_SPOT'):
-                asset = symbol.replace('_SPOT', '')
-                self.balances[asset] = 1000.0  # Give 1000 units of every spot asset
+        # NOTE: Removed pre-seeding of 1000 units per asset to ensure clean equity tracking.
+        # Strategies must buy spot with cash or we must explicitly seed if needed for specific tests.
                 
         self.perp_balance = {'withdrawable': 50000.0, 'margin_used': 0.0} # Perp wallet
         
@@ -211,6 +206,9 @@ class MockMarketAPI(MarketInterface):
                      max_slippage_bps: int = None) -> Dict[str, Any]:
         """Simulate order execution."""
         
+        # CRITICAL: Normalize size to magnitude. Logic below depends on positive size.
+        size = abs(size)
+        
         price = self.get_current_price(symbol)
         if not price:
             self.logger.error(f"Cannot execute: no price for {symbol}")
@@ -235,7 +233,9 @@ class MockMarketAPI(MarketInterface):
                 self.balances[base_asset] = self.balances.get(base_asset, 0) + size
             else: # Sell
                 base_asset = symbol.split('/')[0]
+                # CRITICAL: Strict check preventing naked shorting
                 if self.balances.get(base_asset, 0) < size:
+                     self.logger.warning(f"REJECTED Spot Sell {symbol}: Balance {self.balances.get(base_asset, 0)} < Size {size}")
                      return {'status': 'rejected', 'reason': 'Insufficient Asset'}
                 self.balances[base_asset] -= size
                 self.balances['USDC'] += cost
@@ -435,7 +435,23 @@ class MockMarketAPI(MarketInterface):
         
     def get_account_balance(self) -> Dict[str, Any]:
         """Mock account balance."""
-        # Calculate Unrealized PnL
+        # Calculate Spot Wallet Value (Cash + Assets)
+        spot_value = self.balances.get('USDC', 0.0)
+        
+        for asset, amount in self.balances.items():
+            if asset == 'USDC' or amount == 0:
+                continue
+            
+            # Find price for asset
+            # Try asset_SPOT first, then just asset
+            price = self.get_current_price(f"{asset}_SPOT")
+            if not price:
+                price = self.get_current_price(asset)
+            
+            if price:
+                spot_value += amount * price
+
+        # Calculate Unrealized PnL (Perps)
         unrealized_pnl = 0.0
         for p in self.positions.values():
             if p['size'] == 0: continue
@@ -455,7 +471,7 @@ class MockMarketAPI(MarketInterface):
             # Short: (90 - 100) * -1 = -10 * -1 = 10. Correct.
             unrealized_pnl += diff * p['size']
 
-        equity = self.balances['USDC'] + self.perp_balance['withdrawable'] + unrealized_pnl
+        equity = spot_value + self.perp_balance['withdrawable'] + unrealized_pnl
         return {
              'total_equity': equity,
              'free_margin': self.perp_balance['withdrawable'],

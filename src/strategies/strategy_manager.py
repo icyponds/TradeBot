@@ -1225,7 +1225,7 @@ class StrategyManager:
                 self.logger.warning("No trading pairs available")
                 return False
             
-            self.logger.info(f"Analyzing {len(trading_pairs)} trading pairs")
+            self.logger.debug(f"Analyzing {len(trading_pairs)} trading pairs")
             
             # Prioritize symbols with open positions to ensure they get data
             # before rate limits are exhausted during timeframe boundaries
@@ -1234,7 +1234,7 @@ class StrategyManager:
             other_symbols = [s for s in trading_pairs if s not in position_symbols]
             
             if priority_symbols:
-                self.logger.info(f"Prioritizing {len(priority_symbols)} symbols with open positions: {priority_symbols}")
+                self.logger.debug(f"Prioritizing {len(priority_symbols)} symbols with open positions: {priority_symbols}")
             
             # Process priority symbols first (positions need timely data for exits)
             for symbol in priority_symbols:
