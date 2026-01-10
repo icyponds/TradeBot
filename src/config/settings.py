@@ -302,7 +302,8 @@ def load_config() -> Dict[str, Any]:
                 {"type": "ou_mean_reversion", "name": "ou_mean_reversion_4h",  "timeframe": "4h"},
                 
                 # Volatility Breakout (15m, 1h, 4h)
-                {"type": "volatility_breakout", "name": "vol_breakout_15m", "timeframe": "15m"},
+                # vol_breakout_15m disabled due to poor performance (-$3135) - too much chop
+                # {"type": "volatility_breakout", "name": "vol_breakout_15m", "timeframe": "15m"},
                 {"type": "volatility_breakout", "name": "vol_breakout_1h", "timeframe": "1h"},
                 {"type": "volatility_breakout", "name": "vol_breakout_4h", "timeframe": "4h"},
                 
@@ -318,7 +319,8 @@ def load_config() -> Dict[str, Any]:
                 # {"type": "sentiment_ml", "name": "sentiment_ml_4h", "timeframe": "4h"},
                 
                 # Liquidation Hunter (5m, 15m, 1h)
-                {"type": "liquidation_hunter", "name": "liquidation_hunter_5m", "timeframe": "5m"},
+                # liquidation_hunter_5m disabled by user request (-$2k loss even with fix)
+                # {"type": "liquidation_hunter", "name": "liquidation_hunter_5m", "timeframe": "5m"},
                 {"type": "liquidation_hunter", "name": "liquidation_hunter_15m", "timeframe": "15m"},
                 {"type": "liquidation_hunter", "name": "liquidation_hunter_1h", "timeframe": "1h"},
 

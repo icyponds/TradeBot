@@ -1,7 +1,7 @@
 # Disabled Strategies Analysis
 **Date**: 2026-01-10
 
-This document summarizes the analysis and backtesting results that led to the disabling of the `cross_sectional_momentum` (CSM) and `sentiment_ml` strategies.
+This document summarizes the analysis and backtesting results that led to the disabling of specific strategies to optimize portfolio performance.
 
 ## 1. Cross-Sectional Momentum (CSM)
 **Logic**: "Buy Winners, Sell Losers." Ranks assets by 24h return, goes Long top N% and Short bottom N%. Rebalances periodically.
@@ -34,7 +34,34 @@ This document summarizes the analysis and backtesting results that led to the di
 
 ---
 
-## 3. Retained Strategies (The "Winner" Portfolio)
-The following strategies demonstrated robust profitability even after fees:
-1.  **Volatility Breakout** (`volatility_breakout`): Captures expansion from low-volatility compression. (PnL: +$1,000 range).
-2.  **Liquidation Hunter** (`liquidation_hunter`): Exploits cascading liquidations and mean reversion. (PnL: +$500 range).
+## 3. Volatility Breakout (15m Timeframe)
+**Logic**: Enters trades when price expands outside Bollinger Bands (squeeze breakout).
+
+### Performance Issues
+*   **Timeframe Noise**: The 15m timeframe is too noisy. Breakouts on 15m often fail or reverse within the hour ("Fakeouts").
+*   **Chop Losses**: In the 7-day backtest, `vol_breakout_15m` was the worst performer (**-$3,135**), consistently getting stopped out of false breaks.
+*   **Comparative Analysis**: The **1h version** (`vol_breakout_1h`) was profitable (**+$1,482**). The higher timeframe filters out the noise and captures legitimate trend initiations.
+
+**Status**: **DISABLED (15m Only)**.
+**Future Activation Condition**: None. 1h is superior.
+
+---
+
+## 4. Liquidation Hunter (5m Timeframe)
+**Logic**: Contra-trend mean reversion. Buys "waterfall" crashes (3+ sigma deviation) anticipating a snap-back.
+
+### Performance Issues
+*   **"Falling Knives"**: On the 5m timeframe, a 3-sigma crash often continues into a 5-10 sigma crash within minutes. The strategy bought early and was stopped out immediately at the bottom of the candle.
+*   **Performance**: Even with a **Wick Validation Fix** (requiring 15% bounce), the 5m strategy lost **-$2,149**. The slippage on rapid 5m candles eats any edge.
+*   **Comparative Analysis**: The strategy works better on higher timeframes (1h) or needs much deeper deviation thresholds for 5m scalping.
+
+**Status**: **DISABLED (5m Only)**.
+**Future Activation Condition**: Significant tuning of thresholds (e.g., 5-sigma) or execution speed improvements (HFT).
+
+---
+
+## 5. Retained Strategies (The "Winner" Portfolio)
+The following strategies demonstrated robust profitability and carry the portfolio:
+1.  **Stat Arb** (`stat_arb_1h`): **The Heavy Lifter**. (PnL: +$30k+). Dominant mean-reversion strategy.
+2.  **Volatility Breakout** (`vol_breakout_1h`): Captures legitimate trend expansions. (PnL: +$1,482).
+3.  **Liquidation Hunter** (`liquidation_hunter_1h`): Occasional high-quality reversal trades.

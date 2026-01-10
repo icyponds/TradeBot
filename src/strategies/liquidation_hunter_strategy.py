@@ -83,18 +83,50 @@ class LiquidationHunterStrategy(BaseStrategy):
         signal = 'hold'
         reason = ''
         
-        # Entry Logic: Fade Extreme Moves
+        # Calculate Wick Ratios to confirm reversal/exhaustion
+        # Avoid entering on full-body candles which imply continuation
+        high = ohlcv['high'].iloc[-1]
+        low = ohlcv['low'].iloc[-1]
+        close = ohlcv['close'].iloc[-1]
+        op = ohlcv['open'].iloc[-1] # 'open' is keyword
+        
+        candle_range = high - low
+        if candle_range == 0:
+            candle_range = 1e-9
+            
+        # Buy Signal: Look for wick at bottom (Close > Low)
+        # Wick Ratio = (Close - Low) / Range. 
+        # If 0.0, we closed at Low (Max Bearish). If 1.0, we closed at High.
+        # We want meaningful bounce from low -> Wick > 0.1
+        buy_wick_ratio = (close - low) / candle_range
+        
+        # Sell Signal: Look for wick at top (High - Close)
+        # Sell Wick Ratio = (High - Close) / Range.
+        # If 0.0, we closed at High (Max Bullish).
+        sell_wick_ratio = (high - close) / candle_range
+        
+        wick_threshold = 0.15 # Require 15% bounce off extreme
+        
+        # Entry Logic: Fade Extreme Moves WITH Wick Confirmation
         if z_score > self.std_dev_threshold:
-            # Price exploded upwards > 3 sigma (Likely Short Liquidation Cascade)
-            # Revert to mean -> SHORT
-            signal = 'sell'
-            reason = f"Liquidation Hunter: Price +{z_score:.2f}σ Excursion (Shorting Wick)"
+            # Price exploded upwards > 3.5 sigma
+            # Require rejection from highs (Sell Wick)
+            if sell_wick_ratio >= wick_threshold:
+                signal = 'sell'
+                reason = f"Liquidation Hunter: Price +{z_score:.2f}σ Excursion (Short Wick {sell_wick_ratio:.2f})"
+            else:
+                 # It's a full green candle. Wait.
+                 pass
             
         elif z_score < -self.std_dev_threshold:
-            # Price crashed downwards < -3 sigma (Likely Long Liquidation Cascade)
-            # Revert to mean -> LONG
-            signal = 'buy'
-            reason = f"Liquidation Hunter: Price {z_score:.2f}σ Excursion (Longing Wick)"
+            # Price crashed downwards < -3.5 sigma
+            # Require bounce from lows (Buy Wick)
+            if buy_wick_ratio >= wick_threshold:
+                signal = 'buy'
+                reason = f"Liquidation Hunter: Price {z_score:.2f}σ Excursion (Long Wick {buy_wick_ratio:.2f})"
+            else:
+                # It's a full red candle. Wait.
+                pass
             
         if signal == 'hold':
             return None
