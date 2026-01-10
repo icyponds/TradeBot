@@ -315,15 +315,32 @@ class MockMarketAPI(MarketInterface):
                 'mark_price': price
             }
             
-            # Fix Entry Price logic for partials vs flips
-            if current_pos['size'] != 0 and new_size != 0 and (current_pos['size'] * new_size > 0):
-                # Same direction (adding or partial close), keep entry price
-                # (Ideally Adding should update Weighted Avg, but sticking to simple for now)
-                self.positions[pos_key]['entry_price'] = current_pos['entry_price']
+            # Fix Entry Price logic for partials vs flips vs adds
+            if current_pos['size'] != 0 and new_size != 0:
+                # Check if adding to position (Same Sign and Magnitude Increased)
+                is_same_side = (current_pos['size'] * new_size > 0)
+                is_increasing = abs(new_size) > abs(current_pos['size'])
+                
+                if is_same_side and is_increasing:
+                    # Calculate Weighted Average Entry Price
+                    old_size_abs = abs(current_pos['size'])
+                    added_size_abs = abs(new_size) - old_size_abs
+                    old_entry = current_pos['entry_price']
+                    
+                    # WAVG = ((Old * OldPrice) + (Added * NewPrice)) / Total
+                    total_value = (old_size_abs * old_entry) + (added_size_abs * fill_price)
+                    wavg_price = total_value / abs(new_size)
+                    
+                    self.positions[pos_key]['entry_price'] = wavg_price
+                    
+                elif is_same_side:
+                    # Reducing position (Partial Close) -> Keep Entry Price
+                    self.positions[pos_key]['entry_price'] = current_pos['entry_price']
+                else:
+                    # Flip (Sign Change) -> Remaining part is new position at fill price
+                    self.positions[pos_key]['entry_price'] = fill_price
+                    
             elif current_pos['size'] == 0 and new_size != 0:
-                 self.positions[pos_key]['entry_price'] = fill_price
-            elif (current_pos['size'] * new_size < 0):
-                 # Flip - remaining part is new pos
                  self.positions[pos_key]['entry_price'] = fill_price
             
         # Calculate Fee (0.05% Taker assumed for simplicity)
