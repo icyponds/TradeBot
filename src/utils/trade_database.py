@@ -778,6 +778,42 @@ class TradeDatabase:
             
             return len(data_to_insert)
 
+    def get_available_symbols_for_timeframes(self, timeframes: List[str], start_date: datetime, end_date: datetime) -> List[str]:
+        """
+        Get symbols that have data for ALL specified timeframes within the date range.
+        Returns intersection of symbols.
+        """
+        if not timeframes:
+            return []
+            
+        accepted_symbols = None
+        
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            
+            for tf in timeframes:
+                # Get symbols with ANY data in this range for this timeframe
+                # Note: This is an existence check, not a completeness check (which is expensive)
+                # We assume if data exists in range, it's usable.
+                query = """
+                    SELECT DISTINCT symbol FROM market_data 
+                    WHERE timeframe = ? 
+                    AND timestamp >= ? 
+                    AND timestamp <= ?
+                """
+                cursor.execute(query, (tf, start_date, end_date))
+                tf_symbols = set(row[0] for row in cursor.fetchall())
+                
+                if accepted_symbols is None:
+                    accepted_symbols = tf_symbols
+                else:
+                    accepted_symbols = accepted_symbols.intersection(tf_symbols)
+                
+                if not accepted_symbols:
+                    break
+                    
+        return sorted(list(accepted_symbols or []))   
+
     def get_funding_rates(self, symbol: str, start_date: datetime = None, end_date: datetime = None) -> pd.DataFrame:
         """
         Get historical funding rates for a symbol.

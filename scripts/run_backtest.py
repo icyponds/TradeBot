@@ -68,23 +68,40 @@ def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None):
     from src.utils.trade_database import TradeDatabase
     db = TradeDatabase()
     
-    # Try to find common range from loaded symbols if not manually specified
-    symbols = db.get_market_data_symbols('1h')
-    
     # Determine default end_date from DB if available, otherwise now()
     default_end = datetime.now()
-    default_start = default_end - timedelta(days=90)
+    default_start = default_end - timedelta(days=days or 90)
     
-    db_start = None
-    db_end = None
-
-    if symbols:
-        # Get range for first symbol (assuming somewhat synchronized)
-        db_start, db_end = db.get_available_data_range(symbols[0], '1h')
-        if db_end:
-            default_end = db_end
-        if db_start:
-            default_start = db_start
+    # Get Timeframes required by current config
+    required_timeframes = set([s.get('timeframe', '1h') for s in config['strategies']['instances']])
+    # Ensure 1h is always present as it's often used for broad market check / funding (fallback)
+    required_timeframes.add('1h')
+    
+    print(f"Required Timeframes: {required_timeframes}")
+    
+    # Dynamic Universe Selection
+    print("Filtering asset universe based on data availability...")
+    
+    # We need a rough range to query. If user didn't specify, we look for data in the last X days.
+    # Note: DB queries are fast, so checking a broad range is fine.
+    query_start = datetime.strptime(start_str, "%Y-%m-%d") if start_str else default_start
+    query_end = datetime.strptime(end_str, "%Y-%m-%d") if end_str else default_end
+    
+    symbols = db.get_available_symbols_for_timeframes(list(required_timeframes), query_start, query_end)
+    
+    if not symbols:
+         print(f"CRITICAL: No assets found with data for all timeframes {required_timeframes} in range {query_start} to {query_end}")
+         return
+         
+    print(f"Selected {len(symbols)} assets for backtest: {symbols[:5]}...")
+    
+    # Override config symbols
+    config['trading']['symbols'] = symbols
+    
+    # Retrieve actual data range for the PRIMARY asset (usually BTC or first in list) to permit precise trimming
+    # But for dynamic mode, we trust the query_start/end or the user input.
+    db_start = query_start
+    db_end = query_end
             
     # Random Window Logic
     if random_window and db_start and db_end:
