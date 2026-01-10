@@ -376,6 +376,8 @@ class TradeDatabase:
                     SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END) as losing_trades,
                     SUM(CASE WHEN pnl = 0 THEN 1 ELSE 0 END) as breakeven_trades,
                     SUM(pnl) as total_pnl,
+                    SUM(fees) as total_fees,
+                    SUM(pnl) - SUM(fees) as net_pnl,
                     AVG(pnl) as avg_pnl,
                     SUM(CASE WHEN pnl > 0 THEN pnl ELSE 0 END) as gross_profit,
                     ABS(SUM(CASE WHEN pnl < 0 THEN pnl ELSE 0 END)) as gross_loss,

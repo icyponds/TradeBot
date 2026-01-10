@@ -119,7 +119,7 @@ class PortfolioManager:
         self.logger.debug(f"Available capital: ${available_capital:.2f} "
                          f"(free margin: ${self.free_margin:.2f}, max positions: ${max_capital_for_positions:.2f})")
         
-        return available_capital
+        return max(0.0, available_capital)
     
     def can_open_position(self, required_margin: float) -> bool:
         """

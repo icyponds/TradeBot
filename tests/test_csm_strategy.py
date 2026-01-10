@@ -53,15 +53,15 @@ class TestCrossSectionalMomentumStrategy:
         # Need 5 assets for ranking to trigger (hardcoded < 5 check)
         
         # Asset A: +10% (Winner)
-        df_a = self.create_ohlcv(100, 110, 30)
+        df_a = self.create_ohlcv(100, 110, 29)
         # Asset B: +5%
-        df_b = self.create_ohlcv(100, 105, 30)
+        df_b = self.create_ohlcv(100, 105, 29)
         # Asset C: 0%
-        df_c = self.create_ohlcv(100, 100, 30)
+        df_c = self.create_ohlcv(100, 100, 29)
         # Asset D: -5%
-        df_d = self.create_ohlcv(100, 95, 30)
+        df_d = self.create_ohlcv(100, 95, 29)
         # Asset E: -10% (Loser)
-        df_e = self.create_ohlcv(100, 90, 30)
+        df_e = self.create_ohlcv(100, 90, 29)
         
         assets = {
             'A': df_a, 'B': df_b, 'C': df_c, 'D': df_d, 'E': df_e

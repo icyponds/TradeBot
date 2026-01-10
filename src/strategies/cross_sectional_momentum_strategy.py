@@ -109,9 +109,19 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
              self._cleanup_cache()
              CrossSectionalMomentumStrategy._last_cleanup = now
              
+        
         # 3. Determine Rank
         if len(self._universe_stats) < 5:
             return None
+            
+        # 4. Check Rebalance Schedule
+        # Only rebalance if the current hour aligns with interval
+        # Use ohlcv timestamp (index)
+        latest_ts = ohlcv.index[-1]
+        if hasattr(latest_ts, 'hour') and (latest_ts.hour % self.rebalance_interval_hours != 0):
+             # Just hold existing positions (handled by manager), don't generate NEW signals
+             # Unless we want to force exit? For now just inhibit new entries.
+             return None
             
         # Use SCORE for ranking (Risk-Adjusted Momentum)
         scores = [v.get('score', v.get('return', 0)) for k, v in self._universe_stats.items()]
@@ -129,7 +139,7 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
         signal = 'hold'
         reason = ''
         
-        # 4. Generate Signal
+        # 5. Generate Signal
         if rank >= (1.0 - self.top_n_percent):
             # Top Winner -> Long
             signal = 'buy'
@@ -148,13 +158,14 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
         if signal == 'hold':
             return None
 
-
             
-        # 5. Trend Filter Implementation (EMA 200)
+        # 6. Trend Filter Implementation (EMA 200)
         # Only take LONG signals if Price > EMA200
         # Only take SHORT signals if Price < EMA200
-        ohlcv['ema200'] = ohlcv['close'].ewm(span=200, adjust=False).mean()
-        trend_ema = ohlcv['ema200'].iloc[-1]
+        # Fix SettingWithCopyWarning
+        df_calc = ohlcv.copy()
+        df_calc['ema200'] = df_calc['close'].ewm(span=200, adjust=False).mean()
+        trend_ema = df_calc['ema200'].iloc[-1]
         
         if signal == 'buy' and current_price < trend_ema:
              self.logger.debug(f"{symbol}: Long signal filtered (Price {current_price:.2f} < EMA200 {trend_ema:.2f})")
@@ -218,10 +229,10 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
 
     def calculate_stop_loss(self, entry_price: float, side: str, signal_context: Dict[str, Any] = None) -> float:
         """
-        Fixed 3% Stop Loss for Momentum.
+        Fixed 5% Stop Loss for Momentum (Increased from 3%).
         The ExecutionEngine will clamp this if it exceeds Max Account Risk.
         """
-        sl_pct = 0.03
+        sl_pct = 0.05
         
         if side == 'long':
             return entry_price * (1 - sl_pct)

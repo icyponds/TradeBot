@@ -24,8 +24,8 @@ class TestCSMOptimization:
 
     def test_adx_regime_filter(self, strategy):
         """Test that CSM signals are blocked in low ADX regimes."""
-        dates = pd.date_range(start='2024-01-01', periods=50, freq='1h')
-        closes = np.linspace(100, 110, 50)
+        dates = pd.date_range(start='2024-01-01', periods=49, freq='1h')
+        closes = np.linspace(100, 110, 49)
         
         df = pd.DataFrame({
             'open': closes, 'high': closes+1, 'low': closes-1, 'close': closes, 'volume': 1000
@@ -43,7 +43,7 @@ class TestCSMOptimization:
         
         # Case A: Low ADX (< 25) -> Block
         with patch('src.strategies.cross_sectional_momentum_strategy.calculate_adx') as mock_adx:
-            mock_adx.return_value = pd.Series([15.0] * 50) # Weak trend
+            mock_adx.return_value = pd.Series([15.0] * 49) # Weak trend
             
             # Need to mock ohlcv fetch because generate_signal calls it
             # But here we assume we test internal logic or pass dict
@@ -54,7 +54,7 @@ class TestCSMOptimization:
 
         # Case B: High ADX (> 25) -> Allow
         with patch('src.strategies.cross_sectional_momentum_strategy.calculate_adx') as mock_adx:
-            mock_adx.return_value = pd.Series([40.0] * 50) # Strong trend
+            mock_adx.return_value = pd.Series([40.0] * 49) # Strong trend
             
             sig = strategy._generate_signal_internal(df, "BTC")
             assert sig is not None

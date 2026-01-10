@@ -266,7 +266,7 @@ def load_config() -> Dict[str, Any]:
         # Leverage Management Configuration
         "leverage_management": {
             # Volatility Targeting & Risk Management
-            "risk_per_trade_pct": float(os.getenv("RISK_PER_TRADE_PCT", "3.0")),  # 3% Risk Budget
+            "risk_per_trade_pct": float(os.getenv("RISK_PER_TRADE_PCT", "1.5")),  # 1.5% Risk Budget (was 3.0%)
             "target_annual_volatility": float(os.getenv("TARGET_ANNUAL_VOLATILITY", "0.40")),  # 40% Target Vol
             "fallback_stop_loss_pct": 0.05,
             
@@ -314,8 +314,8 @@ def load_config() -> Dict[str, Any]:
                 # Sentiment ML (15m, 1h, 4h)
                 # sentiment_ml_15m disabled due to poor backtest performance (-$49)
                 # {"type": "sentiment_ml", "name": "sentiment_ml_15m", "timeframe": "15m"},
-                {"type": "sentiment_ml", "name": "sentiment_ml_1h", "timeframe": "1h"},
-                {"type": "sentiment_ml", "name": "sentiment_ml_4h", "timeframe": "4h"},
+                # {"type": "sentiment_ml", "name": "sentiment_ml_1h", "timeframe": "1h"},
+                # {"type": "sentiment_ml", "name": "sentiment_ml_4h", "timeframe": "4h"},
                 
                 # Liquidation Hunter (5m, 15m, 1h)
                 {"type": "liquidation_hunter", "name": "liquidation_hunter_5m", "timeframe": "5m"},
@@ -325,7 +325,7 @@ def load_config() -> Dict[str, Any]:
                 # Cross-Sectional Momentum (1h, 4h)
                 # csm_1h disabled due to poor backtest performance (8.8% win rate, -$345 PnL)
                 # {"type": "cross_sectional_momentum", "name": "csm_1h", "timeframe": "1h"},
-                {"type": "cross_sectional_momentum", "name": "csm_4h", "timeframe": "4h"},
+                # {"type": "cross_sectional_momentum", "name": "csm_4h", "timeframe": "4h"},
             ],
             # Note: timeframe is now auto-selected per strategy instance
             "ohlcv_limit": int(os.getenv("OHLCV_LIMIT", "300")), # Increased for EMA200
@@ -378,9 +378,9 @@ def load_config() -> Dict[str, Any]:
             "volatility_breakout": {
                 "bb_length": int(os.getenv("VB_BB_LENGTH", "20")),
                 "bb_std": float(os.getenv("VB_BB_STD", "2.0")),
-                "squeeze_threshold": float(os.getenv("VB_SQUEEZE_THRESHOLD", "0.10")),
+                "squeeze_threshold": float(os.getenv("VB_SQUEEZE_THRESHOLD", "0.15")), # Increased from 0.10
                 "atr_length": int(os.getenv("VB_ATR_LENGTH", "14")),
-                "atr_multiplier_sl": float(os.getenv("VB_ATR_MULT_SL", "2.0")),
+                "atr_multiplier_sl": float(os.getenv("VB_ATR_MULT_SL", "1.5")), # Tighter stops (was 2.0)
                 "atr_multiplier_tp": float(os.getenv("VB_ATR_MULT_TP", "4.0")),
             },
             
@@ -436,6 +436,8 @@ def load_config() -> Dict[str, Any]:
             "end_date": os.getenv("BACKTEST_END_DATE", "2024-12-31"),
             "results_db_path": os.getenv("BACKTEST_RESULTS_DB_PATH", "data/backtest_results.db"),
             "reset_results_db": os.getenv("BACKTEST_RESET_RESULTS_DB", "true").lower() == "true",
+            "initial_capital": float(os.getenv("BACKTEST_INITIAL_CAPITAL", "50000.0")),
+            "initial_spot_balance": float(os.getenv("BACKTEST_INITIAL_SPOT_BALANCE", "0.0")),
         },
         
         # Order Management Configuration

@@ -51,6 +51,24 @@ class MockMarketAPI(MarketInterface):
         # This prevents "Simulation time not set" errors during StrategyManager init
         self._initialize_default_time()
 
+    def reset_state(self):
+        """Reset the mock exchange state for a fresh backtest."""
+        self.orders = {}
+        self.positions = {}
+        
+        # Get initial balances from config
+        # Note: config structure is nested: config['backtesting']['initial_capital']
+        backtest_config = self.config.get('backtesting', {})
+        initial_perp = float(backtest_config.get('initial_capital', 50000.0))
+        initial_spot = float(backtest_config.get('initial_spot_balance', 0.0))
+        
+        self.balances = {'USDC': initial_spot}
+        self.perp_balance = {'withdrawable': initial_perp, 'margin_used': 0.0}
+        
+        self.order_id_counter = 0
+        self._subscribed_symbols = set()
+        self.logger.info(f"MockMarketAPI state reset (Perp: ${initial_perp:,.2f}, Spot: ${initial_spot:,.2f})")
+
     def get_spot_token_for_perp(self, symbol: str) -> Optional[str]:
         """Mock mapping from perp to spot token."""
         # Simple identity mapping for mock
@@ -168,11 +186,14 @@ class MockMarketAPI(MarketInterface):
         
         # We want everything before this index
         if idx == 0:
+            self.logger.debug(f"get_ohlcv: Current time {self.current_time} before data start {df.index[0]}")
             return None
             
         # Slice the last 'limit' rows up to 'idx'
         start_idx = max(0, idx - limit)
         filtered_df = df.iloc[start_idx:idx]
+        
+        self.logger.debug(f"get_ohlcv sliced: {len(filtered_df)} rows. Range: {filtered_df.index[0]} to {filtered_df.index[-1]}")
         
         if filtered_df.empty:
             return None
@@ -267,8 +288,6 @@ class MockMarketAPI(MarketInterface):
                 # If increasing position or flipping side, update entry price logic would go here
                 # Keeping it simple: if side matches, w-avg. If flip, reset.
                 pass
-                
-                new_size -= size
                 
             # Calculate Realized PnL if reducing position
             # Simply: (Exit Price - Entry Price) * CLOSED_SIZE * DIRECTION

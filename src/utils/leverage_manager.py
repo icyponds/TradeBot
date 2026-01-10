@@ -139,6 +139,11 @@ class LeverageManager:
             symbol, strategy_name, signal_strength, market_volatility, current_price, asset_max_leverage
         )
         
+        # CRITICAL: Prevent trading if insolvent
+        if available_capital <= 0:
+            self.logger.warning(f"Sizing {symbol}: REFUSED due to non-positive capital (${available_capital:.2f})")
+            return 0.0, 0.0, 1.0
+        
         # 2. Determine Risk Parameters
         lm_cfg = self.config.get("leverage_management", {}) or {}
         # Default Risk Per Trade: 1.0% (Increased from 0.5% per plan)

@@ -131,22 +131,22 @@ class AdaptiveGridStrategy(BaseStrategy):
         if current_price < lower_band:
             if ema_slope < -slope_threshold:
                 self.logger.debug(f"{symbol}: Grid Long skipped - Downtrend (EMA Slope {ema_slope:.5f} < -{slope_threshold})")
-            elif current_rsi < self.rsi_long_threshold:
+            elif current_rsi < 40: # Tuned from 30 to 40
                 signal = 'buy'
                 reason = f"Adaptive Grid: Buy Dip (Price {current_price} < {lower_band:.2f}, RSI={current_rsi:.1f}, Trend Up/Neutral)"
             else:
-                self.logger.debug(f"{symbol}: Grid Long skipped (RSI {current_rsi:.1f} >= {self.rsi_long_threshold})")
+                self.logger.info(f"{symbol}: Grid Long skipped (RSI {current_rsi:.1f} >= 40)") # Tuned log info
             
         # Entry Short: Price spikes above Upper Band (overbought relative to trend) AND RSI is overbought
         # FILTER: Only Sell if EMA Slope is Neutral or Negative (Don't short a moonshot)
         elif current_price > upper_band:
             if ema_slope > slope_threshold:
                 self.logger.debug(f"{symbol}: Grid Short skipped - Uptrend (EMA Slope {ema_slope:.5f} > {slope_threshold})")
-            elif current_rsi > self.rsi_short_threshold:
+            elif current_rsi > 60: # Tuned from 70 to 60 for better signals
                 signal = 'sell'
                 reason = f"Adaptive Grid: Sell Pump (Price {current_price} > {upper_band:.2f}, RSI={current_rsi:.1f}, Trend Down/Neutral)"
             else:
-                self.logger.debug(f"{symbol}: Grid Short skipped (RSI {current_rsi:.1f} <= {self.rsi_short_threshold})")
+                self.logger.info(f"{symbol}: Grid Short skipped (RSI {current_rsi:.1f} <= 60)") # Tuned log info
         
         if signal == 'hold':
             return None

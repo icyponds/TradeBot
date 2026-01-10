@@ -70,3 +70,31 @@ class TestLeverageManager:
         buffer_pct = leverage_manager.margin_buffer_percentage
         max_margin = 10000 * (1 - buffer_pct/100)
         assert margin <= max_margin
+
+    def test_insolvent_position_sizing(self, leverage_manager):
+        """Test position sizing when capital is zero or negative (insolvency)."""
+        leverage_manager.portfolio_manager = None
+        
+        # Test Zero Capital
+        size, margin, lev = leverage_manager.calculate_leveraged_position_size(
+            symbol="BTC",
+            current_price=50000,
+            available_capital=0,
+            strategy_name="test",
+            signal_strength=0.5,
+            market_volatility=0.0
+        )
+        assert size == 0.0
+        assert margin == 0.0
+        
+        # Test Negative Capital
+        size, margin, lev = leverage_manager.calculate_leveraged_position_size(
+            symbol="BTC",
+            current_price=50000,
+            available_capital=-10000,
+            strategy_name="test",
+            signal_strength=0.5,
+            market_volatility=0.0
+        )
+        assert size == 0.0
+        assert margin == 0.0

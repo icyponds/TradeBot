@@ -256,13 +256,16 @@ class ExecutionEngine:
             else:
                 take_profit = max(take_profit, take_profit_capital_based)
             
-            # Execute order
+            # Determine market type from symbol
+            market_type = 'spot' if symbol.endswith('_SPOT') else 'perp'
+            
             order_result = self.market_api.execute_order(
                 symbol=symbol,
                 side=side,
                 size=position_size,
                 reduce_only=False,
-                urgency="normal"
+                urgency="normal",
+                market_type=market_type
             )
             
             if order_result and order_result.get('filled_size', 0) > 0:
@@ -342,12 +345,16 @@ class ExecutionEngine:
             close_side = 'sell' if position.side == 'long' else 'buy'
             urgency = "high" if reason in ['stop_loss', 'liquidation_risk', 'emergency'] else "normal"
             
+            # Determine market type from symbol
+            market_type = 'spot' if symbol.endswith('_SPOT') else 'perp'
+            
             order_result = self.market_api.execute_order(
                 symbol=symbol,
                 side=close_side,
                 size=position.size,
                 reduce_only=True,
-                urgency=urgency
+                urgency=urgency,
+                market_type=market_type
             )
             
             if order_result and order_result.get('filled_size', 0) > 0:

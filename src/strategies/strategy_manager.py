@@ -1212,11 +1212,11 @@ class StrategyManager:
             self._cleanup_stale_orders()
             
             # Update correlations periodically
-            if self.correlation_manager.should_update():
+            if self.correlation_manager.should_update(current_time=current_datetime):
                 # Get all potential symbols from pair selector or config
                 all_symbols = self.pair_selector.get_current_pairs()
                 if all_symbols:
-                    self.correlation_manager.update_correlations(all_symbols)
+                    self.correlation_manager.update_correlations(all_symbols, current_time=current_datetime)
             
             # Get current trading pairs
             trading_pairs = self.pair_selector.get_current_pairs()
@@ -1880,15 +1880,17 @@ class StrategyManager:
         """
         # Case 1: Arb Existing -> New Single-Leg Signal
         # We need to find if this symbol is part of an active multi-leg position
-        arb_position = self._get_multi_leg_position_for_symbol(symbol)
+        # Use efficient lookup from Execution Engine
+        arb_position = self.execution_engine.get_multi_leg_position_by_leg_symbol(symbol)
+        
         if arb_position:
             # Arb Strength is usually stored or needs to be queried. 
             # For now, we assume stored in metadata or approx 0.5 if unknown.
             arb_strength = getattr(arb_position, 'entry_signal_strength', 0.5) or 0.5
             
-            # Threshold: Single > Arb * 1.5
-            if new_strength > (arb_strength * 1.5):
-                self.logger.info(f"☢️ NUCLEAR DISPLACEMENT: New Single ({float(new_strength or 0):.2f}) > Arb ({float(arb_strength or 0):.2f} * 1.5). Closing Arb.")
+            # Threshold: Single > Arb * 2.0
+            if new_strength > (arb_strength * 2.0):
+                self.logger.info(f"☢️ NUCLEAR DISPLACEMENT: New Single ({float(new_strength or 0):.2f}) > Arb ({float(arb_strength or 0):.2f} * 2.0). Closing Arb.")
                 return 'displacement_arb'
             else:
                 return 'block' # Arb protects itself
@@ -1950,78 +1952,25 @@ class StrategyManager:
             
         return 'block'
 
-    def _should_execute_signal(self, symbol: str, signal: Dict[str, Any], current_price: float, 
-                              ohlcv: Dict[str, pd.DataFrame], strategy_name: str) -> bool:
-        """Determine if we should execute a trading signal."""
-        # Check if we already have a position
-        if symbol in self.positions:
-            position = self.positions[symbol]
-            
-            # If we have a position, only act on opposite signals
-            if position.side == 'long' and signal['signal'] == 'buy':
-                return False
-            elif position.side == 'short' and signal['signal'] == 'sell':
-                return False
 
-        # Multi-Leg Collision Check (The "Blind Spot")
-        # Check if this symbol is a leg of an existing multi-leg position
-        ml_position = self.execution_engine.get_multi_leg_position_by_leg_symbol(symbol)
-        if ml_position:
-            # COLLISION DETECTED
-            try:
-                # Retrieve signal strengths
-                new_strength = float(signal.get('signal_strength', 0) or 0)
-                # Parse old strength from metadata if available (fallback to 0.5)
-                # Note: metadata might be on the position or leg. 
-                # StatArb stores 'z_score' etc in metadata usually.
-                old_strength = float(ml_position.metadata.get('signal_strength', 0.5) or 0.5)
-                
-                # NUCLEAR SWITCH LOGIC
-                # Override only if new signal is 2x stronger than the holding signal
-                NUCLEAR_THRESHOLD = 2.0
-                
-                if new_strength > (old_strength * NUCLEAR_THRESHOLD):
-                    self.logger.warning(
-                        f"☢️ NUCLEAR SWITCH TRIGGERED: {symbol} Single-Leg Strength ({new_strength:.2f}) "
-                        f"> 2.0x Multi-Leg ({old_strength:.2f}). "
-                        f"Closing Arb Position {ml_position.position_id}..."
-                    )
-                    
-                    # Force Close the Multi-Leg Position
-                    # We use the execution engine directly to ensure all legs are closed
-                    self.execution_engine.execute_multi_leg_exit(
-                        symbol=ml_position.primary_symbol, # Important: Use primary symbol for lookup inside exit
-                        signal={'urgency': 'high', 'reason': 'nuclear_displacement'},
-                        strategy_name=ml_position.strategy,
-                        strategies_map=self.strategies
-                    )
-                    
-                    # Allow new trade to proceed (it will open into a clean slate)
-                    return True
-                else:
-                    self.logger.info(
-                        f"🛡️ Multi-Leg Collision Blocked: {symbol} is locked by Arb {ml_position.position_id}. "
-                        f"New Strength ({new_strength:.2f}) <= 2.0x Old ({old_strength:.2f})."
-                    )
-                    return False
-                    
-            except Exception as e:
-                self.logger.error(f"Error handling multi-leg collision for {symbol}: {e}")
-                return False
         
     def _force_close_position_for_displacement(self, symbol: str):
         """
         Force close a position (Single or Multi-Leg) due to Nuclear Displacement.
         """
         # Check Multi-Leg first
-        arb_position = self._get_multi_leg_position_for_symbol(symbol)
+        # Use efficient lookup from Execution Engine
+        arb_position = self.execution_engine.get_multi_leg_position_by_leg_symbol(symbol)
+        
         if arb_position:
             self.logger.warning(f"☢️ EXECUTING NUCLEAR DISPLACEMENT on Arb {arb_position.position_id} for {symbol}")
-            # We need to construct a fake signal or call exit directly
-            # Assuming handle_multi_leg_signal can take an 'exit' action
-            # The signal dict is dummy but needs 'action'
-            dummy_signal = {'action': 'exit', 'type': 'nuclear_displacement'}
-            self._handle_multi_leg_signal(symbol, dummy_signal, 0.0, arb_position.strategy, {}, timestamp=datetime.now())
+            # Execute Exit Directly
+            self.execution_engine.execute_multi_leg_exit(
+                symbol=arb_position.primary_symbol,
+                signal={'urgency': 'high', 'reason': 'nuclear_displacement'},
+                strategy_name=arb_position.strategy,
+                strategies_map=self.strategies
+            )
             return
 
         # Check Single Leg
@@ -2058,7 +2007,12 @@ class StrategyManager:
             
         elif resolution == 'nuclear':
             self._force_close_position_for_displacement(symbol)
-            # Proceed to open new trade
+            return True
+            # Proceed to open new trade logic handled by return True (Standard execution follows?)
+            # Wait, if I return True, who calls execute_order for the NEW trade?
+            # StrategyManager.execute_strategy checks if _should_execute returns True.
+            # IF True, IT CALLS execute_order.
+            # SO returning True is CORRECT.
             
         elif resolution in ['flip', 'upgrade']:
             self.close_position(symbol, reason=f'conflict_{resolution}')
@@ -2472,19 +2426,19 @@ class StrategyManager:
             except Exception as e:
                 self.logger.debug(f"Could not get strategy stats for {strategy_name}: {e}")
         
-        # ===== 4. Time & Momentum Score (25%) =====
-        # Time factor - newer positions get slight preference (they haven't had chance to prove themselves)
+        # ===== 4. Time & Momentum Score (15%) =====
+        # Time factor - newer positions get protection (let them breathe)
         time_open = (datetime.now() - position.entry_time).total_seconds() / 3600  # hours
         
-        # Sweet spot is 1-6 hours (had time to develop but not stale)
+        # Protect very new positions (< 1h)
         if time_open < 1:
-            time_score = 0.6  # Very new, slight penalty
+            time_score = 1.0  # Protected
         elif time_open < 6:
-            time_score = 0.8  # Optimal range
+            time_score = 0.8  # Still fresh
         elif time_open < 12:
-            time_score = 0.6  # Getting older
+            time_score = 0.6  # Maturing
         elif time_open < 24:
-            time_score = 0.4  # Stale
+            time_score = 0.4  # Getting stale
         else:
             time_score = 0.2  # Very stale
         
@@ -2506,14 +2460,19 @@ class StrategyManager:
                 else:
                     momentum_score = max(0.0, 0.5 + progress * 5)
         
-        time_momentum_score = (time_score * 0.5) + (momentum_score * 0.5)
+        time_momentum_score = (time_score * 0.6) + (momentum_score * 0.4)
         
         # ===== Final Score Calculation =====
+        # Weights:
+        # PnL: 30% (Performance is king)
+        # Strategy: 30% (Trust the best strategies)
+        # EV: 25% (Risk/Reward quality)
+        # Time/Mom: 15% (Recency bias reduced)
         final_score = (
-            (pnl_score * 0.25) +
+            (pnl_score * 0.30) +
+            (strategy_score * 0.30) +
             (ev_score * 0.25) +
-            (strategy_score * 0.25) +
-            (time_momentum_score * 0.25)
+            (time_momentum_score * 0.15)
         )
         
         self.logger.debug(
@@ -2565,11 +2524,12 @@ class StrategyManager:
         least_profitable_pos = self.positions.get(least_profitable_symbol)
         
         # Scores are now 0-1 normalized, so use absolute thresholds
-        # At position limit: new signal must be at least 0.1 points higher (10% of scale)
-        # Below limit: new signal must be at least 0.2 points higher (20% of scale)
+        # Lowered thresholds to facilitate rotation:
+        # At position limit: new signal must be at least 0.05 points higher
+        # Below limit: new signal must be at least 0.10 points higher
         
         at_limit = self._check_position_limit()
-        threshold = 0.1 if at_limit else 0.2
+        threshold = 0.05 if at_limit else 0.10
         
         score_difference = new_signal_strength - least_profitable_score
         

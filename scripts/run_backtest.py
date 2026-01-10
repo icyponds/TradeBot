@@ -35,6 +35,26 @@ def generate_synthetic_data(symbol, start_date, end_date, freq='1h'):
 import random
 
 def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None):
+    # Increase log level and setup file logging prior to ANY imports or logic
+    import logging
+    
+    # Ensure log directory exists
+    log_dir = os.path.join(os.path.dirname(__file__), '..', 'logs')
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, 'backtest.log')
+    
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_file, mode='w'), # Overwrite mode
+            logging.StreamHandler(sys.stdout)
+        ],
+        force=True
+    )
+    print(f"Logging to: {log_file}")
+
     print("Running Backtest Smoke Test...")
     
     # 1. Config
@@ -141,9 +161,7 @@ def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None):
         ]
         print("Consolidated Strategies: Disabled SentimentML & LH 5m/1h.")
     
-    # Increase log level
-    import logging
-    logging.basicConfig(level=logging.INFO)
+
     
     # 4. Run
     # Use 15m interval to match the primary strategy timeframe (StatArb 15m)
@@ -169,9 +187,23 @@ if __name__ == "__main__":
     # Ensure DB directory exists
     os.makedirs('data', exist_ok=True)
     
-    run_smoke_test(
-        days=args.days, 
-        start_str=args.start, 
-        end_str=args.end, 
-        random_window=args.random_window
-    )
+    try:
+        run_smoke_test(
+            days=args.days, 
+            start_str=args.start, 
+            end_str=args.end, 
+            random_window=args.random_window
+        )
+    except KeyboardInterrupt:
+        print("\nBacktest interrupted by user.")
+    except Exception as e:
+        # If logging is configured, this will go to file. If not (early crash), it might miss.
+        # But we import logging inside run_smoke_test... 
+        # We should probably configure logging globally or catch inside run_smoke_test.
+        print(f"FATAL ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        # Try to log if logger exists
+        import logging
+        logging.getLogger("root").critical("Backtest failed with exception", exc_info=True)

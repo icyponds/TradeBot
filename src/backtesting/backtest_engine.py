@@ -44,6 +44,9 @@ class BacktestEngine:
         self.mock_api = MockMarketAPI(config, self.historical_data)
         self.mock_api.set_funding_data(self.funding_data)
         
+        # CRITICAL: Ensure clean state (no ghost positions from previous runs in memory)
+        self.mock_api.reset_state()
+        
         # Initialize Strategy Manager with injected Mock API and Prefixed Tracker
         # IMPORTANT: Initialize PerformanceTracker with 'backtest_' prefix here
         from src.utils.performance_tracker import PerformanceTracker
@@ -106,7 +109,7 @@ class BacktestEngine:
         total_rows = 0
         
         # Timeframes we care about for now
-        timeframes = ['5m', '15m', '1h', '4h']
+        timeframes = ['5m', '15m', '1h', '4h', '1d']
         
         # Get all distinct symbols from DB (simplification: assume if 1h exists, others might too)
         symbols = self.db.get_market_data_symbols('1h')
@@ -189,43 +192,25 @@ class BacktestEngine:
         
     def generate_report(self) -> Dict[str, Any]:
         """Generate performance report from the backtest."""
-        trades = self.mock_api.orders
-        positions = self.mock_api.positions
         
-        # Calculate Realized Balance (Cash)
-        spot_balance = self.mock_api.get_spot_balance('USDC')
+        # Use the API's comprehensive balance calculation (includes Spot Assets + Perp Equity)
+        balance_info = self.mock_api.get_account_balance()
+        total_equity = balance_info['total_equity']
+        
+        # Breakdown
+        spot_balance = self.mock_api.get_spot_balance('USDC') # Cash
         perp_balance = self.mock_api.get_perp_balance()['withdrawable']
-        realized_equity = spot_balance + perp_balance
         
-        # Calculate Unrealized PnL from Open Positions
-        unrealized_pnl = 0.0
-        
-        for symbol, position in positions.items():
-            current_price = self.mock_api.get_current_price(symbol)
-            if not current_price:
-                continue
-                
-            entry_price = position['entry_price']
-            size = position['size']
-            side = position['side']  # 'long' or 'short'
-            
-            if side == 'long':
-                pnl = (current_price - entry_price) * size
-            else:
-                pnl = (entry_price - current_price) * size
-                
-            unrealized_pnl += pnl
-            
-        total_equity = realized_equity + unrealized_pnl
-        
+        # positions from api
+        positions = self.mock_api.positions
+        trades = self.mock_api.orders
+
         report = {
             'total_equity': total_equity,
-            'realized_equity': realized_equity,
-            'unrealized_pnl': unrealized_pnl,
-            'positions_open': len(positions),
-            'total_orders': len(trades),
             'spot_balance': spot_balance,
             'perp_balance': perp_balance,
+            'positions_open': len(positions),
+            'total_orders': len(trades),
         }
 
         # Backtest analysis should read performance from the backtest results DB (`trades` table).

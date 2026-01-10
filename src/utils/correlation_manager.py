@@ -121,12 +121,13 @@ class CorrelationManager:
         self.correlation_matrix = None
         self.last_update = None
         
-    def update_correlations(self, symbols: List[str]) -> Dict[str, str]:
+    def update_correlations(self, symbols: List[str], current_time: datetime = None) -> Dict[str, str]:
         """
         Update correlation data for the given symbols.
         
         Args:
             symbols: List of symbols to analyze
+            current_time: Current simulation time (optional)
             
         Returns:
             Dictionary of best correlated pairs {symbol: correlated_symbol}
@@ -151,6 +152,9 @@ class CorrelationManager:
                 if ohlcv is not None and not ohlcv.empty:
                     # Use closing prices
                     price_data[symbol] = ohlcv['close']
+                    self.logger.debug(f"Fetched {len(ohlcv)} points for {symbol} ({ohlcv.index[0]} to {ohlcv.index[-1]})")
+                else:
+                    self.logger.warning(f"No correlation data for {symbol} (TF={analysis_timeframe})")
             except Exception as e:
                 self.logger.error(f"Error fetching data for {symbol}: {e}")
                 
@@ -162,15 +166,19 @@ class CorrelationManager:
         # Align data by index (timestamp) to ensure valid comparisons
         df = pd.DataFrame(price_data)
         
-        # Drop rows with missing values to ensure clean correlation
-        df = df.dropna()
+        # [MODIFIED] Do NOT drop globally missing values, as this kills analysis if any single asset 
+        # has a different time range (e.g. Spot vs Perp). df.corr() handles NaNs pairwise.
+        # df = df.dropna()
         
-        if len(df) < self.lookback_period * 0.5:
-            self.logger.warning(f"Insufficient overlapping data points: {len(df)}")
+        # Check if we have enough data (at least some rows)
+        if df.empty:
+            self.logger.warning(f"Combined dataframe is empty")
             return {}
             
-        # Calculate correlation matrix
-        self.correlation_matrix = df.corr()
+        # Calculate correlation matrix with min_periods to ensure statistical significance
+        # We require at least 50% of lookback period to overlap
+        min_overlap = int(self.lookback_period * 0.5)
+        self.correlation_matrix = df.corr(min_periods=min_overlap)
         
         # Find best pairs
         new_correlations = {}
@@ -202,21 +210,22 @@ class CorrelationManager:
                 # For now, allowing many-to-one (e.g. everything correlates to BTC) is safer.
             
         self.correlated_pairs = new_correlations
-        self.last_update = datetime.now()
+        self.last_update = current_time if current_time else datetime.now()
         
-        self.logger.info(f"Correlation update complete. Found {len(self.correlated_pairs)} correlated pairs.")
+        self.logger.info(f"Correlation update complete. Found {len(self.correlated_pairs)} correlated pairs. (Time: {self.last_update})")
         return self.correlated_pairs
         
     def get_correlated_symbol(self, symbol: str) -> Optional[str]:
         """Get the correlated symbol for a given asset."""
         return self.correlated_pairs.get(symbol)
         
-    def should_update(self) -> bool:
+    def should_update(self, current_time: datetime = None) -> bool:
         """Check if correlations need to be updated."""
         if self.last_update is None:
             return True
             
-        elapsed = datetime.now() - self.last_update
+        now = current_time if current_time else datetime.now()
+        elapsed = now - self.last_update
         return elapsed > timedelta(hours=self.update_interval_hours)
     
     # ==================== COINTEGRATION METHODS ====================
