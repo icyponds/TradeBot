@@ -76,47 +76,50 @@ class LeverageManager:
         
         # Use strategy-provided leverage or default to 1.0 (safe/unleveraged) if not provided
         base_leverage = strategy_leverage if strategy_leverage is not None else 1.0
+        min_leverage = float(leverage_config.get('min_leverage', 1.0))
         
-        signal_adjustment_max = leverage_config.get('signal_adjustment_max', 0.5)
-        volatility_min = leverage_config.get('volatility_min', 0.1)
-        min_leverage = leverage_config.get('min_leverage', 1.0)
-        # max_leverage from config is removed in favor of asset_max_leverage
+        # Volatility Targeting Logic
+        # Target Annualized Volatility (default 40%)
+        # Logic: Leverage = Target Vol / Asset Vol
+        target_vol = float(leverage_config.get('target_annual_volatility', 0.40))
         
-        ma_strategy_adjustment = leverage_config.get('ma_strategy_adjustment', 1.1)
-        rsi_strategy_adjustment = leverage_config.get('rsi_strategy_adjustment', 0.9)
+        # Ensure input volatility is sanitized. 
+        # If vol < 0.0, it's invalid. If vol < 0.10, it effectively implies massive leverage 
+        # (likely daily/hourly vol passed by mistake), so we clamp it safely.
+        # Ideally, inputs are already annualized.
+        safe_vol = max(0.10, market_volatility) # Clamp to min 10% vol to preventing infinite leverage bubbles
         
-        # Adjust leverage based on signal strength
-        signal_adjustment = 1.0 + (signal_strength * signal_adjustment_max)  # Up to max increase for strong signals
+        # Calculate raw volatility scalar
+        vol_scalar = target_vol / safe_vol
         
-        # Adjust leverage based on market volatility (inverse relationship)
-        # Handle edge case where market_volatility is -1.0 (which would cause division by zero)
-        if market_volatility <= -1.0:
-            volatility_adjustment = volatility_min  # Very low leverage for extreme volatility
-        else:
-            volatility_adjustment = 1.0 / (1.0 + market_volatility)  # Lower leverage for high volatility
+        # Apply Base Leverage (Strategy Preference)
+        # If strategy asks for 1.0 (neutral), we use pure vol targeting.
+        # If strategy asks for 2.0 (aggressive), we scale up.
+        dynamic_leverage = vol_scalar * base_leverage
         
-        # Strategy-specific adjustments
-        strategy_adjustment = 1.0
-        if strategy_name == 'moving_average':
-            strategy_adjustment = ma_strategy_adjustment  # Slightly higher leverage for trend-following
-        elif strategy_name == 'rsi':
-            strategy_adjustment = rsi_strategy_adjustment  # Lower leverage for mean-reversion
+        # Signal Strength Multiplier (optional boost for high conviction)
+        # We temper this to be subtle (e.g. 0.8x to 1.2x)
+        signal_mod = 1.0 + (signal_strength - 0.5) * 0.4
+        dynamic_leverage *= signal_mod
         
-        # Calculate final leverage
-        dynamic_leverage = base_leverage * signal_adjustment * volatility_adjustment * strategy_adjustment
-        
-        # Apply limits - strictly respect asset max
+        # Absolute Safety Caps
         dynamic_leverage = max(min_leverage, min(asset_max_leverage, dynamic_leverage))
         
-        self.logger.debug(f"Dynamic leverage for {symbol} ({strategy_name}): {dynamic_leverage:.1f}x (Asset Max: {asset_max_leverage}x)")
+        # Round to 1 decimal for cleanliness
+        dynamic_leverage = round(dynamic_leverage, 1)
+        
+        self.logger.debug(f"Dynamic Lev for {symbol}: {dynamic_leverage}x "
+                         f"(TargetVol={target_vol}, AssetVol={market_volatility:.2f}, "
+                         f"Scalar={vol_scalar:.2f}, SignalMod={signal_mod:.2f})")
         
         return dynamic_leverage
     
     def calculate_leveraged_position_size(self, symbol: str, current_price: float, available_capital: float,
                                         strategy_name: str, signal_strength: float, market_volatility: float, 
-                                        asset_max_leverage: float = 100.0) -> Tuple[float, float, float]:
+                                        asset_max_leverage: float = 100.0, stop_loss_pct: float = 0.05) -> Tuple[float, float, float]:
         """
-        Calculate leveraged position size based on capital at risk, not notional value.
+        Calculate position size using Risk-Based Sizing logic:
+        Size = (Equity * Risk%) / StopLoss%
         
         Args:
             symbol: Trading symbol
@@ -124,126 +127,72 @@ class LeverageManager:
             available_capital: Available capital for trading
             strategy_name: Name of the strategy
             signal_strength: Signal strength (0-1)
-            market_volatility: Market volatility measure
-            asset_max_leverage: Maximum leverage allowed for this asset
+            market_volatility: Market volatility measure (Annualized)
+            asset_max_leverage: Maximum leverage allowed
+            stop_loss_pct: Expected stop loss percentage (decimal)
             
         Returns:
             Tuple of (position_size, margin_required, leverage)
         """
-        # Calculate dynamic leverage
+        # 1. Calculate Dynamic Leverage (Volatility Targeted)
         leverage = self.calculate_dynamic_leverage(
             symbol, strategy_name, signal_strength, market_volatility, current_price, asset_max_leverage
         )
         
-        # Get maximum position size from portfolio manager if available (ceiling)
-        if self.portfolio_manager:
-            max_position_size = self.portfolio_manager.calculate_max_position_size(symbol)
-            self.logger.info(f"Portfolio-based max position size for {symbol}: ${max_position_size:.2f}")
-        else:
-            # No portfolio manager -> cannot compute equity-based limits reliably.
-            # Use available_capital-based percentage sizing as a conservative fallback.
-            max_pos_pct = float(self.config['trading'].get('max_position_size_percentage', 0.0))
-            max_position_size = max(0.0, available_capital * (max_pos_pct / 100.0))
-            self.logger.info(
-                f"Fallback max position size for {symbol}: ${max_position_size:.2f} "
-                f"(available_capital=${available_capital:.2f}, max_pos_pct={max_pos_pct:.2f}%)"
-            )
-        
-        # Phase-1: budget-vs-ceiling sizing.
-        # Compute a typical margin-at-risk ("budget") and only scale toward the ceiling for high confidence.
+        # 2. Determine Risk Parameters
         lm_cfg = self.config.get("leverage_management", {}) or {}
-        base_risk_pct = float(lm_cfg.get("base_risk_per_trade_pct", 0.50)) / 100.0
-        min_mult = float(lm_cfg.get("min_risk_multiplier", 0.25))
-        max_mult = float(lm_cfg.get("max_risk_multiplier", 4.00))
-        vol_pow = float(lm_cfg.get("vol_risk_scale_power", 0.50))
-
-        # Equity proxy
-        equity = getattr(self.portfolio_manager, "total_equity", 0.0) if self.portfolio_manager else 0.0
-        if not equity or equity <= 0:
-            equity = max(available_capital, 0.0)
-
-        # Confidence mapping: convex so most trades remain small.
-        c = max(0.0, min(1.0, float(signal_strength)))
-        confidence_mult = min_mult + (c * c) * (max_mult - min_mult)
-
-        # Mild volatility downscaling (separate from leverage adjustment).
-        v = max(0.0, float(market_volatility))
-        vol_mult = (1.0 / (1.0 + v)) ** max(0.0, vol_pow)
-        vol_mult = max(0.25, min(1.0, vol_mult))
-
-        budget_risk_per_trade = equity * base_risk_pct * confidence_mult * vol_mult
-
-        # Ceiling remains max_position_size; budget is the default.
-        max_risk_per_trade = min(max_position_size, budget_risk_per_trade)
+        # Default Risk Per Trade: 1.0% (Increased from 0.5% per plan)
+        risk_per_trade_pct = float(lm_cfg.get("risk_per_trade_pct", 1.0)) / 100.0
         
-        # Calculate position size based on capital at risk
-        # With leverage, the position value = capital_at_risk * leverage
-        # Position size in units = (capital_at_risk * leverage) / current_price
-        if current_price <= 0:
-            self.logger.warning(f"Invalid current price for {symbol}: {current_price}")
-            return 0.0, 0.0, leverage
+        # Use Portfolio Equity if available, else Fallback
+        equity = getattr(self.portfolio_manager, "total_equity", 0.0) if self.portfolio_manager else available_capital
         
-        # Calculate position size based on capital at risk
-        position_value = max_risk_per_trade * leverage
+        # 3. Calculate Risk Budget (Amount we are willing to lose)
+        # Risk Budget = Equity * Risk%
+        risk_budget = equity * risk_per_trade_pct
         
-        # Force minimum order value to meet exchange requirements ($10 minimum)
-        # We use $12 to give a safe buffer against price fluctuations
-        MIN_ORDER_VALUE = 12.0
-        if position_value < MIN_ORDER_VALUE and position_value > 0:
-            original_value = position_value
-            position_value = MIN_ORDER_VALUE
-            # Recalculate margin required for the bumped size
-            max_risk_per_trade = position_value / leverage
+        # 4. Calculate Position Notional Size based on Risk
+        # Notional = RiskBudget / StopLossPct
+        # Example: $12 Risk / 0.05 SL = $240 Position
+        if stop_loss_pct <= 0:
+            # If no strategy SL provided, imply one from leverage
+            # High leverage = tight stop = larger notional to maintain same risk budget
+            safe_leverage = max(1.0, leverage)
+            stop_loss_pct = self.fallback_stop_loss_pct / safe_leverage
             
-            # Check if we have enough capital
-            if max_risk_per_trade > available_capital:
-                self.logger.warning(
-                    f"Cannot bump {symbol} to min value ${MIN_ORDER_VALUE}: "
-                    f"Requires ${max_risk_per_trade:.2f} margin, have ${available_capital:.2f}"
-                )
-                return 0.0, 0.0, leverage
-                
-            self.logger.info(
-                f"Bumped position size for {symbol} from ${original_value:.2f} to ${position_value:.2f} "
-                f"(min order value)"
-            )
-
-        position_size = position_value / current_price
+        raw_position_notional = risk_budget / stop_loss_pct
         
-        # The margin required is the actual capital at risk
-        margin_required = max_risk_per_trade
+        # 5. Apply Position Limits (Concentration Cap)
+        # User requested 10% Max Limit per position
+        max_pos_pct = float(self.config['trading'].get('max_position_size_percentage', 10.0)) / 100.0
+        max_allowed_notional = equity * max_pos_pct
         
-        # Ensure we don't exceed the maximum risk per trade
-        if margin_required > max_position_size:
-            margin_required = max_position_size
-            position_value = margin_required * leverage
-            position_size = position_value / current_price
+        final_position_notional = min(raw_position_notional, max_allowed_notional)
         
-        # Ensure we don't exceed maximum position size limits
-        max_position_value = max_position_size * leverage
-        max_position_size_units = max_position_value / current_price if current_price > 0 else 0.0
+        # 6. Apply Minimum Order Value
+        MIN_ORDER_VALUE = 12.0
+        if final_position_notional < MIN_ORDER_VALUE:
+            # If we can't meet min order, check if we can bump it without exceeding MAX risk too much
+            # (Allow small bump for functionality)
+            if final_position_notional > 0:
+                final_position_notional = MIN_ORDER_VALUE
         
-        if position_size > max_position_size_units:
-            position_size = max_position_size_units
-            position_value = position_size * current_price
-            margin_required = position_value / leverage
+        # 7. Calculate Position Size (Units) and Margin Required
+        position_size = final_position_notional / current_price if current_price > 0 else 0.0
+        margin_required = final_position_notional / leverage
         
-        # Additional safety check: ensure margin required doesn't exceed available capital
+        # 8. Check Capital Availability
+        # Ensure we have enough free margin
         if margin_required > available_capital * (1 - self.margin_buffer_percentage / 100):
-            # Reduce position size to fit within available capital
-            max_margin_allowed = available_capital * (1 - self.margin_buffer_percentage / 100)
-            margin_required = max_margin_allowed
-            position_value = margin_required * leverage
-            position_size = position_value / current_price
-        
-        self.logger.info(f"Position calculation for {symbol}: size={position_size:.4f}, margin=${margin_required:.2f}, leverage={leverage:.1f}x")
-        self.logger.info(f"  - Max position size: ${max_position_size:.2f}")
+            # Scale down to fit
+            margin_required = available_capital * (1 - self.margin_buffer_percentage / 100)
+            final_position_notional = margin_required * leverage
+            position_size = final_position_notional / current_price
+            
         self.logger.info(
-            f"  - Budget risk: ${budget_risk_per_trade:.2f} (base_risk_pct={base_risk_pct*100:.2f}%, "
-            f"conf_mult={confidence_mult:.2f}, vol_mult={vol_mult:.2f})"
+            f"Sizing {symbol}: Risk=${risk_budget:.2f} (1%), SL={stop_loss_pct*100:.1f}%, "
+            f"Notional=${final_position_notional:.2f}, Lev={leverage}x"
         )
-        self.logger.info(f"  - Available capital: ${available_capital:.2f}")
-        self.logger.info(f"  - Position value: ${position_value:.2f}")
         
         return position_size, margin_required, leverage
     

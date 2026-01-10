@@ -24,7 +24,7 @@ import numpy as np
 import pandas as pd
 from dataclasses import dataclass, field
 from enum import Enum
-from src.utils.statistics import adfuller, engle_granger
+from src.utils.statistics import adfuller, engle_granger, calculate_annualized_volatility
 
 
 
@@ -142,10 +142,11 @@ class DynamicPairSelector:
         self.weight_diversification = weights.get('diversification', 0.15)
         self.weight_historical = weights.get('historical_performance', 0.15)
         
-        # Volatility parameters
+        # Volatility parameters (Annualized)
         volatility_config = selection_config.get('volatility', {})
-        self.optimal_volatility_min = volatility_config.get('optimal_min', 0.02)  # 2% daily
-        self.optimal_volatility_max = volatility_config.get('optimal_max', 0.08)  # 8% daily
+        # Defaults ~ 40% - 150% Annualized Volatility
+        self.optimal_volatility_min = volatility_config.get('optimal_min', 0.40)
+        self.optimal_volatility_max = volatility_config.get('optimal_max', 1.50)
         self.volatility_lookback_days = volatility_config.get('lookback_days', 14)
         
         # Cluster parameters
@@ -283,13 +284,12 @@ class DynamicPairSelector:
                 else:
                     return 0.5, 0.0  # Neutral if no data
             else:
-                # Calculate actual volatility from returns
-                returns = prices.pct_change().dropna()
-                if len(returns) < 3:
-                    return 0.5, 0.0
-                
-                # Daily volatility (standard deviation of returns)
-                volatility = returns.std()
+                # Calculate actual annualized volatility
+                prices_series = prices
+                if isinstance(prices, pd.DataFrame):
+                    prices_series = prices['close']
+                    
+                volatility = calculate_annualized_volatility(prices_series)
             
             # Score based on optimal range
             if self.optimal_volatility_min <= volatility <= self.optimal_volatility_max:

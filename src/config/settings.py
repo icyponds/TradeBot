@@ -101,7 +101,7 @@ def load_config() -> Dict[str, Any]:
             
             # Portfolio-based position sizing
             "use_portfolio_based_sizing": os.getenv("USE_PORTFOLIO_BASED_SIZING", "true").lower() == "true",
-            "max_position_size_percentage": float(os.getenv("MAX_POSITION_SIZE_PERCENTAGE", "25.0")),  # Max % of portfolio per position
+            "max_position_size_percentage": float(os.getenv("MAX_POSITION_SIZE_PERCENTAGE", "40.0")),  # Max % of portfolio per position (Balanced: 40%)
             "max_positions_percentage": float(os.getenv("MAX_POSITIONS_PERCENTAGE", "90.0")),  # Max % of portfolio in all positions
             
             # Order monitoring settings
@@ -265,21 +265,19 @@ def load_config() -> Dict[str, Any]:
         
         # Leverage Management Configuration
         "leverage_management": {
-            # "base_leverage" removed - strategies must specify explicitly or default to 1.0
+            # Volatility Targeting & Risk Management
+            "risk_per_trade_pct": float(os.getenv("RISK_PER_TRADE_PCT", "3.0")),  # 3% Risk Budget
+            "target_annual_volatility": float(os.getenv("TARGET_ANNUAL_VOLATILITY", "0.40")),  # 40% Target Vol
+            "fallback_stop_loss_pct": 0.05,
+            
+            # Dynamic Leverage Constraints
+            "min_leverage": float(os.getenv("LEVERAGE_MIN", "0.5")),  # Allow deleveraging for high vol
             "signal_adjustment_max": float(os.getenv("LEVERAGE_SIGNAL_ADJUSTMENT_MAX", "0.5")),
             "volatility_min": float(os.getenv("LEVERAGE_VOLATILITY_MIN", "0.1")),
-            "min_leverage": float(os.getenv("LEVERAGE_MIN", "1.5")),  # Increased from 1.0
-            # "max_leverage" removed - now fully dynamic based on asset limits
+            
+            # Strategy Adjustments (Optional fine-tuning)
             "ma_strategy_adjustment": float(os.getenv("LEVERAGE_MA_STRATEGY_ADJUSTMENT", "1.1")),
             "rsi_strategy_adjustment": float(os.getenv("LEVERAGE_RSI_STRATEGY_ADJUSTMENT", "0.9")),
-
-            # Phase-1: budget-vs-ceiling sizing. Caps define the ceiling; base_risk_pct defines the average.
-            "base_risk_per_trade_pct": float(os.getenv("BASE_RISK_PER_TRADE_PCT", "0.50")),
-            "min_risk_multiplier": float(os.getenv("MIN_RISK_MULTIPLIER", "0.25")),
-            "max_risk_multiplier": float(os.getenv("MAX_RISK_MULTIPLIER", "4.00")),
-            # Apply a mild volatility scaling to margin-at-risk (in addition to leverage adjustment).
-            # g(vol) = (1/(1+max(vol,0)))^power
-            "vol_risk_scale_power": float(os.getenv("VOL_RISK_SCALE_POWER", "0.50")),
         },
         
         # Strategy Configuration

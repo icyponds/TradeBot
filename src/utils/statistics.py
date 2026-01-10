@@ -263,3 +263,40 @@ def calculate_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     rsi = 100 - (100 / (1 + rs))
     return rsi
 
+
+def calculate_annualized_volatility(prices: Union[pd.Series, np.ndarray], window: int = 30) -> float:
+    """
+    Calculate annualized volatility for a price series.
+    
+    Assumes daily data or resamples appropriately.
+    Standard crypto convention: Vol * sqrt(365) for daily data.
+    
+    Args:
+        prices: Price series
+        window: Lookback window (default 30)
+        
+    Returns:
+        Annualized volatility (decimal, e.g. 0.40 for 40%)
+    """
+    if isinstance(prices, np.ndarray):
+        prices = pd.Series(prices)
+        
+    if len(prices) < 2:
+        return 0.0
+        
+    returns = prices.pct_change().dropna()
+    
+    if len(returns) == 0:
+        return 0.0
+    
+    # Calculate volatility (std dev of returns)
+    if len(returns) > window:
+        vol = returns.rolling(window=window).std().iloc[-1]
+    else:
+        vol = returns.std()
+        
+    # Scale to annualized (assuming daily returns)
+    annualized_vol = vol * np.sqrt(365)
+    
+    return float(annualized_vol) if not np.isnan(annualized_vol) else 0.0
+

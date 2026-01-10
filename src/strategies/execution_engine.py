@@ -15,6 +15,7 @@ from src.utils.leverage_manager import LeverageManager
 from src.utils.portfolio_manager import PortfolioManager
 from src.utils.performance_tracker import PerformanceTracker
 from src.utils.pair_selector import DynamicPairSelector
+from src.utils.statistics import calculate_annualized_volatility
 
 class ExecutionEngine:
     """
@@ -113,57 +114,15 @@ class ExecutionEngine:
             asset_meta = self.market_api.get_asset_meta(symbol)
             asset_max_leverage = float(asset_meta.get('maxLeverage', 100.0)) if asset_meta else 100.0
             
-            # 2. Calculate Dynamic Leverage (Respecting Asset Max & Strategy Request)
-            passed_leverage = float(signal.get('leverage')) if signal.get('leverage') is not None else None
-            
-            leverage = self.leverage_manager.calculate_dynamic_leverage(
-                symbol, strategy_name, signal['signal_strength'], 
-                signal.get('market_volatility', 0.0), current_price,
-                asset_max_leverage=asset_max_leverage,
-                strategy_leverage=passed_leverage
-            )
-            # Explicitly cast to int as exchange requires integer leverage
-            leverage = int(leverage)
-            
-            # 3. Enforce Leverage on Exchange
-            try:
-                # Check current leverage state
-                current_positions = self.market_api.get_positions()
-                current_pos = next((p for p in current_positions if p['symbol'] == symbol), None)
-                
-                needs_update = True
-                if current_pos:
-                    # Parse current leverage from position data
-                    # Structure usually: {'type': 'cross', 'value': 20}
-                    curr_lev_data = current_pos.get('leverage', {})
-                    if isinstance(curr_lev_data, dict):
-                        curr_lev_val = int(curr_lev_data.get('value', -1))
-                    else:
-                        curr_lev_val = int(curr_lev_data)
-                        
-                    if curr_lev_val == leverage:
-                        needs_update = False
-                        
-                if needs_update:
-                    # Update leverage on exchange BEFORE placing order
-                    self.market_api.update_leverage(symbol, leverage, is_cross=True)
-                    
-            except Exception as e:
-                self.logger.warning(f"Leverage update check failed for {symbol}: {e}. Proceeding with calculated leverage {leverage}x.")
-
-            # 4. Recalculate Sizing with Final Leverage
-            # We must recalculate because the signal's original size estimation might have used a different leverage assumption
-            position_size, margin_required, _ = self.leverage_manager.calculate_leveraged_position_size(
-                symbol, current_price, 
-                self.portfolio_manager.calculate_available_capital_for_trading() if self.portfolio_manager else 10000,
-                strategy_name, signal['signal_strength'], signal.get('market_volatility', 0.0),
-                asset_max_leverage=asset_max_leverage
-            )
+            # 2. Ensure Market Volatility (Annualized) & Context
+            market_volatility = signal.get('market_volatility', 0.0)
+            if market_volatility <= 0.0:
+                 market_volatility = self.calculate_market_volatility(ohlcv)
+                 signal['market_volatility'] = market_volatility # Backfill for context
 
             signal_strength = signal['signal_strength']
-            market_volatility = signal['market_volatility']
             
-            # === STOP LOSS CALCULATION ===
+            # 3. Pre-Calculate Stop Loss (to enable Risk-Based Sizing)
             strategy = strategies_map[strategy_name]
             
             # Build signal context
@@ -175,14 +134,63 @@ class ExecutionEngine:
                 'signal_strength': signal_strength,
             }
             
-            # 1. Strategy-specific stop loss (optional - only if method exists)
-            # Most strategies defer to risk layer by not implementing this method
+            # Check for Strategy-specific stop loss
+            strategy_stop_loss = None
+            stop_loss_pct_for_sizing = 0.0
+            
             if hasattr(strategy, 'calculate_stop_loss') and callable(getattr(strategy, 'calculate_stop_loss')):
-                strategy_stop_loss = strategy.calculate_stop_loss(
-                    current_price, side, signal_context
-                )
-            else:
-                strategy_stop_loss = None
+                strategy_stop_loss = strategy.calculate_stop_loss(current_price, side, signal_context)
+                
+                if strategy_stop_loss is not None and current_price > 0:
+                     # Calculate implied percentage
+                     stop_loss_pct_for_sizing = abs(current_price - strategy_stop_loss) / current_price
+            
+            # 4. Calculate Sizing & Leverage
+            # We pass the calculated stop_loss_pct so LeverageManager can size based on risk budget.
+            # If stop_loss_pct is 0.0, LeverageManager will infer one based on leverage (safety fallback).
+            
+            position_size, margin_required, leverage = self.leverage_manager.calculate_leveraged_position_size(
+                symbol, current_price, 
+                self.portfolio_manager.calculate_available_capital_for_trading() if self.portfolio_manager else 10000,
+                strategy_name, signal['signal_strength'], market_volatility,
+                asset_max_leverage=asset_max_leverage,
+                stop_loss_pct=stop_loss_pct_for_sizing
+            )
+            
+            # Explicitly cast to int as exchange requires integer leverage
+            leverage = int(leverage)
+            
+            # 5. Enforce Leverage on Exchange
+            try:
+                # Check current leverage state
+                current_positions = self.market_api.get_positions()
+                current_pos = next((p for p in current_positions if p['symbol'] == symbol), None)
+                
+                needs_update = True
+                if current_pos:
+                    # Parse current leverage from position data
+                    curr_lev_data = current_pos.get('leverage', {})
+                    if isinstance(curr_lev_data, dict):
+                        curr_lev_val = int(curr_lev_data.get('value', -1))
+                    else:
+                        curr_lev_val = int(curr_lev_data)
+                        
+                    if curr_lev_val == leverage:
+                        needs_update = False
+                        
+                if needs_update:
+                    self.market_api.update_leverage(symbol, leverage, is_cross=True)
+                    
+            except Exception as e:
+                self.logger.warning(f"Leverage update check failed for {symbol}: {e}. Proceeding with leverage {leverage}x.")
+
+            signal_strength = signal['signal_strength']
+            market_volatility = signal['market_volatility']
+            
+            # 7. Final Stop Loss Determination (Account Based Fallback)
+            # Note: strategy_stop_loss is already calculated above for sizing.
+            # We revisit it here to ensure it respects account safety limits logic.
+            
             
             # 2. Global safety net: Max X% of account value loss per trade
             account_equity = self.portfolio_manager.total_equity if self.portfolio_manager else 10000
@@ -870,11 +878,28 @@ class ExecutionEngine:
             else:
                 return 0.5
                 
-        if len(df) < 20:
-            return 0.5
-        returns = df['close'].pct_change().dropna()
-        volatility = returns.std() * math.sqrt(252)
-        return min(1.0, volatility)
+    def calculate_market_volatility(self, ohlcv: Dict[str, pd.DataFrame]) -> float:
+        """
+        Calculate annualized market volatility.
+        
+        Args:
+            ohlcv: OHLCV data
+            
+        Returns:
+            Annualized volatility (decimal, e.g. 0.40)
+        """
+        # Find best timeframe
+        for tf in ['15m', '1h', '4h', '1d']:
+            if tf in ohlcv and len(ohlcv[tf]) > 20:
+                return calculate_annualized_volatility(ohlcv[tf]['close'])
+                
+        # Fallback to any timeframe
+        if ohlcv:
+            df = next(iter(ohlcv.values()))
+            if len(df) > 2:
+                return calculate_annualized_volatility(df['close'])
+                
+        return 0.40  # Default to target vol if no data
 
     def save_positions_to_db(self):
         """Save current positions to the database."""
