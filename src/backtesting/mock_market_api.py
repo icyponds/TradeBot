@@ -6,6 +6,12 @@ import pandas as pd
 import math
 from src.api.interface import MarketInterface
 
+class MockOhlcvCache:
+    """Mock OHLCV Cache matching the real API structure."""
+    def __init__(self):
+        from collections import defaultdict
+        self.cache = defaultdict(dict)
+
 class MockMarketAPI(MarketInterface):
     """
     Mock implementation of HyperliquidAPI for backtesting.
@@ -16,9 +22,6 @@ class MockMarketAPI(MarketInterface):
         self.config = config
         self.logger = logging.getLogger(__name__)
         
-        # Simulation State
-        self.current_time = None  # Updated by BacktestEngine
-        # Structure: {symbol: {timeframe: DataFrame}}
         # Simulation State
         self.current_time = None  # Updated by BacktestEngine
         # Structure: {symbol: {timeframe: DataFrame}}
@@ -46,9 +49,8 @@ class MockMarketAPI(MarketInterface):
         # WebSocket Subscription State (Mock)
         self._subscribed_symbols = set()
         
-        # Cache for strategy checks
-        from collections import defaultdict
-        self.ohlcv_cache = defaultdict(dict)
+        # Cache for strategy checks (Match real API structure)
+        self.ohlcv_cache = MockOhlcvCache()
         
         # Initialize current_time to the earliest data point to allow pair selection before run()
         # This prevents "Simulation time not set" errors during StrategyManager init
@@ -176,9 +178,8 @@ class MockMarketAPI(MarketInterface):
             return None
             
         # Update cache to satisfy StrategyManager check
-        # Convert DataFrame to list of dicts or just store DataFrame if len() works
-        # StrategyManager expects len(cached) >= 5
-        self.ohlcv_cache[symbol][timeframe] = filtered_df
+        # StrategyManager expects .cache[symbol][timeframe]
+        self.ohlcv_cache.cache[symbol][timeframe] = filtered_df
             
         return filtered_df
         
@@ -481,6 +482,19 @@ class MockMarketAPI(MarketInterface):
             'funding_rate': self.get_funding_rate(symbol) or 0.0,
             'volume_24h': 10000000.0
         }
+
+    def get_asset_meta(self, symbol: str) -> Dict[str, Any]:
+        """Mock asset metadata."""
+        return {
+            'maxLeverage': 50,
+            'szDecimals': 4,
+            'onlyIsolated': False,
+            'name': symbol
+        }
+
+    def update_leverage(self, symbol: str, leverage: int, is_cross: bool = True) -> Dict[str, Any]:
+        """Mock update leverage."""
+        return {'status': 'ok'}
 
     def set_funding_data(self, funding_data: Dict[str, pd.DataFrame]):
         """Inject historical funding rates."""
