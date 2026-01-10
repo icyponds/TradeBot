@@ -156,7 +156,6 @@ class ExecutionEngine:
                 asset_max_leverage=asset_max_leverage,
                 stop_loss_pct=stop_loss_pct_for_sizing
             )
-            
             # Explicitly cast to int as exchange requires integer leverage
             leverage = int(leverage)
             
