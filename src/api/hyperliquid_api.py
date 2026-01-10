@@ -2273,26 +2273,31 @@ class HyperliquidAPI(MarketInterface):
                 else:
                     exec_price = current_price * (1 - slippage_mult)
                 
-                # CRITICAL FIX: Round to valid tick size
-                if market_type == "spot":
-                    # For spot, use basic rounding (Hyperliquid spot is often 6-8 decimals, 
-                    # but _round_to_tick is 5 sig figs. Sticking to safer 6 decimals for now 
-                    # as spot tick sizes vary wildly)
-                    exec_price = round(exec_price, 6)
-                    # Also try _round_to_tick for spot if it's producing better results
-                    # exec_price = self._round_to_tick(exec_price, trading_symbol) 
-                else:
-                    # For Perps (Native + HIP-3), strictly use 5 sig figs logic
-                    exec_price = self._round_to_tick(exec_price, trading_symbol)
+                # CRITICAL FIX: Round to valid tick size with strict logic
+                # Pass sz_decimals and market type to enforce decimal caps
+                exec_price = self._round_to_tick(
+                    exec_price, 
+                    symbol=trading_symbol,
+                    sz_decimals=sz_decimals,
+                    is_perp=(market_type != "spot")
+                )
                 
                 self.logger.debug(
                     f"Order attempt {attempt + 1}/{max_attempts}: {side} {remaining_size} "
                     f"{display_symbol} @ {exec_price:.6f} (slippage: {slippage_bps}bps)"
                 )
                 
-                # Place limit order (using 'Ioc' effectively makes it a market order with protection)
-                # Note: We use execute_order mainly for "Smart Market" behavior
+                # Place IOC order (smart market execution)
                 if market_type == "spot":
+                    # Spot order
+                    response = self._rate_limited_call(
+                        self.exchange.order,
+                        trading_symbol,
+                        is_buy,
+                        remaining_size,
+                        exec_price,
+                        {"limit": {"tif": "Ioc"}}
+                    )
                     # Spot order
                     response = self._rate_limited_call(
                         self.exchange.order,
@@ -2522,11 +2527,23 @@ class HyperliquidAPI(MarketInterface):
                     exec_price = current_price * (1 + slippage)
                 else:
                     exec_price = current_price * (1 - slippage)
-                exec_price = self._round_to_tick(exec_price, symbol)
+                exec_price = self._round_to_tick(
+                    exec_price, 
+                    symbol=symbol,
+                    sz_decimals=sz_decimals,
+                    # Safe default: assume strict perp rules unless explicitly spot (place_order is generic)
+                    # Ideally place_order should take market_type, but for now we enforce stricter rules
+                    is_perp=True 
+                )
                 tif = "Ioc"  # Immediate or cancel for market orders
             else:
                 # Explicit limit price
-                exec_price = self._round_to_tick(price, symbol)
+                exec_price = self._round_to_tick(
+                    price, 
+                    symbol=symbol,
+                    sz_decimals=sz_decimals,
+                    is_perp=True
+                )
                 tif = "Gtc"  # Good til cancel for limit orders
             
             response = self._rate_limited_call(
@@ -3341,13 +3358,18 @@ class HyperliquidAPI(MarketInterface):
         tick_size = 10 ** (magnitude - 4)
         return tick_size
     
-    def _round_to_tick(self, price: float, symbol: Optional[str] = None) -> float:
+    def _round_to_tick(self, price: float, symbol: Optional[str] = None, sz_decimals: Optional[int] = None, is_perp: bool = True) -> float:
         """
-        Round price to valid tick size for Hyperliquid.
+        Round price to valid tick size based on Hyperliquid rules:
+        1. Max 5 significant figures.
+        2. Max decimals = (6 for perps, 8 for spot) - sz_decimals.
+           (Official formula: Price decimals <= MAX_DECIMALS - szDecimals)
         
         Args:
             price: The price to round
-            symbol: Optional symbol for future per-asset tick sizes
+            symbol: Optional symbol (unused now, but kept for compatibility)
+            sz_decimals: Size decimals for the asset (required for rule #2)
+            is_perp: True for perps/hip3, False for spot
             
         Returns:
             Price rounded to valid tick size
@@ -3355,18 +3377,25 @@ class HyperliquidAPI(MarketInterface):
         if price <= 0:
             return price
         
-        tick_size = self._get_tick_size(price)
-        rounded = round(price / tick_size) * tick_size
-        
-        # Ensure we don't have floating point artifacts
-        # Determine decimal places from tick size
+        # Rule 1: 5 Significant Figures
         import math
-        if tick_size >= 1:
-            decimals = 0
-        else:
-            decimals = -int(math.floor(math.log10(tick_size)))
+        magnitude = math.floor(math.log10(abs(price)))
+        # 5 significant figures means tick is 10^(magnitude - 4)
+        tick_size_sig = 10 ** (magnitude - 4)
+        rounded_sig = round(price / tick_size_sig) * tick_size_sig
         
-        return round(rounded, decimals)
+        # Rule 2: Max Decimals
+        # Perps: 6, Spot: 8 (minus szDecimals)
+        # Default sz_decimals to 0 if not provided (safety)
+        eff_sz_decimals = sz_decimals if sz_decimals is not None else 0
+        max_decimals_base = 6 if is_perp else 8
+        max_allowed_decimals = max_decimals_base - eff_sz_decimals
+        
+        # Determine strict decimal rounding
+        # We need to round the result of Rule 1 to meet Rule 2
+        final_price = round(rounded_sig, max_allowed_decimals)
+        
+        return final_price
     
     def is_data_available(self, symbol: str) -> bool:
         """Check if data is available for a symbol."""
