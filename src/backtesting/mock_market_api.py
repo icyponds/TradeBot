@@ -128,20 +128,16 @@ class MockMarketAPI(MarketInterface):
         # Find row at or before current_time
         # Assumes df is indexed by datetime
         try:
-            # Efficient lookup: Use get_ohlcv to reuse strictly-past logic
-            # This ensures we get the Close of the previous completed candle (e.g. 09:00 candle at 10:00)
-            # which represents the price at 10:00.
+            # Efficient lookup: Binary search for index
+            # side='left' returns index i such that all df.index[:i] < self.current_time
+            idx = df.index.searchsorted(self.current_time, side='left')
             
-            # Use '1h' (or whatever is passed) history, get last 1
-            # But we are inside get_current_price which doesn't take timeframe.
-            # We already have 'df' from 1h logic above.
-            
-            # Simple manual check:
-            mask = df.index < self.current_time
-            if not mask.any():
+            if idx == 0:
                 return None
-            last_valid_idx = df.index[mask][-1]
-            return float(df.loc[last_valid_idx]['close'])
+                
+            # The row strictly before current_time is at idx - 1
+            last_valid_idx = idx - 1
+            return float(df.iloc[last_valid_idx]['close'])
         except Exception as e:
             self.logger.error(f"Error getting price for {symbol}: {e}")
             return None
@@ -165,9 +161,18 @@ class MockMarketAPI(MarketInterface):
             return None
             
         # Filter data strictly before current_time to avoid look-ahead bias
-        # (Assuming Open Time convention: row at 10:00 contains data for 10:00-11:00)
-        mask = df.index < self.current_time
-        filtered_df = df.loc[mask].tail(limit)
+        # Optimization: Use binary search for slicing instead of boolean mask O(N)
+        
+        # Get insertion index for current_time
+        idx = df.index.searchsorted(self.current_time, side='left')
+        
+        # We want everything before this index
+        if idx == 0:
+            return None
+            
+        # Slice the last 'limit' rows up to 'idx'
+        start_idx = max(0, idx - limit)
+        filtered_df = df.iloc[start_idx:idx]
         
         if filtered_df.empty:
             return None
