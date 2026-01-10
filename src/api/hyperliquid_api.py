@@ -1658,6 +1658,13 @@ class HyperliquidAPI(MarketInterface):
             return False
             
         try:
+            # Check for isolated-only assets
+            asset_info = self._get_asset_info_for_symbol(symbol)
+            if asset_info and asset_info.get('onlyIsolated', False):
+                if is_cross:
+                    self.logger.warning(f"Asset {symbol} only supports Isolated Margin. Forcing is_cross=False.")
+                    is_cross = False
+            
             self.logger.info(f"Updating leverage for {symbol} to {leverage}x (Cross: {is_cross})")
             result = self.exchange.update_leverage(leverage, symbol, is_cross)
             
