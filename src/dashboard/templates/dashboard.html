@@ -780,12 +780,14 @@
                     }
 
                     // Margin estimation (Spot = 100%, Perp = assume from strategy/pos leverage or default)
-                    // Since we don't have per-leg leverage, we'll mark Spot as fully funded.
+                    // Margin estimation (Prioritize backend value)
                     let marginDisplay = '--';
-                    if (leg.is_spot || leg.market_type === 'spot') {
+                    if (leg.margin !== undefined && leg.margin !== null && leg.margin !== 0) {
+                        marginDisplay = formatCurrency(leg.margin);
+                    } else if (leg.is_spot || leg.market_type === 'spot') {
                         marginDisplay = formatCurrency(notional);
                     } else if (pos.leverage) {
-                        // Estimate based on position leverage if available
+                        // LEgacy fallback: Estimate based on position leverage if available
                         marginDisplay = formatCurrency(notional / pos.leverage);
                     }
 

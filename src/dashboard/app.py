@@ -301,7 +301,29 @@ def _format_multi_leg_position(multi_pos) -> Dict[str, Any]:
                 leg_pnl = (leg.entry_price - current_price) * leg.size
         
         total_net_pnl += leg_pnl
-        
+
+        # Get margin/liquidation info
+        margins = None
+        liquidation_price = None
+        leg_margin_used = 0.0
+
+        if _strategy_manager and _strategy_manager.market_api:
+            try:
+                if leg.market_type == 'spot':
+                    # For spot, margin is effectively the full notional value
+                    if current_price:
+                        leg_margin_used = leg.size * current_price
+                else:
+                    # For perp, fetch actual margin used
+                    margin_info = _strategy_manager.market_api.get_position_margin_info(leg.symbol)
+                    if margin_info:
+                        liquidation_price = margin_info.get('liquidation_price')
+                        parts_margin = margin_info.get('margin_used', 0)
+                        # If the API returns 0 (cross margin sometimes?), fallback to approximate
+                        leg_margin_used = parts_margin if parts_margin > 0 else (current_price * leg.size / 10.0) # Assume 10x if missing
+            except Exception as e:
+                logger.debug(f"Error getting margin info for leg {leg.symbol}: {e}")
+
         legs_data.append({
             'symbol': leg.symbol,
             'market_type': leg.market_type,
@@ -311,10 +333,18 @@ def _format_multi_leg_position(multi_pos) -> Dict[str, Any]:
             'current_price': current_price,
             'unrealized_pnl': leg_pnl,
             'is_spot': leg.market_type == 'spot',
+            'margin': leg_margin_used,
+            'liquidation_price': liquidation_price
         })
     
     # Get metadata (funding rate info, etc.)
     metadata = multi_pos.metadata or {}
+
+    # Fallback for Capital at Risk if missing (sum of margins)
+    capital_at_risk = multi_pos.capital_at_risk
+    if not capital_at_risk or capital_at_risk == 0:
+        # Sum margins from legs
+        capital_at_risk = sum(l.get('margin', 0) for l in legs_data)
     
     return {
         'position_id': multi_pos.position_id,
@@ -326,7 +356,7 @@ def _format_multi_leg_position(multi_pos) -> Dict[str, Any]:
         'legs': legs_data,
         'leg_count': len(legs_data),
         'net_delta': multi_pos.net_delta,
-        'capital_at_risk': multi_pos.capital_at_risk,
+        'capital_at_risk': capital_at_risk,
         # Prefer calculated net PnL, fallback to metadata
         'unrealized_pnl': total_net_pnl if total_net_pnl != 0 else metadata.get('unrealized_pnl'),
         'funding_collected': metadata.get('funding_collected', 0),
