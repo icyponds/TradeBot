@@ -782,8 +782,8 @@ class HyperliquidAPI(MarketInterface):
         # Rate limiter configuration
         rate_config = config.get('api', {}).get('rate_limit', {})
         self.rate_limiter = RateLimiter(
-            calls_per_second=rate_config.get('calls_per_second', 10),
-            burst_size=rate_config.get('burst_size', 20)
+            calls_per_second=rate_config.get('calls_per_second', 50),
+            burst_size=rate_config.get('burst_size', 100)
         )
         
         # Circuit breaker configuration
