@@ -10,7 +10,14 @@ class MockOhlcvCache:
     """Mock OHLCV Cache matching the real API structure."""
     def __init__(self):
         from collections import defaultdict
+        from collections import defaultdict
         self.cache = defaultdict(dict)
+    
+    def ensure_timeframe(self, symbol: str, timeframe: str, maxlen: int):
+        """Mock implementation of ensure_timeframe."""
+        if timeframe not in self.cache[symbol]:
+            from collections import deque
+            self.cache[symbol][timeframe] = deque(maxlen=maxlen)
 
 class MockMarketAPI(MarketInterface):
     """
@@ -500,6 +507,11 @@ class MockMarketAPI(MarketInterface):
     def subscribe_symbol(self, symbol):
         """Mock subscription."""
         self._subscribed_symbols.add(symbol)
+        
+        # Parity with HyperliquidAPI: Initialize standard timeframes
+        standard_timeframes = ['5m', '15m', '1h', '4h', '1d']
+        for tf in standard_timeframes:
+            self.ohlcv_cache.ensure_timeframe(symbol, tf, maxlen=1000)
         
     def unsubscribe_symbol(self, symbol):
         """Mock unsubscription."""

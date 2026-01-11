@@ -270,8 +270,16 @@ class OhlcvCache:
         return list(self.cache[symbol][timeframe])
     
     def ensure_timeframe(self, symbol: str, timeframe: str, maxlen: int):
-        _ = self.cache[symbol][timeframe]
-        self.cache[symbol][timeframe].maxlen = maxlen
+        # Initialize if not exists
+        if timeframe not in self.cache[symbol]:
+            self.cache[symbol][timeframe] = deque(maxlen=maxlen)
+        else:
+            # Check if maxlen needs update (deque.maxlen is read-only)
+            dq = self.cache[symbol][timeframe]
+            if dq.maxlen != maxlen:
+                new_dq = deque(dq, maxlen=maxlen)
+                self.cache[symbol][timeframe] = new_dq
+        
         self.maxlen[symbol][timeframe] = maxlen
     
     def _get_bar_key(self, ts: float, timeframe: str) -> Optional[float]:
@@ -3333,6 +3341,14 @@ class HyperliquidAPI(MarketInterface):
     def subscribe_symbol(self, symbol: str):
         """Subscribe to real-time data for a symbol."""
         self._subscribed_symbols.add(symbol)
+        
+        # Initialize tracking for standard timeframes
+        # This ensures background assets (not in active strategies) still build candle history
+        # and persist it to DB via verify-on-write pattern
+        standard_timeframes = ['5m', '15m', '1h', '4h', '1d']
+        for tf in standard_timeframes:
+            self.ohlcv_cache.ensure_timeframe(symbol, tf, maxlen=1000)
+            
         # SDK handles subscriptions via allMids automatically
 
     def unsubscribe_symbol(self, symbol: str):
