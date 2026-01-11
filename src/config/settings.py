@@ -208,18 +208,7 @@ def load_config() -> Dict[str, Any]:
                 "reserve_capital_pct": float(os.getenv("STRATEGY_EXPLORATION_RESERVE_PCT", "0.10")),
             },
 
-            # Phase-1: cost-aware entry gating for mean-reversion/stat-arb strategies.
-            # Enforce a minimum additional Z-score over the strategy's entry threshold so we avoid
-            # churning near the boundary where fees/slippage dominate.
-            "entry_hurdles": {
-                "enabled": os.getenv("ENTRY_HURDLES_ENABLED", "true").lower() == "true",
-                "zscore_buffer": float(os.getenv("ENTRY_HURDLE_ZSCORE_BUFFER", "0.30")),
-                "apply_to": [
-                    s.strip()
-                    for s in os.getenv("ENTRY_HURDLE_APPLY_TO", "ou_mean_reversion,stat_arb").split(",")
-                    if s.strip()
-                ],
-            },
+
 
             # Per-strategy weight caps/floors to keep high-churn cohorts small while
             # allowing strong performers to scale. Values are fractions of total weight.
@@ -337,6 +326,7 @@ def load_config() -> Dict[str, Any]:
                 "min_correlation": float(os.getenv("STAT_ARB_MIN_CORRELATION", "0.8")),
                 "correlation_lookback": int(os.getenv("STAT_ARB_CORRELATION_LOOKBACK", "100")),
                 "update_interval_hours": int(os.getenv("STAT_ARB_UPDATE_INTERVAL_HOURS", "24")),
+                "zscore_hurdle_buffer": 0.0, # Strategy-specific hurdle buffer (0.0 = disabled/neutral)
             },
             
             # Cointegration-enhanced Statistical Arbitrage
@@ -372,6 +362,7 @@ def load_config() -> Dict[str, Any]:
                 "estimation_lookback": int(os.getenv("OU_ESTIMATION_LOOKBACK", "100")),
                 "min_data_points": int(os.getenv("OU_MIN_DATA_POINTS", "50")),
                 "cache_ttl_hours": int(os.getenv("OU_CACHE_TTL_HOURS", "4")),
+                "zscore_hurdle_buffer": 0.3, # Specific buffer for mean reversion
             },
             
 

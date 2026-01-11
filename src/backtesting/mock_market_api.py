@@ -420,7 +420,9 @@ class MockMarketAPI(MarketInterface):
             'sz': size,
             'time': int(self.current_time.timestamp() * 1000) if self.current_time else int(datetime.now().timestamp() * 1000),
             'oid': order_id,
-            'dir': f"Open {side.capitalize()}" if result.get('status') == 'filled' else "Close" # Simplified dir
+            'dir': f"Open {side.capitalize()}" if result.get('status') == 'filled' else "Close", # Simplified dir
+            'fee': fee, # ADDED: Fee for PnL calculations
+            'feeToken': 'USDC' # ADDED: Token for fee
         }
         self.fills.append(fill_record)
         
@@ -480,29 +482,34 @@ class MockMarketAPI(MarketInterface):
              }
         }
 
-    def get_asset_info(self) -> Dict[str, Any]:
-        """Mock asset info."""
+    def get_asset_info(self) -> Optional[Dict[str, Any]]:
+        """
+        Get mock asset info.
+        For verification tests, we scan the mock filesystem/cache AND provide some synthetic defaults.
+        """
         universe = []
-        universe = []
-        for symbol in self.historical_data.keys():
-            # Get current price
-            price = self.get_current_price(symbol) or 100.0
-            
-            # Basic asset info structure with market data
+        
+        # 1. Native Assets (Defaults)
+        for sym in ["BTC", "ETH", "SOL", "HBAR", "USDC"]:
             universe.append({
-                'name': symbol,
-                'szDecimals': 4,
+                'name': sym,
+                'szDecimals': 2,
                 'maxLeverage': 50,
-                'onlyIsolated': False,
-                # Market stats for selector
-                'openInterest': 10_000_000.0, # High OI
-                'volume24h': 100_000_000.0,   # High volume
-                'markPrice': price,
-                'bid': price - 0.05,
-                'ask': price + 0.05,
-                'fundingRate': 0.0001
+                'dex': 'Native'
             })
-        return {'universe': universe}
+            
+        # 2. HIP-3 Assets (Synthetic for tests)
+        # Any symbol starting with a lowercase letter is theoretically HIP-3
+        # But we can just add a specific placeholder for tests
+        universe.append({
+            'name': 'xyzABCD',
+            'szDecimals': 4,
+            'maxLeverage': 20,
+            'dex': 'Hyperliquidity',
+            'assetId': 12345
+        })
+
+        return {'universe': universe, 'meta': {'universe': universe}}
         
     def subscribe_symbol(self, symbol):
         """Mock subscription."""

@@ -91,7 +91,7 @@ class TestGhostPositionSync(unittest.TestCase):
         self.mock_performance_tracker.record_trade_from_position.assert_called_once()
         call_kwargs = self.mock_performance_tracker.record_trade_from_position.call_args[1]
         self.assertEqual(call_kwargs['symbol'], 'BTC')
-        self.assertEqual(call_kwargs['exit_reason'], 'External Close')
+        self.assertEqual(call_kwargs['exit_reason'], 'Manual / Unknown')
         
         # Verify: Position removed from local state
         self.assertNotIn('BTC', positions_dict)

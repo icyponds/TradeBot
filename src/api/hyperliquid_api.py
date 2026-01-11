@@ -1222,46 +1222,102 @@ class HyperliquidAPI(MarketInterface):
     
     @with_retry(max_attempts=3, base_delay=0.5)
     def get_asset_info(self) -> Optional[Dict[str, Any]]:
-        """Get asset information for all perpetuals."""
+        """Get asset information for all perpetuals (Native + HIP-3 if enabled)."""
         cache_key = "asset_info"
         cached = self.cache.get(cache_key)
         if cached is not None:
             return cached
         
         def _fetch():
-            meta_and_ctxs = self.info.meta_and_asset_ctxs()
+            try:
+                # 1. Fetch Native Universe
+                meta_and_ctxs = self.info.meta_and_asset_ctxs()
+                
+                if len(meta_and_ctxs) < 2:
+                    return None
+                
+                meta = meta_and_ctxs[0]
+                asset_contexts = meta_and_ctxs[1]
+                
+                universe = []
+                
+                # Helper to process an asset batch
+                def _process_assets(asset_list, ctx_list, dex_name="Native"):
+                    for i, asset in enumerate(asset_list):
+                        ctx = ctx_list[i] if i < len(ctx_list) else {}
+                        
+                        oi_tokens = float(ctx.get('openInterest', 0))
+                        mark_price = float(ctx.get('markPx', 0))
+                        
+                        asset_data = {
+                            'name': asset['name'],
+                            'maxLeverage': asset.get('maxLeverage', 0),
+                            'szDecimals': asset.get('szDecimals', 0),
+                            'openInterest': oi_tokens * mark_price,
+                            'volume24h': float(ctx.get('dayNtlVlm', 0)),
+                            'markPrice': mark_price,
+                            'funding': float(ctx.get('funding', 0)),
+                            'bid': float(ctx.get('impactPxs', [0, 0])[0]) if ctx.get('impactPxs') else 0,
+                            'ask': float(ctx.get('impactPxs', [0, 0])[1]) if ctx.get('impactPxs') and len(ctx.get('impactPxs')) > 1 else 0,
+                            'dex': dex_name
+                        }
+                        
+                        # Add IDs if present (crucial for execution)
+                        if 'assetId' in asset:
+                            asset_data['assetId'] = asset['assetId']
+                            
+                        universe.append(asset_data)
+
+                        # [HIP-3 EXECUTION FIX] Patch SDK maps
+                        # The underlying 'exchange' object uses these maps to translate "xyz" -> asset index 123
+                        if self.exchange and hasattr(self.exchange, 'info'):
+                            coin_name = asset['name']
+                            
+                            # Patch name_to_coin
+                            if coin_name not in self.exchange.info.name_to_coin:
+                                self.exchange.info.name_to_coin[coin_name] = asset
+                                # self.logger.debug(f"[HIP-3] Patched SDK map: {coin_name}")
+                            
+                            # Patch coin_to_asset
+                            if 'assetId' in asset and coin_name not in self.exchange.info.coin_to_asset:
+                                self.exchange.info.coin_to_asset[coin_name] = asset['assetId']
+                                self.logger.debug(f"[HIP-3] Patched execution ID: {coin_name} -> {asset['assetId']}")
+
+                # Process Native
+                _process_assets(meta['universe'], asset_contexts)
+
+                # 2. Fetch HIP-3 Universes (if enabled)
+                if self.hip3_enabled:
+                    try:
+                        dexs = self.info.perp_dexs()
+                        # Skip first (Native) per documentation/convention
+                        for dex in dexs[1:]:
+                            if not isinstance(dex, dict): continue
+                            dex_name = dex.get('name')
+                            if not dex_name: continue
+                            
+                            try:
+                                # Fetch DEX specific context
+                                res = self.info.post("/info", {"type": "metaAndAssetCtxs", "dex": dex_name})
+                                if res and len(res) >= 2:
+                                    _process_assets(res[0]['universe'], res[1], dex_name=dex_name)
+                            except Exception as dex_err:
+                                self.logger.warning(f"Failed to fetch HIP-3 DEX {dex_name}: {dex_err}")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to discover HIP-3 universes: {e}")
+
+                result = {'universe': universe, 'meta': meta} # Keeping original 'meta' structure for compatibility
+                return result
             
-            if len(meta_and_ctxs) < 2:
+            except Exception as e:
+                self.logger.error(f"Error fetching asset info: {e}")
                 return None
             
-            meta = meta_and_ctxs[0]
-            asset_contexts = meta_and_ctxs[1]
-            
-            universe = []
-            for i, asset in enumerate(meta['universe']):
-                ctx = asset_contexts[i] if i < len(asset_contexts) else {}
-                
-                oi_tokens = float(ctx.get('openInterest', 0))
-                mark_price = float(ctx.get('markPx', 0))
-                
-                universe.append({
-                    'name': asset['name'],
-                    'maxLeverage': asset.get('maxLeverage', 0),
-                    'szDecimals': asset.get('szDecimals', 0),
-                    'openInterest': oi_tokens * mark_price,
-                    'volume24h': float(ctx.get('dayNtlVlm', 0)),
-                    'markPrice': mark_price,
-                    'funding': float(ctx.get('funding', 0)),
-                    'bid': float(ctx.get('impactPxs', [0, 0])[0]) if ctx.get('impactPxs') else 0,
-                    'ask': float(ctx.get('impactPxs', [0, 0])[1]) if ctx.get('impactPxs') and len(ctx.get('impactPxs')) > 1 else 0,
-                })
-            
-            result = {'universe': universe, 'meta': meta}
-            # Cache for 5 minutes (300s) to prevent 429
-            self.cache.set(cache_key, result, ttl=300)
-            return result
-        
-        return self._rate_limited_call(_fetch)
+        result = self._rate_limited_call(_fetch)
+        if result:
+             self.cache.set(cache_key, result, ttl=300.0)
+             
+        return result
     
     @with_retry(max_attempts=3, base_delay=0.5)
     def get_ohlcv(self, symbol: str, timeframe: str = '1h', limit: int = 100) -> Optional[pd.DataFrame]:

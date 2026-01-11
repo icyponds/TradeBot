@@ -191,7 +191,7 @@ class StrategyManager:
                     pos_obj = self.positions[symbol]
                     
                     # Try to find the closing fill to log accurate history
-                    exit_price, exit_time, reason = self._find_closing_fill(symbol, pos_obj.side, pos_obj.entry_time)
+                    exit_price, exit_time, reason, fee = self._find_closing_fill(symbol, pos_obj.side, pos_obj.entry_time)
                     if exit_price == 0.0:
                          exit_price = pos_obj.entry_price # Fallback
                     
@@ -209,7 +209,8 @@ class StrategyManager:
                         exit_reason=f"Startup Cleanup ({reason})",
                         stop_loss=pos_obj.stop_loss,
                         take_profit=pos_obj.take_profit,
-                        leverage=pos_obj.leverage
+                        leverage=pos_obj.leverage,
+                        fees=fee
                     )
                     
                     # Construct Position ID (same logic as ExecutionEngine.save_positions_to_db)
@@ -426,11 +427,11 @@ class StrategyManager:
                     continue
                     
                 # Try to find the closing fill from recent fills
-                exit_price, exit_time, reason = self._find_closing_fill(symbol, pos.side, pos.entry_time)
+                exit_price, exit_time, reason, fee = self._find_closing_fill(symbol, pos.side, pos.entry_time)
                 if exit_price == 0.0:
                      exit_price = pos.entry_price # Fallback
                 
-                self.logger.warning(f"Closing ghost position {symbol} at {exit_price} ({reason})")
+                self.logger.warning(f"Closing ghost position {symbol} at {exit_price} ({reason}) Fee: {fee}")
                 
                 # Record the trade for PnL tracking
                 self.performance_tracker.record_trade_from_position(
@@ -446,7 +447,8 @@ class StrategyManager:
                     exit_reason=reason,
                     stop_loss=pos.stop_loss,
                     take_profit=pos.take_profit,
-                    leverage=pos.leverage
+                    leverage=pos.leverage,
+                    fees=fee
                 )
                 
                 # Remove from local state
@@ -499,51 +501,88 @@ class StrategyManager:
                     
             # Persist updated state
             if changes_made:
-                self.execution_engine.save_positions_to_db()
+                    self.execution_engine.save_positions_to_db()
             
         except Exception as e:
             self.logger.error(f"Error syncing positions with exchange: {e}")
 
-    def _find_closing_fill(self, symbol: str, side: str, entry_time: datetime) -> Tuple[float, datetime, str]:
+    def _find_closing_fill(self, symbol: str, side: str, entry_time: datetime) -> Tuple[float, datetime, str, float]:
         """
-        Find the closing fill for a position.
+        Search for a fill that closed this position.
         
         Args:
-            symbol: Asset symbol
-            side: Position side ('long' or 'short')
-            entry_time: Time of entry
+            symbol: Trading pair
+            side: 'long' or 'short' (Position side)
+            entry_time: Time the position was opened (to filter newer fills)
             
         Returns:
-            Tuple of (exit_price, exit_time, reason)
+            Tuple: (Exit Price, Exit Time, Reason, Fee)
         """
         exit_price = 0.0
-        reason = "External Close"
+        reason = "Manual / Unknown"
         fill_time_dt = datetime.now()
+        fee = 0.0
         
         try:
-            fills = self.market_api.get_user_fills(limit=100)
-            # Look for a fill that closed this position (opposite side, after entry)
-            close_side = 'Sell' if side == 'long' else 'Buy'
+            # Increase limit to look further back (Fix for ghost position not found if older than 100 trades)
+            fills = self.market_api.get_user_fills(limit=1000)
             
+            # Look for a fill that closed this position (opposite side, after entry)
+            # Handle 'S'/'Sell' vs 'B'/'Buy' normalization
+            target_side_norm = 'S' if side == 'long' else 'B'
+            
+            # Entry timestamp (ms)
             entry_ts = entry_time.timestamp() * 1000 if entry_time else 0
             
+            # CLOCK SKEW TOLERANCE: Allow fills up to 60 seconds BEFORE our recorded entry time
+            # because local clock might be ahead of exchange clock.
+            skew_tolerance_ms = 60 * 1000
+            search_start_ts = entry_ts - skew_tolerance_ms
+            
+            self.logger.info(f"Searching for closing fill for {symbol} {target_side_norm} after {datetime.fromtimestamp(search_start_ts/1000)} (Entry: {entry_time})")
+            
             for fill in fills:
-                if fill.get('coin') == symbol and fill.get('side') == close_side:
-                    fill_time = fill.get('time', 0)
-                    if fill_time > entry_ts:
-                        exit_price = float(fill.get('px', 0.0))
-                        fill_time_dt = datetime.fromtimestamp(fill_time / 1000)
+                # 1. Symbol check
+                if fill.get('coin') != symbol:
+                    continue
+                    
+                # 2. Side check (Normalize fill side)
+                fill_side = str(fill.get('side', '')).upper()
+                # Handle full words 'SELL', 'BUY' or short 'S', 'B'
+                fill_side_norm = 'S' if fill_side.startswith('S') else 'B' if fill_side.startswith('B') else '?'
+                
+                if fill_side_norm != target_side_norm:
+                    continue
+                    
+                # 3. Time check
+                fill_time = fill.get('time', 0)
+                if fill_time > search_start_ts:
+                    # FOUND A MATCH
+                    exit_price = float(fill.get('px', 0.0))
+                    fill_time_dt = datetime.fromtimestamp(fill_time / 1000)
+                    
+                    # Extract Fee
+                    # API returns 'fee' in various formats, usually float string or float
+                    fee_raw = fill.get('fee', 0.0)
+                    try:
+                        fee = float(fee_raw)
+                    except (ValueError, TypeError):
+                        fee = 0.0
+                    
+                    if 'liquidation' in str(fill.get('dir', '')).lower():
+                        reason = "Liquidation"
+                    else:
+                        reason = "External Close"
                         
-                        if 'liquidation' in str(fill.get('dir', '')).lower():
-                            reason = "Liquidation"
-                        else:
-                            reason = "External Close"
-                        return exit_price, fill_time_dt, reason
+                    self.logger.info(f"Found match: {fill_time_dt} @ {exit_price} (Fee: {fee})")
+                    return exit_price, fill_time_dt, reason, fee
+            
+            self.logger.warning(f"No matching closing fill found for ghost {symbol} in last 1000 fills.")
                         
         except Exception as e:
             self.logger.debug(f"Could not fetch fills for ghost reconciliation: {e}")
             
-        return exit_price, fill_time_dt, reason
+        return exit_price, fill_time_dt, reason, fee
 
     def _sync_positions_periodic(self):
         """Periodically sync positions with exchange (every 5 minutes)."""
@@ -1591,25 +1630,35 @@ class StrategyManager:
                 signal = strategy.generate_signal(symbol, ohlcv)
             
             if signal:
-                # Phase-1: entry hurdle for MR/stat-arb to avoid churn around the boundary where costs dominate.
+                # Phase-1: Strategy-Specific Entry Hurdle
+                # Only valid if the strategy explicitly configures 'zscore_hurdle_buffer'.
+                # Strict check: No global fallback.
                 try:
-                    hurdle_cfg = (self.config.get("risk_management", {}) or {}).get("entry_hurdles", {}) or {}
-                    if hurdle_cfg.get("enabled", False) and signal.get("action") == "open":
-                        apply_to = set(hurdle_cfg.get("apply_to", []) or [])
-                        if any(strategy_name.startswith(prefix) for prefix in apply_to):
+                    if signal.get("action") == "open":
+                        # Resolve config
+                        strat_type = getattr(strategy, 'strategy_name', strategy_name).replace('_15m','').replace('_1h','').replace('_4h','')
+                        strat_specific_cfg = self.config.get('strategies', {}).get(strat_type, {})
+                        
+                        # Check strictly for the existence of the key
+                        if "zscore_hurdle_buffer" in strat_specific_cfg:
+                            buf = float(strat_specific_cfg["zscore_hurdle_buffer"])
+                            
+                            # Get Z and Threshold
                             z = signal.get("zscore")
                             if z is None:
                                 z = signal.get("z_score")
+                            
                             entry_thr = getattr(strategy, "zscore_entry", None)
                             if entry_thr is None:
                                 entry_thr = getattr(strategy, "z_score_entry", None)
-                            buf = float(hurdle_cfg.get("zscore_buffer", 0.30))
-
+                                
                             if z is not None and entry_thr is not None:
+                                # Logic: |Z| must be >= (EntryThr + Buffer) to pass
+                                # e.g. Thr=1.5, Buf=0.3 -> Need |Z| >= 1.8
                                 if abs(float(z)) < (float(entry_thr) + buf):
                                     self.logger.info(
-                                        f"Entry hurdle: skipping {strategy_name}/{symbol} (|z|={float(z):.2f} < "
-                                        f"{float(entry_thr):.2f}+{buf:.2f})"
+                                        f"Entry hurdle: skipping {strategy_name}/{symbol} "
+                                        f"(|z|={float(z):.2f} < {float(entry_thr):.2f}+{buf:.2f})"
                                     )
                                     return None
                 except Exception as e:
