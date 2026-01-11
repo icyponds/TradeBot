@@ -950,7 +950,10 @@ class StrategyManager:
         if not position:
             return '1h'  # Default fallback
         
-        strategy_name = position.get('strategy', '')
+        if hasattr(position, 'strategy'):
+            strategy_name = position.strategy
+        else:
+            strategy_name = position.get('strategy', '')
         # Extract timeframe from strategy name suffix (e.g., 'stat_arb_15m' -> '15m')
         # Check longer timeframes first to prevent '15m' from matching '5m'
         for tf in ['15m', '1d', '4h', '1h', '5m']:
@@ -1013,10 +1016,18 @@ class StrategyManager:
     
     def _check_exit_conditions_with_price(self, symbol: str, position: dict, current_price: float) -> None:
         """Check basic exit conditions (stop loss, take profit) using provided price."""
-        entry_price = position.get('entry_price', 0)
-        stop_loss = position.get('stop_loss')
-        take_profit = position.get('take_profit')
-        side = position.get('side', 'long')
+        if hasattr(position, 'entry_price'):
+            # Object access
+            entry_price = position.entry_price or 0
+            stop_loss = position.stop_loss
+            take_profit = position.take_profit
+            side = position.side or 'long'
+        else:
+            # Dict access
+            entry_price = position.get('entry_price', 0)
+            stop_loss = position.get('stop_loss')
+            take_profit = position.get('take_profit')
+            side = position.get('side', 'long')
         
         if not entry_price:
             return

@@ -300,14 +300,17 @@ class TradeDatabase:
                 VALUES (?, ?, ?, ?, ?)
             """, (datetime.now().isoformat(), equity, pnl, trade_id, trade_symbol))
     
-    def get_all_trades(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
-        """Get all trades, optionally limited."""
+    def get_all_trades(self, limit: Optional[int] = None, offset: int = 0) -> List[Dict[str, Any]]:
+        """Get all trades, optionally limited and paginated."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             
             query = f"SELECT * FROM {self.table_prefix}trades ORDER BY exit_time DESC"
+            
             if limit:
                 query += f" LIMIT {limit}"
+                if offset > 0:
+                     query += f" OFFSET {offset}"
             
             cursor.execute(query)
             return [dict(row) for row in cursor.fetchall()]

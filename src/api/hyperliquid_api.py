@@ -821,7 +821,7 @@ class HyperliquidAPI(MarketInterface):
         self._pending_init_symbols: set = set()
         
         # Async persistence worker
-        self._persistence_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="db_persist")
+        self._persistence_executor = ThreadPoolExecutor(max_workers=20, thread_name_prefix="db_persist")
         
         # Wire up OhlcvCache callback for DB persistence on boundary crossing
         self.ohlcv_cache.on_bar_complete_callback = self._on_bar_complete
@@ -1513,13 +1513,17 @@ class HyperliquidAPI(MarketInterface):
             start_ms = timestamp * 1000
             end_ms = start_ms + self._get_interval_ms(timeframe) - 1
             
-            # Use candles_snapshot to fetch strictly finalized data
-            candles = self.info.candles_snapshot(
-                self._get_api_symbol(symbol), 
-                timeframe, 
-                start_ms, 
-                end_ms + 1000 # Buffer to ensure we cover the range
-            )
+            # Wrapper for rate-limited fetch
+            def _fetch():
+                return self.info.candles_snapshot(
+                    self._get_api_symbol(symbol), 
+                    timeframe, 
+                    start_ms, 
+                    end_ms + 1000 # Buffer to ensure we cover the range
+                )
+
+            # Use rate limiter to prevent spamming on batch persistence
+            candles = self._rate_limited_call(_fetch)
             
             # Find the exact candle matching our timestamp
             target_candle = None

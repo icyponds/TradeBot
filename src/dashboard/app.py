@@ -20,7 +20,7 @@ from datetime import datetime
 from typing import Optional, Dict, Any, List
 from threading import Thread
 
-from flask import Flask, render_template, jsonify
+from flask import Flask, render_template, jsonify, request
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -102,13 +102,17 @@ def create_dashboard_app() -> Flask:
     
     @app.route('/api/trades')
     def get_trades():
-        """Get recent trade history."""
+        """Get recent trade history with pagination."""
         try:
-            trades = _get_trades_data()
+            page = int(request.args.get('page', 1))
+            limit = int(request.args.get('limit', 25))
+            
+            result = _get_trades_data(page=page, limit=limit)
             return jsonify({
                 'success': True,
                 'timestamp': datetime.now().isoformat(),
-                'data': trades
+                'data': result['trades'],
+                'pagination': result['pagination']
             })
         except Exception as e:
             logger.error(f"Error getting trades: {e}")
@@ -593,21 +597,26 @@ def _get_trade_stats() -> Dict[str, Any]:
     return stats
 
 
-def _get_trades_data(limit: int = 50) -> List[Dict[str, Any]]:
-    """Get recent trade history."""
+def _get_trades_data(page: int = 1, limit: int = 25) -> Dict[str, Any]:
+    """Get recent trade history with pagination."""
     trades = []
+    total_count = 0
+    total_pages = 0
     
     if _strategy_manager is not None and hasattr(_strategy_manager, 'performance_tracker'):
         try:
-            # Prefer "since bot started" when available; otherwise show last 7 days.
-            start_time = getattr(_strategy_manager, "session_start_time", None)
-            if start_time:
-                raw_trades = _strategy_manager.performance_tracker.db.get_trades_in_range(start_time, datetime.now())
-            else:
-                raw_trades = _strategy_manager.performance_tracker.db.get_recent_trades(7)
+            db = _strategy_manager.performance_tracker.db
+            
+            # Get total count first
+            total_count = db.get_trade_count()
+            total_pages = (total_count + limit - 1) // limit if limit > 0 else 1
+            
+            # Calculate offset
+            offset = (page - 1) * limit
+            
+            # Fetch paginated trades
+            raw_trades = db.get_all_trades(limit=limit, offset=offset)
 
-            # Limit after fetching (TradeDatabase.get_recent_trades takes days, not limit)
-            raw_trades = raw_trades[:limit]
             for trade in raw_trades:
                 # Format trade data for display
                 exit_time = trade.get('exit_time') or trade.get('timestamp')
@@ -648,10 +657,20 @@ def _get_trades_data(limit: int = 50) -> List[Dict[str, Any]]:
         except Exception as e:
             logger.error(f"Error fetching trades: {e}")
     
-    # Sort by exit time (most recent first)
-    trades.sort(key=lambda x: x.get('exit_time') or '', reverse=True)
+    # Sort by exit time (most recent first) - though DB usually handles ordering
+    # trades.sort(key=lambda x: x.get('exit_time') or '', reverse=True)
     
-    return trades
+    return {
+        'trades': trades,
+        'pagination': {
+            'page': page,
+            'limit': limit,
+            'total_trades': total_count,
+            'total_pages': total_pages, 
+            'has_next': page < total_pages,
+            'has_prev': page > 1
+        }
+    }
 
 
 def run_dashboard(strategy_manager=None, market_api=None, port: int = 5050, debug: bool = False):
