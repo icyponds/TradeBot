@@ -1639,8 +1639,21 @@ class StrategyManager:
             return collected_signals[0]
         
         # Group signals by direction (buy vs sell)
-        buy_signals = [s for s in collected_signals if s['signal'].get('signal') == 'buy']
-        sell_signals = [s for s in collected_signals if s['signal'].get('signal') == 'sell']
+        # Verify signal integrity first
+        buy_signals = []
+        sell_signals = []
+        
+        for s in collected_signals:
+            sig_data = s.get('signal')
+            if not isinstance(sig_data, dict):
+                self.logger.error(f"Invalid signal type for {symbol} from {s.get('strategy_name')}: {type(sig_data)} (expected dict)")
+                continue
+                
+            direction = sig_data.get('signal')
+            if direction == 'buy':
+                buy_signals.append(s)
+            elif direction == 'sell':
+                sell_signals.append(s)
         
         # Check for conflict (both buy and sell signals exist)
         if buy_signals and sell_signals:
