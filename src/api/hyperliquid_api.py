@@ -22,6 +22,7 @@ from functools import wraps
 from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 import pandas as pd
+from src.utils.trade_database import TradeDatabase
 
 # Lazy imports for SDK modules - these are expensive and should only be
 # imported when actually needed. This speeds up test setup significantly.
@@ -822,6 +823,7 @@ class HyperliquidAPI(MarketInterface):
         
         # Queue for symbols that failed initialization
         self._pending_init_symbols: set = set()
+        self._initializing_symbols: set = set() # Track in-flight async inits
         
         # Async persistence worker
         self._persistence_executor = ThreadPoolExecutor(max_workers=20, thread_name_prefix="db_persist")
@@ -1573,10 +1575,10 @@ class HyperliquidAPI(MarketInterface):
                     candles = self.info.post("/info", {"type": "candleSnapshot", "req": req})
                 except Exception as e_raw:
                      self.logger.warning(f"Failed raw candle fetch for {api_symbol}: {e_raw}")
-                     return None
+                     raise # Re-raise for retry
             except Exception as e:
                 self.logger.error(f"Error fetching candles for {api_symbol}: {e}")
-                return None
+                raise # Re-raise to trigger _rate_limited_call retry logic
                 
             if not candles:
                 return None
@@ -1792,8 +1794,8 @@ class HyperliquidAPI(MarketInterface):
                 for tf in timeframes:
                     self._append_current_candle(symbol, tf, api_symbol)
                 
-                # Step 2: Subscribe to WebSocket immediately after
-                self.subscribe_symbol(symbol)
+                # Step 2: Finalize subscription (caches, active set)
+                self._finalize_subscription(symbol)
                 
                 # Step 3: Verify subscription is active
                 if symbol in self._subscribed_symbols:
@@ -1809,15 +1811,36 @@ class HyperliquidAPI(MarketInterface):
         self.logger.warning(f"Deferred {symbol} initialization to retry queue")
         return False
     
+    def _async_init_worker(self, symbol: str, api_symbol: str):
+        """Background worker for initializing live data."""
+        try:
+            self._initializing_symbols.add(symbol)
+            success = self._initialize_live_data(symbol, api_symbol)
+            if not success:
+               self.logger.debug(f"Async init failed for {symbol}, kept in pending.")
+        except Exception as e:
+            self.logger.error(f"Async init worker error for {symbol}: {e}")
+            self._pending_init_symbols.add(symbol)
+        finally:
+             self._initializing_symbols.discard(symbol)
+
     def retry_pending_subscriptions(self):
-        """Called periodically to retry failed subscriptions."""
+        """Called periodically to retry failed subscriptions (ASYNC)."""
         if not self._pending_init_symbols:
             return
         
+        # Snapshot copy to iterate safely
         pending = list(self._pending_init_symbols)
-        self.logger.info(f"Retrying {len(pending)} pending subscriptions: {pending}")
         
+        # Don't log spam if empty or just checking
+        if not pending: return
+
+        # Rate limit submission to avoid flooding executor if queue is huge
+        submitted = 0
         for symbol in pending:
+            if symbol in self._initializing_symbols:
+                continue
+                
             # Re-attempt with fresh data
             api_symbol = symbol  # May need conversion for spot
             asset_info = self._get_asset_info_for_symbol(symbol)
@@ -1826,10 +1849,11 @@ class HyperliquidAPI(MarketInterface):
                 if spot_api_name:
                     api_symbol = spot_api_name
             
-            self._initialize_live_data(symbol, api_symbol, max_retries=1)
-            
-            # Rate limit: small delay between symbols
-            time.sleep(0.2)
+            # Submit to background executor
+            self._persistence_executor.submit(self._async_init_worker, symbol, api_symbol)
+            submitted += 1
+            if submitted > 5: # Limit batch size to prevent storm
+                break
     
     def get_all_prices(self) -> Dict[str, float]:
         """Get current prices for all symbols."""
@@ -3631,24 +3655,32 @@ class HyperliquidAPI(MarketInterface):
     # =========================================================================
     
     def subscribe_symbol(self, symbol: str):
-        """Subscribe to real-time data for a symbol."""
+        """Subscribe to real-time data for a symbol (Non-Blocking)."""
+        if symbol in self._subscribed_symbols or symbol in self._initializing_symbols:
+             return
+
+        self.logger.info(f"Scheduling async subscription for {symbol}")
+        self._pending_init_symbols.add(symbol)
+        
+        # Determine API symbol
+        api_symbol = symbol
+        asset_info = self._get_asset_info_for_symbol(symbol)
+        if not asset_info:
+             spot = self.get_spot_api_name(symbol)
+             if spot: api_symbol = spot
+
+        self._persistence_executor.submit(self._async_init_worker, symbol, api_symbol)
+
+    def _finalize_subscription(self, symbol: str):
+        """Internal: Finalize subscription after data is ready."""
         self._subscribed_symbols.add(symbol)
         
         # Initialize tracking for standard timeframes
-        # This ensures background assets (not in active strategies) still build candle history
-        # and persist it to DB via verify-on-write pattern
         standard_timeframes = ['5m', '15m', '1h', '4h', '1d']
         for tf in standard_timeframes:
             self.ohlcv_cache.ensure_timeframe(symbol, tf, maxlen=1000)
-            
-            # Backfill history in background to prime cache and DB
-            # This ensures we have context for the rolling updates
-            self._persistence_executor.submit(
-                self.get_ohlcv,
-                symbol,
-                tf,
-                1000 # Limit
-            )
+            # Note: Explicit backfill removed here as it is handled by _initialize_live_data -> _append_current_candle
+            # AND the persistence verification logic.
             
         # SDK handles subscriptions via allMids automatically
 

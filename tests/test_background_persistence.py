@@ -59,8 +59,22 @@ class TestBackgroundPersistence:
         # Initially empty
         assert len(mock_api.ohlcv_cache.cache[symbol]) == 0
         
+        # Mock candles snapshot to return empty list (for _initialize_live_data)
+        mock_api.info.candles_snapshot.return_value = []
+        
         # Subscribe
         mock_api.subscribe_symbol(symbol)
+        
+        # SIMULATE ASYNC WORKER:
+        # subscribe_symbol submits _async_init_worker to the mocked executor.
+        # We must manually run it to trigger the side effects (cache initialization).
+        mock_api._persistence_executor.submit.assert_called()
+        args, _ = mock_api._persistence_executor.submit.call_args
+        worker_func = args[0]
+        worker_args = args[1:]
+        
+        # Run the worker synchronously
+        worker_func(*worker_args)
         
         # Should have initialized 5m, 15m, 1h, 4h, 1d
         expected_tfs = ['5m', '15m', '1h', '4h', '1d']
@@ -75,10 +89,13 @@ class TestBackgroundPersistence:
         """
         symbol = "ETH"
         
-        # Manually initialize for now if subscribe fix isn't applied yet
-        # (This test validates the end-to-end flow assuming init works)
-        # But for TDD, we want this to fail if subscribe doesn't work.
+        # Mock candles snapshot
+        mock_api.info.candles_snapshot.return_value = []
+        
+        # Subscribe and run worker
         mock_api.subscribe_symbol(symbol)
+        args, _ = mock_api._persistence_executor.submit.call_args
+        args[0](*args[1:]) # Run worker
         
         # Simulate a tick
         price = 2000.0

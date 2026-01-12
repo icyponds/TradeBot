@@ -49,16 +49,19 @@ class TestHyperliquidAPI:
         # BUT get_ohlcv now catches exceptions to attempt fallback.
         
         api_client.info = MagicMock()
-        # Mock initial failure
-        api_client.info.candles_snapshot.side_effect = Exception("Persistent Error")
+        # Mock initial failure (KeyError triggers fallback)
+        api_client.info.candles_snapshot.side_effect = KeyError("Symbol not found")
         # Mock fallback failure too (post method)
         api_client.info.post.side_effect = Exception("Fallback Failed")
         
+        # Force cache miss
+        api_client.ohlcv_cache.get = MagicMock(return_value=None)
+
         with patch.object(api_client, '_get_asset_info_for_symbol', return_value={'name': 'BTC'}):
             with patch('time.sleep'):
-                # Should NOT raise exception, but return None
-                result = api_client.get_ohlcv("BTC", "1h", limit=1)
-                assert result is None
+                # Should raise exception after retries exhausted (due to @with_retry)
+                with pytest.raises(Exception, match="Fallback Failed"):
+                    api_client.get_ohlcv("BTC", "1h", limit=1)
             
         # Verify calls - due to try/except in wrapper, @with_retry might still be active
         # on the internal _fetch function if I used it there. 
