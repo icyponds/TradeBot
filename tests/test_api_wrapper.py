@@ -59,15 +59,11 @@ class TestHyperliquidAPI:
 
         with patch.object(api_client, '_get_asset_info_for_symbol', return_value={'name': 'BTC'}):
             with patch('time.sleep'):
-                # Should raise exception after retries exhausted (due to @with_retry)
+                # Should raise exception after retries exhausted (_rate_limited_call raises)
                 with pytest.raises(Exception, match="Fallback Failed"):
                     api_client.get_ohlcv("BTC", "1h", limit=1)
             
-        # Verify calls - due to try/except in wrapper, @with_retry might still be active
-        # on the internal _fetch function if I used it there. 
-        # But get_ohlcv itself has the try/except block around the calls.
-        # Actually in my previous code read, get_ohlcv wraps logic in try/except.
-        # So exception is suppressed.
+        # Verify calls
         assert api_client.info.candles_snapshot.called
         
     def test_get_ohlcv_retry_logic(self, api_client):

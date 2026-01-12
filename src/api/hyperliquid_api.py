@@ -826,7 +826,8 @@ class HyperliquidAPI(MarketInterface):
         self._initializing_symbols: set = set() # Track in-flight async inits
         
         # Async persistence worker
-        self._persistence_executor = ThreadPoolExecutor(max_workers=20, thread_name_prefix="db_persist")
+        # Async persistence worker (limited to avoid API flooding)
+        self._persistence_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="db_persist")
         
         # Wire up OhlcvCache callback for DB persistence on boundary crossing
         self.ohlcv_cache.on_bar_complete_callback = self._on_bar_complete
@@ -1054,7 +1055,11 @@ class HyperliquidAPI(MarketInterface):
                 if "429" in err_str:  # Rate Limit
                     is_retryable = True
                 elif "500" in err_str or "502" in err_str or "503" in err_str: # Server Error
-                    is_retryable = True
+                    # (500, 'null') typically means "Symbol not found" or invalid request, do not retry
+                    if "(500, 'null')" in err_str:
+                        is_retryable = False
+                    else:
+                        is_retryable = True
                 elif "network" in err_str.lower() or "connection" in err_str.lower(): # Network
                     is_retryable = True
                     
@@ -1206,7 +1211,7 @@ class HyperliquidAPI(MarketInterface):
         # Last resort: REST call
         return self._get_price_from_rest(symbol)
 
-    @with_retry(max_attempts=3, base_delay=0.5)
+    # @with_retry removed: Avoid double retry logic (outer decorator * inner _rate_limited_call)
     def _get_bulk_market_data(self) -> Optional[Tuple[List[Any], List[Any]]]:
         """
         Get market data for all assets, cached for short duration.
@@ -1252,7 +1257,7 @@ class HyperliquidAPI(MarketInterface):
         
         return None
     
-    @with_retry(max_attempts=3, base_delay=0.5)
+    # @with_retry removed: Avoid double retry logic
     def get_market_data(self, symbol: str, timeframe: str = "1m") -> Optional[Dict[str, Any]]:
         """
         Get comprehensive market data for a symbol.
@@ -1331,7 +1336,7 @@ class HyperliquidAPI(MarketInterface):
             'timestamp': datetime.now(),
         }
     
-    @with_retry(max_attempts=3, base_delay=0.5)
+    # @with_retry removed: Avoid double retry logic
     def get_asset_info(self) -> Optional[Dict[str, Any]]:
         """Get asset information for all perpetuals (Native + HIP-3 if enabled)."""
         cache_key = "asset_info"
@@ -1430,7 +1435,7 @@ class HyperliquidAPI(MarketInterface):
              
         return result
     
-    @with_retry(max_attempts=3, base_delay=0.5)
+    # @with_retry removed: Avoid double retry logic (outer decorator * inner _rate_limited_call)
     def get_ohlcv(self, symbol: str, timeframe: str = '1h', limit: int = 100) -> Optional[pd.DataFrame]:
         """
         Get OHLCV candlestick data with in-memory rolling cache.
@@ -1845,9 +1850,16 @@ class HyperliquidAPI(MarketInterface):
             api_symbol = symbol  # May need conversion for spot
             asset_info = self._get_asset_info_for_symbol(symbol)
             if not asset_info:
-                spot_api_name = self.get_spot_api_name(symbol)
-                if spot_api_name:
-                    api_symbol = spot_api_name
+                # For spot assets: BTC_SPOT -> UBTC -> @109
+                if symbol in self.SPOT_INTERNAL_TO_API:
+                    api_token_name = self.SPOT_INTERNAL_TO_API[symbol]
+                    spot_api = self.get_spot_api_name(api_token_name)
+                    if spot_api:
+                        api_symbol = spot_api
+                else:
+                    spot_api = self.get_spot_api_name(symbol)
+                    if spot_api:
+                        api_symbol = spot_api
             
             # Submit to background executor
             self._persistence_executor.submit(self._async_init_worker, symbol, api_symbol)
@@ -1950,7 +1962,7 @@ class HyperliquidAPI(MarketInterface):
     # ACCOUNT & POSITIONS
     # =========================================================================
     
-    @with_retry(max_attempts=3, base_delay=0.5)
+    # @with_retry removed: Avoid double retry logic
     def get_account_balance(self) -> Optional[Dict[str, Any]]:
         """Get account balance and margin information."""
         cache_key = "account_balance"
@@ -1979,7 +1991,7 @@ class HyperliquidAPI(MarketInterface):
         
         return self._rate_limited_call(_fetch)
     
-    @with_retry(max_attempts=3, base_delay=0.5)
+    # @with_retry removed: Avoid double retry logic
     def get_positions(self) -> List[Dict[str, Any]]:
         """Get current positions."""
         cache_key = "positions"
@@ -3015,7 +3027,7 @@ class HyperliquidAPI(MarketInterface):
             self.logger.error(f"Error getting order status: {e}")
             return None
     
-    @with_retry(max_attempts=3, base_delay=0.5)
+    # @with_retry removed: Avoid double retry logic
     def get_open_orders(self) -> List[Dict[str, Any]]:
         """Get all open orders."""
         def _fetch():
@@ -3078,7 +3090,7 @@ class HyperliquidAPI(MarketInterface):
     # SPOT TRADING
     # =========================================================================
     
-    @with_retry(max_attempts=3, base_delay=0.5)
+    # @with_retry removed: Avoid double retry logic
     def get_spot_meta(self) -> Optional[Dict[str, Any]]:
         """Get spot market metadata."""
         try:
@@ -3666,8 +3678,19 @@ class HyperliquidAPI(MarketInterface):
         api_symbol = symbol
         asset_info = self._get_asset_info_for_symbol(symbol)
         if not asset_info:
-             spot = self.get_spot_api_name(symbol)
-             if spot: api_symbol = spot
+            # For spot assets: BTC_SPOT -> UBTC -> @109
+            if symbol in self.SPOT_INTERNAL_TO_API:
+                api_token_name = self.SPOT_INTERNAL_TO_API[symbol]  # BTC_SPOT -> UBTC
+                spot_api = self.get_spot_api_name(api_token_name)   # UBTC -> @109
+                if spot_api:
+                    api_symbol = spot_api
+                else:
+                    self.logger.warning(f"No @index found for spot {symbol} ({api_token_name})")
+            else:
+                # Might be a raw spot symbol like WOW, try direct lookup
+                spot_api = self.get_spot_api_name(symbol)
+                if spot_api:
+                    api_symbol = spot_api
 
         self._persistence_executor.submit(self._async_init_worker, symbol, api_symbol)
 
