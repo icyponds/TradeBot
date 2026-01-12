@@ -185,6 +185,10 @@ class DynamicPairSelector:
         self._data_lock = threading.Lock()  # Protects price_history access
         self._pairs_lock = threading.Lock()  # Protects selected_pairs access (prevents race with background fetcher)
         
+        # Background pair scanning
+        self._scan_thread: Optional[threading.Thread] = None
+        self._scan_in_progress = False
+        
         self.logger.info(f"Initialized DynamicPairSelector (Mode: {self.selection_mode.value})")
         self.logger.info(f"  Weights: Liquidity={self.weight_liquidity:.0%}, Volatility={self.weight_volatility:.0%}, "
                         f"Strategy={self.weight_strategy_fit:.0%}, Diversification={self.weight_diversification:.0%}, "
@@ -776,6 +780,7 @@ class DynamicPairSelector:
             for symbol in selected_pairs:
                 if hasattr(self.market_api, 'subscribe_symbol'):
                     self.market_api.subscribe_symbol(symbol)
+                    time.sleep(0.1)  # Throttle subscription dispatching to prevent executor overload
             
             # Start background data fetcher if there are queued assets
             if self.backfill_queue and not self._backfill_running:
@@ -1438,18 +1443,42 @@ class DynamicPairSelector:
                           Set to False for read-only access (e.g. dashboard).
         
         Data fetching runs independently in a background thread.
-        This method returns immediately with whatever pairs are available,
-        unless trigger_rescan is True and the interval has expired.
+        This method returns immediately with whatever pairs are available.
         
         Returns:
             List of current trading pairs (copy, safe to iterate)
         """
         if trigger_rescan and self.should_rescan():
-            return self.scan_and_select_pairs()
+            # Trigger background scan instead of blocking
+            self._trigger_background_scan()
         
         # Return a copy to prevent race condition with background thread
         with self._pairs_lock:
             return self.selected_pairs.copy()
+    
+    def _trigger_background_scan(self):
+        """Start a background scan if not already running."""
+        if self._scan_in_progress:
+            self.logger.debug("Background scan already in progress, skipping")
+            return
+        
+        self._scan_in_progress = True
+        self._scan_thread = threading.Thread(
+            target=self._background_scan_worker,
+            name="pair_scan",
+            daemon=True
+        )
+        self._scan_thread.start()
+        self.logger.info("Started background pair selection scan")
+    
+    def _background_scan_worker(self):
+        """Background worker for pair scanning."""
+        try:
+            self.scan_and_select_pairs()
+        except Exception as e:
+            self.logger.error(f"Background scan failed: {e}")
+        finally:
+            self._scan_in_progress = False
     
     def start_background_fetcher(self):
         """Start the background data fetching thread."""

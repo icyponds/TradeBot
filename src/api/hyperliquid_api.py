@@ -787,7 +787,7 @@ class HyperliquidAPI(MarketInterface):
         rate_config = config.get('api', {}).get('rate_limit', {})
         self.rate_limiter = RateLimiter(
             calls_per_second=rate_config.get('calls_per_second', 20),
-            burst_size=rate_config.get('burst_size', 50)
+            burst_size=rate_config.get('burst_size', 10)  # Lowered to prevent burst-induced 429s
         )
         
         # Circuit breaker configuration
@@ -826,8 +826,8 @@ class HyperliquidAPI(MarketInterface):
         self._initializing_symbols: set = set() # Track in-flight async inits
         
         # Async persistence worker
-        # Async persistence worker (limited to avoid API flooding)
-        self._persistence_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="db_persist")
+        # Async persistence worker (SINGLE worker to serialize API calls and prevent rate limit bursts)
+        self._persistence_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="db_persist")
         
         # Wire up OhlcvCache callback for DB persistence on boundary crossing
         self.ohlcv_cache.on_bar_complete_callback = self._on_bar_complete
@@ -1051,6 +1051,7 @@ class HyperliquidAPI(MarketInterface):
                 # Check for retryable errors
                 is_retryable = False
                 err_str = str(e)
+                # self.logger.debug(f"DEBUG RETRY CHECK: {err_str[:100]}...")
                 
                 if "429" in err_str:  # Rate Limit
                     is_retryable = True
@@ -1762,13 +1763,16 @@ class HyperliquidAPI(MarketInterface):
         return intervals.get(timeframe, 60 * 60 * 1000)
     
     def _append_current_candle(self, symbol: str, timeframe: str, api_symbol: str):
-        """Fetch in-progress candle to ensure no boundary gap."""
+        """Fetch in-progress candle to ensure no boundary gap. Uses rate limiter."""
         try:
             now_ms = int(time.time() * 1000)
             interval_ms = self._get_interval_ms(timeframe)
             current_bar_start = now_ms - (now_ms % interval_ms)
             
-            candles = self.info.candles_snapshot(api_symbol, timeframe, current_bar_start, now_ms)
+            # Route through rate limiter to prevent 429 bursts
+            def _fetch():
+                return self.info.candles_snapshot(api_symbol, timeframe, current_bar_start, now_ms)
+            candles = self._rate_limited_call(_fetch)
             if candles:
                 bar = {
                     'time': candles[-1]['t'] // 1000,
@@ -1793,25 +1797,27 @@ class HyperliquidAPI(MarketInterface):
         """
         timeframes = ['5m', '15m', '1h', '4h']
         
-        for attempt in range(max_retries):
-            try:
-                # Step 1: Fetch current in-progress candles for all timeframes
-                for tf in timeframes:
-                    self._append_current_candle(symbol, tf, api_symbol)
+        try:
+            # Step 1: Fetch current in-progress candles for all timeframes
+            for tf in timeframes:
+                self._append_current_candle(symbol, tf, api_symbol)
+                # [RATE-LIMIT] Throttle concurrent requests for same symbol to avoid burst limit (429)
+                time.sleep(0.5)
+            
+            # Step 2: Finalize subscription (caches, active set)
+            self._finalize_subscription(symbol)
+            
+            # Step 3: Verify subscription is active
+            if symbol in self._subscribed_symbols:
+                self.logger.info(f"Initialized live data for {symbol}")
+                self._pending_init_symbols.discard(symbol)
+                return True
                 
-                # Step 2: Finalize subscription (caches, active set)
-                self._finalize_subscription(symbol)
-                
-                # Step 3: Verify subscription is active
-                if symbol in self._subscribed_symbols:
-                    self.logger.info(f"Initialized live data for {symbol}")
-                    self._pending_init_symbols.discard(symbol)
-                    return True
-            except Exception as e:
-                self.logger.warning(f"Live data init failed for {symbol}: {e} (attempt {attempt+1}/{max_retries})")
-                time.sleep(0.3)
+        except Exception as e:
+            self.logger.warning(f"Live data init failed for {symbol}: {e}")
         
-        # After max_retries, add to pending queue and continue
+        # If we get here, initialization failed or was incomplete
+        # Add to pending queue and continue (background worker will pick it up)
         self._pending_init_symbols.add(symbol)
         self.logger.warning(f"Deferred {symbol} initialization to retry queue")
         return False
