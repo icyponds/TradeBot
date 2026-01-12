@@ -165,3 +165,24 @@ class TestHyperliquidAPI:
         result = api_client.ensure_spot_funds(50.0)
         
         assert result is False
+
+    def test_stop_cleans_up_resources(self, api_client):
+        """Verify stop() shuts down executor and clears cache."""
+        # Mock dependencies
+        api_client.health_monitor.stop = MagicMock()
+        api_client._persistence_executor.shutdown = MagicMock()
+        api_client._integrity_thread = MagicMock()
+        api_client._integrity_thread.is_alive.return_value = True
+        
+        # Explicitly set the event mock
+        api_client._stop_integrity_event = MagicMock()
+
+        api_client.stop()
+        
+        # Verify calls
+        api_client.health_monitor.stop.assert_called_once()
+        # Verify shutdown called with wait=False, cancel_futures=True
+        api_client._persistence_executor.shutdown.assert_called_with(wait=False, cancel_futures=True)
+        # Verify integrity thread stopped
+        assert api_client._stop_integrity_event.set.called
+        api_client._integrity_thread.join.assert_called_with(timeout=2.0)

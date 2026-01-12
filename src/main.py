@@ -154,7 +154,10 @@ def main():
         _strategy_manager.start()
         
     except KeyboardInterrupt:
-        pass  # Handled by signal handler
+        logger.info("Shutdown signal received")
+        if '_strategy_manager' in locals():
+            _strategy_manager.stop()
+            
     except Exception as e:
         logger = logging.getLogger(__name__)
         logger.error(f"Unexpected error: {e}", exc_info=True)

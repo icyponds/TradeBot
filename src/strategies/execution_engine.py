@@ -656,6 +656,9 @@ class ExecutionEngine:
             # Record composite position for margin checks
             self.leverage_manager.record_position(symbol, 'multi_leg', position_size, avg_entry_price, leverage, margin_required)
             
+            # Persist to database
+            self.save_positions_to_db()
+            
             self.logger.info(f"✅ Multi-leg position opened: {position_id} (Composite Price: {avg_entry_price:.6f})")
             
         except Exception as e:

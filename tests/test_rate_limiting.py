@@ -43,3 +43,25 @@ class TestRateLimiting:
         # Default burst size should be 10 (lowered from 50)
         assert api_client.rate_limiter.burst_size <= 20, \
             f"Burst size should be low to prevent 429s, got {api_client.rate_limiter.burst_size}"
+
+    def test_spot_meta_uses_rate_limiter(self, api_client):
+        """Verify get_spot_meta routes through _rate_limited_call."""
+        # Setup mock
+        api_client._rate_limited_call = MagicMock(return_value={})
+        
+        # Call method
+        api_client.get_spot_meta()
+        
+        # Verify
+        assert api_client._rate_limited_call.called, "get_spot_meta should use _rate_limited_call"
+
+    def test_spot_meta_and_ctx_uses_rate_limiter(self, api_client):
+        """Verify get_spot_meta_and_asset_ctxs routes through _rate_limited_call."""
+        # Setup mock to return tuple as expected by method
+        api_client._rate_limited_call = MagicMock(return_value=({}, []))
+        
+        # Call method
+        api_client.get_spot_meta_and_asset_ctxs()
+        
+        # Verify
+        assert api_client._rate_limited_call.called, "get_spot_meta_and_asset_ctxs should use _rate_limited_call"

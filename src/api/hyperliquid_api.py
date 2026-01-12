@@ -1156,19 +1156,19 @@ class HyperliquidAPI(MarketInterface):
         # Stop health monitor
         self.health_monitor.stop()
         
-        # Cleanup
-        self.cache.clear()
-        self.order_tracker.cleanup_old(max_age_hours=0)
-        
-        # Stop persistence executor
-        self._persistence_executor.shutdown(wait=False)
-        
-        self.logger.info("HyperliquidAPI stopped")
-        
         # Stop integrity thread
         self._stop_integrity_event.set()
         if self._integrity_thread and self._integrity_thread.is_alive():
             self._integrity_thread.join(timeout=2.0)
+            
+        # Stop persistence executor (wait=False to avoid hanging on pending tasks)
+        self._persistence_executor.shutdown(wait=False, cancel_futures=True)
+        
+        # Cleanup
+        self.cache.clear()
+        self.order_tracker.cleanup_old(max_age_hours=0)
+        
+        self.logger.info("HyperliquidAPI stopped")
 
     
     def test_connection(self) -> bool:
@@ -3105,7 +3105,9 @@ class HyperliquidAPI(MarketInterface):
             if cached:
                 return cached
                 
-            data = self.info.spot_meta()
+            def _fetch():
+                return self.info.spot_meta()
+            data = self._rate_limited_call(_fetch)
             
             # Cache for 5 minutes
             self.cache.set(cache_key, data, ttl=300)
@@ -3117,7 +3119,9 @@ class HyperliquidAPI(MarketInterface):
     def get_spot_meta_and_asset_ctxs(self) -> Optional[Tuple]:
         """Get spot metadata and asset contexts."""
         try:
-            result = self.info.spot_meta_and_asset_ctxs()
+            def _fetch():
+                return self.info.spot_meta_and_asset_ctxs()
+            result = self._rate_limited_call(_fetch)
             return (result[0], result[1]) if len(result) >= 2 else None
         except Exception as e:
             self.logger.error(f"Error fetching spot meta and ctxs: {e}")
@@ -3692,11 +3696,19 @@ class HyperliquidAPI(MarketInterface):
                     api_symbol = spot_api
                 else:
                     self.logger.warning(f"No @index found for spot {symbol} ({api_token_name})")
+                    # ABORT: Do not attempt to subscribe with unresolved symbol
+                    self._pending_init_symbols.discard(symbol)
+                    return
             else:
                 # Might be a raw spot symbol like WOW, try direct lookup
                 spot_api = self.get_spot_api_name(symbol)
                 if spot_api:
                     api_symbol = spot_api
+                elif self.has_spot_market(symbol):
+                    # It's a spot market but we couldn't resolve API name - abort
+                    self.logger.error(f"Failed to resolve API name for spot symbol {symbol} - skipping subscription")
+                    self._pending_init_symbols.discard(symbol)
+                    return
 
         self._persistence_executor.submit(self._async_init_worker, symbol, api_symbol)
 

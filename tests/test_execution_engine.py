@@ -76,6 +76,8 @@ class TestExecutionEngine:
         # Verify trade was recorded with order_id
         assert len(execution_engine.trades) > 0
         assert execution_engine.trades[-1].order_id == 123
+        # Verify position was persisted to DB
+        execution_engine.performance_tracker.db.save_position.assert_called()
         
     def test_close_position(self, execution_engine, mock_market_api):
         """Test position closure."""
@@ -143,3 +145,44 @@ class TestExecutionEngine:
         # NEW Logic should pick 96.0 (Strategy) because it's safer than Account Limit (-200)
         assert pos.stop_loss == 96.0
 
+    def test_multi_leg_entry_persists_to_db(self, execution_engine, mock_market_api):
+        """Verify execute_multi_leg_entry calls save_positions_to_db."""
+        from unittest.mock import MagicMock
+        
+        # Mock API order response
+        mock_market_api.execute_order.return_value = {
+            'filled_size': 1.0, 'avg_fill_price': 100.0, 'order_id': 'test123'
+        }
+        mock_market_api.get_current_price.return_value = 100.0
+        mock_market_api.get_spot_token_for_perp.return_value = None
+        mock_market_api.get_spot_price.return_value = None
+        
+        # Mock position sizing
+        execution_engine.leverage_manager.calculate_leveraged_position_size.return_value = (1.0, 100.0, 1.0)
+        execution_engine.leverage_manager.can_open_position.return_value = True
+        execution_engine.portfolio_manager.calculate_available_capital_for_trading.return_value = 10000.0
+        
+        # Mock balance checks to ensure entry isn't blocked
+        mock_market_api.get_spot_balance.return_value = 10000.0
+        mock_market_api.get_perp_balance.return_value = {'withdrawable': 10000.0}
+        mock_market_api.ensure_perp_funds.return_value = True
+        mock_market_api.ensure_spot_funds.return_value = True
+        
+        # Track save_positions_to_db calls
+        execution_engine.save_positions_to_db = MagicMock()
+        
+        signal = {
+            'action': 'enter',
+            'atomic': True,
+            'legs': [
+                {'symbol': 'BTC', 'market_type': 'perp', 'order_side': 'buy', 'side': 'long', 'hedge_ratio': 1.0},
+                {'symbol': 'ETH', 'market_type': 'perp', 'order_side': 'sell', 'side': 'short', 'hedge_ratio': 1.0},
+            ]
+        }
+        
+        execution_engine.execute_multi_leg_entry('BTC-ETH', signal, 100.0, 'test_strat', {}, 0.8)
+        
+        # Verify position was persisted
+        execution_engine.save_positions_to_db.assert_called()
+        # Verify position exists in memory
+        assert len(execution_engine.multi_leg_positions) > 0

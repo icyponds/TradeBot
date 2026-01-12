@@ -87,6 +87,10 @@ class MockMarketAPI(MarketInterface):
         # Construct expected spot symbol key in historical data
         spot_symbol = f"{token}_SPOT"
         return self.get_current_price(spot_symbol)
+            
+    def stop(self):
+        """Mock stop method for interface parity."""
+        self.logger.info("MockMarketAPI stopped")
         
     def set_time(self, timestamp: datetime):
         """Update the simulation time."""
