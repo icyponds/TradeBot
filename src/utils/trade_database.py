@@ -598,17 +598,22 @@ class TradeDatabase:
         Delete all trade/performance rows.
 
         This is primarily used for backtesting runs that should not be mixed with
-        previous backtest results.
+        production data. The market_data table is NOT cleared.
         """
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(f"DELETE FROM {self.table_prefix}trades")
             cursor.execute(f"DELETE FROM {self.table_prefix}equity_snapshots")
-            cursor.execute(f"DELETE FROM {self.table_prefix}daily_pnl")
-            
-            # Also clear live positions to ensure clean slate
-            cursor.execute(f"DELETE FROM {self.table_prefix}live_positions")
-            cursor.execute(f"DELETE FROM {self.table_prefix}live_position_legs")
+            cursor.execute(f"DELETE FROM {self.table_prefix}trades")
+            conn.commit()
+
+    def get_all_symbols(self) -> List[str]:
+        """Get list of all symbols present in market_data table."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT DISTINCT symbol FROM market_data ORDER BY symbol")
+            rows = cursor.fetchall()
+            return [r[0] for r in rows]
+
     
     def get_strategies(self) -> List[str]:
         """Get list of all strategies with trades."""

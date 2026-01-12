@@ -99,6 +99,90 @@ def create_dashboard_app() -> Flask:
                 'success': False,
                 'error': str(e)
             }), 500
+
+    @app.route('/api/close_position', methods=['POST'])
+    def close_position():
+        """Close a specific position (single or multi-leg)."""
+        if not _strategy_manager:
+            return jsonify({
+                'success': False,
+                'error': 'Strategy manager not connected (readonly mode)'
+            }), 400
+
+        try:
+            data = request.json
+            identifier = data.get('identifier')
+            pos_type = data.get('type')  # 'single' or 'multi'
+            
+            if not identifier or not pos_type:
+                return jsonify({'success': False, 'error': 'Missing identifier or type'}), 400
+                
+            logger.info(f"Received close request for {pos_type} position: {identifier}")
+            
+            if pos_type == 'single':
+                # Single-leg position (identifier = symbol)
+                symbol = identifier
+                if symbol not in _strategy_manager.positions:
+                    return jsonify({'success': False, 'error': f'Position {symbol} not found'}), 404
+                    
+                success = _strategy_manager.close_position(symbol, reason="manual_dashboard")
+                
+                if success:
+                    return jsonify({'success': True, 'message': f'Closed position {symbol}'})
+                else:
+                    return jsonify({'success': False, 'error': 'Failed to close position'}), 500
+
+            elif pos_type == 'multi':
+                # Multi-leg position (identifier = position_id)
+                pos_id = identifier
+                if pos_id not in _strategy_manager.multi_leg_positions:
+                     return jsonify({'success': False, 'error': f'Multi-leg position {pos_id} not found'}), 404
+                     
+                position = _strategy_manager.multi_leg_positions[pos_id]
+                symbol = position.primary_symbol
+                strategy_name = position.strategy
+                
+                # Construct exit signal
+                signal = {
+                    'action': 'exit',
+                    'reason': 'manual_dashboard',
+                    'urgency': 'high',
+                    'is_multi_leg': True
+                }
+                
+                # Fetch recent OHLCV for context (optional but good practice)
+                ohlcv = {} # Can retrieve if strictly needed, but exit logic mainly needs symbol/size
+                
+                # Trigger the handler
+                # Note: We access the internal handler. Ideally StrategyManager should expose a public 
+                # wrapper, but consistent with our plan we rely on _handle_multi_leg_signal 
+                # which validates and calls execution engine.
+                
+                # We need current_price... we can fetch it from API or pass 0 if exit doesn't strictly depend on it for 'market' close
+                current_price = 0.0
+                if _market_api:
+                    current_price = _market_api.get_current_price(symbol) or 0.0
+
+                _strategy_manager._handle_multi_leg_signal(
+                    symbol, 
+                    signal, 
+                    current_price, 
+                    strategy_name, 
+                    ohlcv, 
+                    timestamp=datetime.now()
+                )
+                
+                return jsonify({'success': True, 'message': f'Initiated close for {pos_id}'})
+                
+            else:
+                return jsonify({'success': False, 'error': 'Invalid position type'}), 400
+
+        except Exception as e:
+            logger.error(f"Error closing position: {e}")
+            return jsonify({
+                'success': False,
+                'error': str(e)
+            }), 500
     
     @app.route('/api/trades')
     def get_trades():

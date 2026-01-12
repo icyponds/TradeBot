@@ -79,8 +79,8 @@ class MockMarketAPI(MarketInterface):
 
     def get_spot_token_for_perp(self, symbol: str) -> Optional[str]:
         """Mock mapping from perp to spot token."""
-        # Simple identity mapping for mock
-        return symbol
+        # Update to match real API convention
+        return f"{symbol}_SPOT"
 
     def get_spot_price(self, token: str, quote: str = 'USDC') -> Optional[float]:
         """Get spot price for token/quote."""

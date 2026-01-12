@@ -1129,8 +1129,8 @@ class DynamicPairSelector:
             MAX_INITIAL_LOAD = 1000 # Effectively infinite
             self.logger.info("Backtest mode detected: Disabling rate limits and initial load caps")
         else:
-            RATE_LIMIT_DELAY = 1.5  # seconds between OHLCV fetches (~40/min)
-            MAX_INITIAL_LOAD = 20   # Load top 20 assets initially (~30 seconds)
+            RATE_LIMIT_DELAY = 4.0  # seconds between OHLCV fetches (~15/min) - Slower to protect Persistence
+            MAX_INITIAL_LOAD = 15   # Load top 15 assets initially
         
         # Note: No max_pairs limit - all assets passing quality filters are traded
         loaded_symbols = set()  # Track what we've loaded

@@ -503,6 +503,25 @@
             border-color: var(--accent);
         }
 
+        .btn-close {
+            background: rgba(239, 68, 68, 0.1);
+            color: var(--red);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            padding: 4px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 11px;
+            font-weight: 600;
+            transition: all 0.2s;
+            text-transform: uppercase;
+        }
+
+        .btn-close:hover {
+            background: var(--red);
+            color: white;
+            border-color: var(--red);
+        }
+
         .pagination-btn:disabled {
             opacity: 0.5;
             cursor: not-allowed;
@@ -610,6 +629,7 @@
                             <th>Leverage</th>
                             <th>Duration</th>
                             <th>Strategy</th>
+                            <th>Action</th>
                         </tr>
                     </thead>
                     <tbody id="positions-body">
@@ -702,6 +722,38 @@
             return pnl >= 0 ? 'pnl-positive' : 'pnl-negative';
         }
 
+        async function closePosition(identifier, type) {
+            if (!confirm(`Are you sure you want to close this ${type} position?`)) {
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/close_position', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        identifier: identifier,
+                        type: type
+                    })
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    // Show success toast (or just alert for now)
+                    // alert('Close request sent: ' + result.message);
+                    updateDashboard(); // Refresh immediately
+                } else {
+                    alert('Error closing position: ' + result.error);
+                }
+            } catch (error) {
+                console.error('Error closing position:', error);
+                alert('Failed to send close request');
+            }
+        }
+
         // Render positions table (missing function from original file)
         function renderPositionsTable(positions) {
             const tbody = document.getElementById('positions-body');
@@ -730,6 +782,9 @@
                     <td>${pos.leverage}x</td>
                     <td class="text-muted">${pos.holding_time}</td>
                     <td><span class="strategy-tag">${pos.strategy}</span></td>
+                    <td>
+                        <button class="btn-close" onclick="closePosition('${pos.symbol}', 'single')">Close</button>
+                    </td>
                 </tr>`;
             }
             tbody.innerHTML = html;
@@ -816,6 +871,7 @@
                                 ${pos.primary_symbol} Arbitrage 
                                 <span class="strategy-tag">${pos.strategy}</span>
                             </div>
+                            <button class="btn-close" style="margin-top: 4px;" onclick="closePosition('${pos.position_id}', 'multi')">Close Position</button>
                         </div>
                         <div class="text-muted">
                             <small>Held for</small> ${pos.holding_time}

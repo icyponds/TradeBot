@@ -28,6 +28,7 @@ import pandas as pd
 # The actual imports happen in _init_sdk_clients() and _get_account_class()
 if TYPE_CHECKING:
     from hyperliquid.info import Info
+    from src.utils.market_data_repair import MarketDataRepairer
     from hyperliquid.exchange import Exchange
     from eth_account import Account
 
@@ -291,6 +292,7 @@ class OhlcvCache:
     def update_from_tick(self, symbol: str, price: float, volume: float, ts: float):
         if symbol not in self.cache:
             return
+            
         for timeframe, dq in self.cache[symbol].items():
             self._update_bar_for_timeframe(symbol, timeframe, dq, price, volume, ts)
     
@@ -298,6 +300,7 @@ class OhlcvCache:
         key = self._get_bar_key(ts, timeframe)
         if key is None:
             return
+            
         if dq and dq[-1].get("time") == key:
             bar = dq[-1]
         else:
@@ -306,8 +309,8 @@ class OhlcvCache:
                 completed_bar = dq[-1]
                 try:
                     self.on_bar_complete_callback(symbol, timeframe, completed_bar)
-                except Exception:
-                    pass  # Don't let callback errors break tick processing
+                except Exception as e:
+                    logging.getLogger(__name__).error(f"Callback error in cache: {e}")
             
             # Create new bar
             bar = {"time": key, "open": price, "high": price, "low": price, "close": price, "volume": 0.0}
@@ -782,8 +785,8 @@ class HyperliquidAPI(MarketInterface):
         # Rate limiter configuration
         rate_config = config.get('api', {}).get('rate_limit', {})
         self.rate_limiter = RateLimiter(
-            calls_per_second=rate_config.get('calls_per_second', 50),
-            burst_size=rate_config.get('burst_size', 100)
+            calls_per_second=rate_config.get('calls_per_second', 20),
+            burst_size=rate_config.get('burst_size', 50)
         )
         
         # Circuit breaker configuration
@@ -833,6 +836,12 @@ class HyperliquidAPI(MarketInterface):
         self._callbacks: Dict[str, List[Callable]] = defaultdict(list)
         self._data_lock = threading.Lock()
         
+        
+        # Periodic Data Integrity components
+        self.repairer: Optional['MarketDataRepairer'] = None
+        self._integrity_thread = None
+        self._stop_integrity_event = threading.Event()
+        
         # Initialize SDK clients
         self._init_sdk_clients()
         
@@ -856,11 +865,23 @@ class HyperliquidAPI(MarketInterface):
             
             # Initialize Info client WITHOUT WebSocket first (fast, non-blocking)
             # WebSocket will be enabled when start() is called
-            self.info = Info(
-                self.base_url,
-                skip_ws=True,  # Start without WebSocket for fast init
-                perp_dexs=self.perp_dexs if self.hip3_enabled else None
-            )
+            # Retry loop for 429s during startup
+            max_retries = 5
+            for attempt in range(max_retries):
+                try:
+                    self.info = Info(
+                        self.base_url,
+                        skip_ws=True,  # Start without WebSocket for fast init
+                        perp_dexs=self.perp_dexs if self.hip3_enabled else None
+                    )
+                    break
+                except Exception as e:
+                    if "429" in str(e) and attempt < max_retries - 1:
+                        wait_time = 2 ** (attempt + 1)
+                        self.logger.warning(f"SDK Init 429 (attempt {attempt+1}/{max_retries}). Waiting {wait_time}s...")
+                        time.sleep(wait_time)
+                    else:
+                        raise e
             self._ws_enabled = False
             
             # Initialize Exchange client if credentials provided
@@ -994,7 +1015,10 @@ class HyperliquidAPI(MarketInterface):
             self.logger.error(f"Error handling allMids update: {e}")
     
     def _rate_limited_call(self, func: Callable, *args, **kwargs) -> Any:
-        """Execute a rate-limited API call with circuit breaker and latency tracking."""
+        """
+        Execute a rate-limited API call with retry logic, circuit breaker and latency tracking.
+        Retries on 429 (Too Many Requests) and 5xx (Server Errors).
+        """
         # Check circuit breaker
         if not self.circuit_breaker.can_execute():
             raise RuntimeError("Circuit breaker is open - API temporarily unavailable")
@@ -1004,22 +1028,78 @@ class HyperliquidAPI(MarketInterface):
             raise RuntimeError("Rate limit timeout - too many requests")
         
         start_time = time.time()
-        try:
-            result = func(*args, **kwargs)
-            
-            # Record latency for health monitoring
-            latency_ms = (time.time() - start_time) * 1000
-            self.health_monitor.record_rest_latency(latency_ms)
-            
-            self.circuit_breaker.record_success()
-            return result
-        except Exception as e:
-            self.circuit_breaker.record_failure()
-            raise
+        # Aggressive Backoff Strategy: 2s, 10s, 30s, 60s
+        # This ensures we persist through temporary outages (total ~2 mins)
+        backoff_steps = [2, 10, 30, 60]
+        max_retries = len(backoff_steps)
+        
+        for attempt in range(max_retries + 1):
+            try:
+                result = func(*args, **kwargs)
+                
+                # Record latency for health monitoring
+                latency_ms = (time.time() - start_time) * 1000
+                self.health_monitor.record_rest_latency(latency_ms)
+                
+                self.circuit_breaker.record_success()
+                return result
+                
+            except Exception as e:
+                # Check for retryable errors
+                is_retryable = False
+                err_str = str(e)
+                
+                if "429" in err_str:  # Rate Limit
+                    is_retryable = True
+                elif "500" in err_str or "502" in err_str or "503" in err_str: # Server Error
+                    is_retryable = True
+                elif "network" in err_str.lower() or "connection" in err_str.lower(): # Network
+                    is_retryable = True
+                    
+                if is_retryable and attempt < max_retries:
+                    wait_time = backoff_steps[attempt]
+                    self.logger.warning(f"API Error (attempt {attempt+1}/{max_retries+1}): {e}. Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                    continue
+                
+                # If not retryable or max retries reached:
+                self.circuit_breaker.record_failure()
+                self.logger.error(f"API Call Failed (attempt {attempt+1}/{max_retries+1}): {e}")
+                raise
     
     # =========================================================================
     # CONNECTION & LIFECYCLE
     # =========================================================================
+    
+    def _run_integrity_check_loop(self):
+        """
+        Background loop to verify and repair market data integrity.
+        Runs every 60 minutes.
+        """
+        self.logger.info("Integrity Check Loop started")
+        
+        # Initial sleep to let the system stabilize
+        if self._stop_integrity_event.wait(60):
+            return
+
+        while not self._stop_integrity_event.is_set():
+            try:
+                if self.repairer:
+                    self.logger.info("Running periodic data integrity check...")
+                    # 2 days lookback is sufficient for periodic checks
+                    self.repairer.repair_all(days_back=2) 
+                    self.logger.info("Periodic integrity check completed")
+            except Exception as e:
+                self.logger.error(f"Error in integrity check loop: {e}")
+                
+            # Wait 60 minutes or until stopped
+            # Check every second to respond to stop event quickly
+            # But simple wait is fine
+            if self._stop_integrity_event.wait(3600):
+                break
+                
+        self.logger.info("Integrity Check Loop stopped")
+
     
     def start(self) -> bool:
         """Start the API, enable WebSocket, and start health monitoring."""
@@ -1034,6 +1114,29 @@ class HyperliquidAPI(MarketInterface):
         
         # Start health monitoring
         self.health_monitor.start()
+        
+        # Start periodic integrity check (daemon thread)
+        try:
+            # Re-initialize here to ensure fresh DB connection if needed
+            from src.utils.market_data_repair import MarketDataRepairer
+            
+            # Use a separate DB instance for this thread to avoid contention/thread-safety issues
+            # if TradeDatabase isn't fully thread-safe (sqlite is picky about threads)
+            db_path = self.config.get('persistence', {}).get('db_path', 'data/trades.db') or 'data/trades.db'
+            repair_db = TradeDatabase(db_path)
+            
+            self.repairer = MarketDataRepairer(self, repair_db)
+            
+            self._stop_integrity_event.clear()
+            self._integrity_thread = threading.Thread(
+                target=self._run_integrity_check_loop,
+                name="IntegrityCheck",
+                daemon=True
+            )
+            self._integrity_thread.start()
+            self.logger.info("Integrity Check thread started")
+        except Exception as e:
+            self.logger.error(f"Failed to start Integrity Check thread: {e}")
         
         self.logger.info("HyperliquidAPI started successfully")
         return True
@@ -1053,6 +1156,12 @@ class HyperliquidAPI(MarketInterface):
         self._persistence_executor.shutdown(wait=False)
         
         self.logger.info("HyperliquidAPI stopped")
+        
+        # Stop integrity thread
+        self._stop_integrity_event.set()
+        if self._integrity_thread and self._integrity_thread.is_alive():
+            self._integrity_thread.join(timeout=2.0)
+
     
     def test_connection(self) -> bool:
         """Test API connection."""
@@ -1328,6 +1437,31 @@ class HyperliquidAPI(MarketInterface):
         Handles both perp symbols (e.g., "BTC") and spot tokens (e.g., "UBTC").
         Spot tokens are automatically converted to their API name (e.g., "@109").
         """
+        # Determine the API symbol to use for fetching
+        # Perp symbols work directly, spot tokens need conversion to @N format
+        
+        # 1. Normalize symbol for internal usage (Storage/Cache key)
+        # e.g. "UBTC" -> "BTC_SPOT", "BTC" -> "BTC"
+        internal_symbol = self.normalize_symbol(symbol)
+        
+        # 2. Resolve to API symbol for network requests
+        # e.g. "BTC_SPOT" -> "@109", "BTC" -> "BTC"
+        if self._is_spot_symbol(internal_symbol):
+             # It's a spot asset (e.g. BTC_SPOT), resolve to API name (e.g. @109)
+             # First map back to API token name (e.g. BTC_SPOT -> UBTC)
+             api_token_name = self.SPOT_INTERNAL_TO_API.get(internal_symbol, internal_symbol)
+             # Then get the internal ID (e.g. @109)
+             api_symbol = self.get_spot_api_name(api_token_name)
+             if not api_symbol:
+                 self.logger.debug(f"Could not resolve spot API symbol for {internal_symbol} ({api_token_name})")
+                 return None
+        else:
+             # Perp or standard asset
+             api_symbol = internal_symbol
+
+        # Use internal_symbol for Cache/DB operations
+        symbol = internal_symbol
+
         # Try cache first (always use human-readable symbol for cache key)
         cached_bars = self.ohlcv_cache.get(symbol, timeframe)
         if cached_bars and len(cached_bars) >= min(limit, self.ohlcv_cache.maxlen[symbol][timeframe]):
@@ -1335,27 +1469,6 @@ class HyperliquidAPI(MarketInterface):
             df['timestamp'] = pd.to_datetime(df['time'], unit='s')
             df.set_index('timestamp', inplace=True)
             return df.tail(limit)
-        
-        # Determine the API symbol to use for fetching
-        # Perp symbols work directly, spot tokens need conversion to @N format
-        api_symbol = symbol
-        is_spot = False
-        
-        # Check if this is a valid perp symbol first
-        asset_info = self._get_asset_info_for_symbol(symbol)
-        is_valid_perp = asset_info is not None
-        
-        # If not a perp, check if it's a spot token
-        if not is_valid_perp:
-            spot_api_name = self.get_spot_api_name(symbol)
-            if spot_api_name:
-                api_symbol = spot_api_name
-                is_spot = True
-                self.logger.debug(f"Spot token {symbol} -> API name {api_symbol}")
-            else:
-                # Neither a valid perp nor a resolvable spot token
-                self.logger.debug(f"Symbol {symbol} is neither a valid perp nor a resolvable spot token")
-                return None
         
         # Otherwise fetch once, seed cache
         def _fetch():
@@ -1379,7 +1492,8 @@ class HyperliquidAPI(MarketInterface):
                         # Get latest timestamp from cached data
                         latest_ts = df.index.max()
                         gap_start_dt = latest_ts + pd.Timedelta(milliseconds=interval_ms)
-                        now = pd.Timestamp.now()
+                        # DB uses naive UTC (from unix timestamp), so we must use naive UTC for 'now'
+                        now = pd.Timestamp.utcnow().replace(tzinfo=None)
                         
                         if gap_start_dt < now:
                             # Fetch only the gap
@@ -1387,7 +1501,26 @@ class HyperliquidAPI(MarketInterface):
                             self.logger.debug(f"Gap-fill for {symbol} {timeframe}: fetching from {gap_start_dt}")
                             candles = self.info.candles_snapshot(api_symbol, timeframe, gap_start_ms, end_time)
                             if candles:
-                                new_bars = [{
+                                # Filter for DB (Strictly Closed)
+                                candles_db = [c for c in candles if c['t'] + interval_ms <= end_time]
+                                
+                                if candles_db:
+                                    new_bars_db = [{
+                                        'time': c['t'] // 1000,
+                                        'open': float(c['o']),
+                                        'high': float(c['h']),
+                                        'low': float(c['l']),
+                                        'close': float(c['c']),
+                                        'volume': float(c['v']),
+                                    } for c in candles_db]
+                                    new_df_db = pd.DataFrame(new_bars_db)
+                                    new_df_db['timestamp'] = pd.to_datetime(new_df_db['time'], unit='s')
+                                    new_df_db.set_index('timestamp', inplace=True)
+                                    self.market_db.insert_market_data(new_df_db, symbol, timeframe)
+                                    self.logger.info(f"GAP FILL: Persisted {len(new_df_db)} candles for {symbol} {timeframe}")
+                                
+                                # Prepare for Cache (All including Incomplete)
+                                new_bars_all = [{
                                     'time': c['t'] // 1000,
                                     'open': float(c['o']),
                                     'high': float(c['h']),
@@ -1395,12 +1528,12 @@ class HyperliquidAPI(MarketInterface):
                                     'close': float(c['c']),
                                     'volume': float(c['v']),
                                 } for c in candles]
-                                new_df = pd.DataFrame(new_bars)
-                                new_df['timestamp'] = pd.to_datetime(new_df['time'], unit='s')
-                                new_df.set_index('timestamp', inplace=True)
-                                self.market_db.insert_market_data(new_df, symbol, timeframe)
+                                new_df_all = pd.DataFrame(new_bars_all)
+                                new_df_all['timestamp'] = pd.to_datetime(new_df_all['time'], unit='s')
+                                new_df_all.set_index('timestamp', inplace=True)
+                                
                                 # Merge with existing
-                                df = pd.concat([df, new_df]).drop_duplicates()
+                                df = pd.concat([df, new_df_all]).drop_duplicates()
                         
                         # Return from cache
                         bars = [{
@@ -1448,7 +1581,24 @@ class HyperliquidAPI(MarketInterface):
             if not candles:
                 return None
             
-            bars = [{
+            # Partition candles: Closed (DB) vs All (Cache)
+            candles_db = [c for c in candles if c['t'] + interval_ms <= end_time]
+            
+            # 1. Prepare bars for DB (Closed Only)
+            if candles_db:
+                bars_db = [{
+                    'time': c['t'] // 1000,
+                    'open': float(c['o']),
+                    'high': float(c['h']),
+                    'low': float(c['l']),
+                    'close': float(c['c']),
+                    'volume': float(c['v']),
+                } for c in candles_db]
+            else:
+                bars_db = []
+                
+            # 2. Prepare bars for Cache (All)
+            bars_cache = [{
                 'time': c['t'] // 1000,
                 'open': float(c['o']),
                 'high': float(c['h']),
@@ -1457,19 +1607,24 @@ class HyperliquidAPI(MarketInterface):
                 'volume': float(c['v']),
             } for c in candles]
             
+            
             # Save to database for future restarts
-            if self.market_db:
+            if self.market_db and bars_db:
                 try:
-                    df = pd.DataFrame(bars)
+                    df = pd.DataFrame(bars_db)
                     df['timestamp'] = pd.to_datetime(df['time'], unit='s')
                     df.set_index('timestamp', inplace=True)
                     self.market_db.insert_market_data(df, symbol, timeframe)
+                    self.logger.info(f"STARTUP: Persisted {len(df)} candles for {symbol} {timeframe} to DB")
                 except Exception as e:
-                    self.logger.debug(f"Failed to cache {symbol} {timeframe}: {e}")
+                    self.logger.error(f"STARTUP: Failed to persist {symbol} {timeframe}: {e}")
+            else:
+                self.logger.warning(f"STARTUP: Skipping persistence for {symbol} {timeframe} - DB not connected")
             
             # Seed in-memory cache
-            self.ohlcv_cache.seed(symbol, timeframe, bars, maxlen=max(limit, 300))
-            df = pd.DataFrame(bars)
+            # Seed in-memory cache with ALL bars (including incomplete)
+            self.ohlcv_cache.seed(symbol, timeframe, bars_cache, maxlen=max(limit, 300))
+            df = pd.DataFrame(bars_cache)
             df['timestamp'] = pd.to_datetime(df['time'], unit='s')
             df.set_index('timestamp', inplace=True)
             return df.tail(limit)
@@ -1489,22 +1644,30 @@ class HyperliquidAPI(MarketInterface):
         Instead of persisting the in-memory bar directly, trigger a background verification fetch.
         This implements the "Verify-on-Write" pattern to ensure data integrity.
         """
+        # DEBUG: Trace callback
+        self.logger.info(f"CALLBACK: Bar complete for {symbol} {timeframe} @ {bar.get('time')}. DB={self.market_db is not None}")
+        
         if not self.market_db:
             return
             
         # Submit to background executor to avoid blocking WebSocket thread
-        self._persistence_executor.submit(
-            self._fetch_and_persist_candle, 
-            symbol, 
-            timeframe, 
-            bar['time']
-        )
+        try:
+            self._persistence_executor.submit(
+                self._fetch_and_persist_candle, 
+                symbol, 
+                timeframe, 
+                bar['time']
+            )
+            self.logger.info(f"CALLBACK: Subscribed task for {symbol} {timeframe}")
+        except Exception as e:
+            self.logger.error(f"CALLBACK: Failed to submit task: {e}")
 
     def _fetch_and_persist_candle(self, symbol: str, timeframe: str, timestamp: int):
         """
         Worker method to fetch the official finalized candle from API and persist it.
         """
         try:
+            self.logger.info(f"PERSIST_WORKER: Starting {symbol} {timeframe} for {timestamp}")
             # Wait a brief buffer to ensure exchange engine has finalized the candle
             time.sleep(2.0)
             
@@ -1525,6 +1688,12 @@ class HyperliquidAPI(MarketInterface):
             # Use rate limiter to prevent spamming on batch persistence
             candles = self._rate_limited_call(_fetch)
             
+            # Log what we got
+            if not candles:
+                self.logger.warning(f"PERSIST_WORKER: No candles returned for {symbol} {timeframe} start_ms={start_ms}")
+            else:
+                self.logger.info(f"PERSIST_WORKER: Got {len(candles)} candles for {symbol}. First t={candles[0]['t']}, Target={start_ms}")
+
             # Find the exact candle matching our timestamp
             target_candle = None
             if candles:
@@ -1542,6 +1711,7 @@ class HyperliquidAPI(MarketInterface):
                     'low': float(target_candle['l']),
                     'close': float(target_candle['c']),
                     'volume': float(target_candle['v']),
+                    'trades': int(target_candle.get('n', 0))
                 }
                 
                 # Persist to DB
@@ -1549,8 +1719,9 @@ class HyperliquidAPI(MarketInterface):
                 df['timestamp'] = pd.to_datetime(df['time'], unit='s')
                 df.set_index('timestamp', inplace=True)
                 
+                self.logger.info(f"PERSIST_WORKER: Inserting {symbol} into DB...")
                 self.market_db.insert_market_data(df, symbol, timeframe)
-                self.logger.debug(f"Persisted VERIFIED {symbol}/{timeframe} candle @ {bar['time']}")
+                self.logger.info(f"Persisted VERIFIED {symbol}/{timeframe} candle @ {bar['time']}")
                 
                 # OPTIONAL: Self-heal in-memory cache if needed (omitted for safety to avoid race conditions 
                 # with active WebSocket updates, as the next in-memory candle is already building)
@@ -1558,11 +1729,12 @@ class HyperliquidAPI(MarketInterface):
             else:
                 self.logger.warning(
                     f"Could not verify candle for {symbol}/{timeframe} @ {timestamp}. "
-                    "Skipping persistence to avoid corruption."
+                    f"Range requested: {start_ms}-{end_ms}. "
+                    f"Returned candidates: {[c['t'] for c in candles] if candles else 'None'}"
                 )
                 
         except Exception as e:
-            self.logger.error(f"Failed to persist verified candle for {symbol}/{timeframe}: {e}")
+            self.logger.error(f"Failed to persist verified candle for {symbol}/{timeframe}: {e}", exc_info=True)
     
     def _get_api_symbol(self, symbol: str) -> str:
         """Get symbol formatted for API requests."""
@@ -3274,26 +3446,82 @@ class HyperliquidAPI(MarketInterface):
     # ==========================================================================
     PERP_TO_SPOT_MAPPING = {
         # Major tokens with U-prefix wrapped versions
-        'BTC': 'UBTC',
-        'ETH': 'UETH',
-        'SOL': 'USOL',
-        'BONK': 'UBONK',
-        # 'DOGE': 'UDOGE',  # Not available on exchange as of Jan 2026
-        'MOG': 'UMOG',
-        'WLD': 'UWLD',
-        'ENA': 'UENA',
-        'XPL': 'UXPL',
-        'MON': 'UMON',  # Monad - verified via tokenDetails endpoint
-        'PUMP': 'UPUMP',
-        'FARTCOIN': 'UFART',
-        'MEGA': 'UMEGA',
-        # Direct matches (token name is the same for perp and spot)
-        'PURR': 'PURR',
-        'HYPE': 'HYPE',
-        'TRUMP': 'TRUMP',
-        'STABLE': 'STABLE',
-        'BERA': 'BERA',
+        'BTC': 'BTC_SPOT',      # Was 'UBTC'
+        'ETH': 'ETH_SPOT',      # Was 'UETH'
+        'SOL': 'SOL_SPOT',      # Was 'USOL' - wait, USOL? Yes.
+        'BONK': 'BONK_SPOT',    # Was 'UBONK'
+        # 'DOGE': 'UDOGE',      # Not available on exchange as of Jan 2026
+        'MOG': 'MOG_SPOT',      # Was 'UMOG'
+        'WLD': 'WLD_SPOT',      # Was 'UWLD'
+        'ENA': 'ENA_SPOT',      # Was 'UENA'
+        'XPL': 'XPL_SPOT',      # Was 'UXPL'
+        'MON': 'MON_SPOT',      # Was 'UMON'
+        'PUMP': 'PUMP_SPOT',    # Was 'UPUMP'
+        'FARTCOIN': 'FARTCOIN_SPOT', # Was 'UFART'
+        'MEGA': 'MEGA_SPOT',    # Was 'UMEGA'
+        # Direct matches
+        'PURR': 'PURR_SPOT',    # Was 'PURR'
+        'HYPE': 'HYPE_SPOT',    # Was 'HYPE'
+        'TRUMP': 'TRUMP_SPOT',  # Was 'TRUMP'
+        'STABLE': 'STABLE_SPOT',# Was 'STABLE'
+        'BERA': 'BERA_SPOT',    # Was 'BERA'
     }
+
+    # Reverse mapping + Legacy Support (Internal -> API Token Name)
+    # This is critical for translating BTC_SPOT -> UBTC for the API
+    SPOT_INTERNAL_TO_API = {
+        'BTC_SPOT': 'UBTC',
+        'ETH_SPOT': 'UETH',
+        'SOL_SPOT': 'USOL',
+        'BONK_SPOT': 'UBONK',
+        'MOG_SPOT': 'UMOG',
+        'WLD_SPOT': 'UWLD',
+        'ENA_SPOT': 'UENA',
+        'XPL_SPOT': 'UXPL',
+        'MON_SPOT': 'UMON',
+        'PUMP_SPOT': 'UPUMP',
+        'FARTCOIN_SPOT': 'UFART',
+        'MEGA_SPOT': 'UMEGA',
+        'PURR_SPOT': 'PURR',
+        'HYPE_SPOT': 'HYPE',
+        'TRUMP_SPOT': 'TRUMP',
+        'STABLE_SPOT': 'STABLE',
+        'BERA_SPOT': 'BERA',
+    }
+
+    def normalize_symbol(self, symbol: str) -> str:
+        """
+        Normalize symbol to internal storage convention.
+        
+        Rules:
+        1. If it's a known mapping key (i.e. API name like 'UBTC'), convert to internal 'BTC_SPOT'.
+        2. If it already ends with '_SPOT', keep it.
+        3. If it's a perp symbol, keep it.
+        """
+        if not symbol: return symbol
+        
+        # Check reverse mapping (API Value -> Internal Key)
+        # We need to construct this lookup. Since it's 1:1, we can search values.
+        # Ensure we prioritize: UBTC -> BTC_SPOT
+        
+        # Optimization: Manual lookup for common cases or inverted dict
+        # Create inverted dict only once if possible, but for now linear scan is fine or manual check
+        
+        # Check if symbol is a known API token name that maps to a SPOT internal name
+        # (e.g. input "UBTC" -> should become "BTC_SPOT")
+        for internal, api_name in self.SPOT_INTERNAL_TO_API.items():
+            if symbol == api_name:
+                return internal
+                
+        # If it's already a valid internal spot name, return as is
+        if symbol in self.SPOT_INTERNAL_TO_API:
+            return symbol
+            
+        return symbol
+
+    def _is_spot_symbol(self, symbol: str) -> bool:
+        """Check if symbol is an internal spot symbol."""
+        return symbol.endswith('_SPOT') or symbol in self.SPOT_INTERNAL_TO_API
     
     def get_spot_token_for_perp(self, perp_symbol: str) -> Optional[str]:
         """
@@ -3326,6 +3554,10 @@ class HyperliquidAPI(MarketInterface):
             token_list = spot_meta.get('tokens', [])
             
             # Check if the mapped spot token exists in a USDC pair
+            # mapped_spot is internal (e.g. BTC_SPOT). API has API names (e.g. UBTC).
+            # Resolve to API name for verification.
+            api_mapped_spot = self.SPOT_INTERNAL_TO_API.get(mapped_spot, mapped_spot)
+            
             for pair in spot_meta.get('universe', []):
                 tokens = pair.get('tokens', [])
                 if len(tokens) >= 2:
@@ -3333,10 +3565,10 @@ class HyperliquidAPI(MarketInterface):
                     if base_idx < len(token_list) and quote_idx < len(token_list):
                         base_name = token_list[base_idx].get('name', '')
                         quote_name = token_list[quote_idx].get('name', '')
-                        if base_name == mapped_spot and quote_name == 'USDC':
+                        if base_name == api_mapped_spot and quote_name == 'USDC':
                             return mapped_spot
             
-            self.logger.warning(f"Mapped spot token {mapped_spot} for {perp_symbol} not found on exchange - please update PERP_TO_SPOT_MAPPING")
+            self.logger.warning(f"Mapped spot token {mapped_spot} ({api_mapped_spot}) for {perp_symbol} not found on exchange - please update PERP_TO_SPOT_MAPPING")
             return None
             
         except Exception as e:
@@ -3408,6 +3640,15 @@ class HyperliquidAPI(MarketInterface):
         standard_timeframes = ['5m', '15m', '1h', '4h', '1d']
         for tf in standard_timeframes:
             self.ohlcv_cache.ensure_timeframe(symbol, tf, maxlen=1000)
+            
+            # Backfill history in background to prime cache and DB
+            # This ensures we have context for the rolling updates
+            self._persistence_executor.submit(
+                self.get_ohlcv,
+                symbol,
+                tf,
+                1000 # Limit
+            )
             
         # SDK handles subscriptions via allMids automatically
 
