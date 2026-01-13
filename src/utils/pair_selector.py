@@ -179,6 +179,11 @@ class DynamicPairSelector:
         self.backfill_symbols_in_queue: set = set()
         self.last_backfill_time: Optional[datetime] = None
         
+        # Maintenance state (Periodic Integrity Checks)
+        self.maintenance_queue = [] # Queue for periodic re-validation of active pairs
+        self.last_maintenance_time = datetime.min
+        self.maintenance_interval_seconds = 300 # 5 minutes default
+        
         # Threading for independent data fetching
         self._backfill_thread: Optional[threading.Thread] = None
         self._backfill_running = False
@@ -1405,9 +1410,53 @@ class DynamicPairSelector:
             try:
                 # Get next asset from queue (thread-safe)
                 asset = None
+                mode = "scouting"  # "scouting" or "maintenance"
+                
                 with self._backfill_lock:
+                    # Priority 1: Scouting Queue (New candidates)
                     if self.backfill_queue:
                         asset = self.backfill_queue.pop(0)
+                        mode = "scouting"
+                    
+                    # Priority 2: Maintenance Queue (Integrity checks for active pool)
+                    # Only check if scouting queue is empty
+                    elif self.maintenance_queue:
+                        asset = self.maintenance_queue.pop(0)
+                        mode = "maintenance"
+                        
+                    # Priority 3: Populate Maintenance Queue if due
+                    elif (datetime.now() - self.last_maintenance_time).total_seconds() > self.maintenance_interval_seconds:
+                        self.logger.info("[BackgroundFetcher] Starting scheduled integrity maintenance for Core Pool...")
+                        
+                        # Snapshot current selected pairs
+                        current_pairs = []
+                        with self._pairs_lock:
+                             current_pairs = list(self.selected_pairs)
+                             
+                        if current_pairs:
+                            # Re-queue them for maintenance
+                            # We construct simple asset dicts since we only need symbol + market_type
+                            # We default to 'perp' but checking metadata would be better if we tracked it perfectly here.
+                            # For now, we assume selected_pairs are predominantly perps or we look them up.
+                            # Actually, we can just pass the symbol and let the fetcher handle it.
+                            
+                            for sym in current_pairs:
+                                # Look up metadata if possible, or default
+                                # We'll just queue the name and let the loop resolve details
+                                # To fit the existing 'asset' dict structure:
+                                m_type = 'perp' # Default to perp for now, or look up from pairs_metadata if available
+                                if self.selected_pairs_metadata and sym in self.selected_pairs_metadata:
+                                    m_type = self.selected_pairs_metadata[sym].get('market_type', 'perp')
+                                    
+                                self.maintenance_queue.append({'name': sym, 'market_type': m_type})
+                                
+                            self.last_maintenance_time = datetime.now()
+                            self.logger.info(f"[BackgroundFetcher] Queued {len(self.maintenance_queue)} assets for maintenance.")
+                            
+                            # Grab first one immediately
+                            if self.maintenance_queue:
+                                asset = self.maintenance_queue.pop(0)
+                                mode = "maintenance"
                 
                 if asset is None:
                     # Queue empty, sleep and check again
@@ -1418,12 +1467,37 @@ class DynamicPairSelector:
                 market_type = asset.get('market_type', 'perp')
                 queue_key = f"{market_type}:{sym}"
                 
+                if mode == "maintenance":
+                    # Maintenance Mode Logic
+                    self.logger.debug(f"[BackgroundFetcher] [Maintenance] Checking integrity for {sym}...")
+                    try:
+                        # 1. Run Integrity Check (Repairer)
+                        if hasattr(self.market_api, 'repairer') and self.market_api.repairer:
+                            self.market_api.repairer.process_asset(sym)
+                        
+                        # 2. Refresh recent candles (Optional, but good for keeping cache warm)
+                         # Just fetching the last few candles helps ensure the WebSocket link is healthy
+                        self.market_api.get_ohlcv(sym, '1h', limit=5)
+                        
+                    except Exception as e:
+                        self.logger.warning(f"[BackgroundFetcher] [Maintenance] Failed for {sym}: {e}")
+                    
+                    # Sleep slightly longer for maintenance to be low impact
+                    time.sleep(RATE_LIMIT_DELAY * 2) 
+                    continue
+
+                # --- SCOUTING MODE (Original Logic) ---
+                
+                # Skip if already in queue (redundancy check)
+                if queue_key not in self.backfill_symbols_in_queue:
+                    # This might happen if we flushed queue but thread had local ref? Unlikely but safe.
+                   pass
+                
                 if not sym:
                     continue
                 
                 # High-visibility logging to prove processing order (User Request)
-                self.logger.info(f"[BackgroundFetcher] Processing #{assets_loaded+1}: {sym} ({market_type})")
-                print(f"DEBUG: Processing #{assets_loaded+1}: {sym} ({market_type})", flush=True)  # FORCE PRINT for user visibility
+                self.logger.info(f"[BackgroundFetcher] Inspecting #{assets_loaded+1}: {sym} ({market_type}) - 1d scoring only")
                 
                 # Check if already ready
                 with self._pairs_lock:
@@ -1455,6 +1529,8 @@ class DynamicPairSelector:
                         perp_in_pool = sym in self.selected_pairs
                     
                     if perp_in_pool:
+                        self.logger.info(f"[BackgroundFetcher] ==> SELECTED {sym}! Pre-warming 5m/15m/1h/4h and running integrity check...")
+                        
                         # Run integrity check ONLY for assets in the Core Pool
                         # This prevents wasting API calls on non-tradeable assets
                         if hasattr(self.market_api, 'repairer') and self.market_api.repairer:
@@ -1475,6 +1551,8 @@ class DynamicPairSelector:
                             self.logger.info(f"  -> {sym} fully loaded and ready for trading")
                         except Exception as e:
                             self.logger.warning(f"  -> Failed to pre-warm {sym}: {e}")
+                    else:
+                        self.logger.debug(f"[BackgroundFetcher] {sym} not selected. Skipping full warm-up.")
                     
                     # Also load corresponding spot if this perp was ADDED to the pool
                     # (Spot is only needed for stat arb if the perp is actively traded)
