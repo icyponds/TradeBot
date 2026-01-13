@@ -1667,6 +1667,19 @@ class StrategyManager:
                 winning_signal = self._resolve_signal_conflicts(symbol, collected_signals)
                 if winning_signal:
                     self._execute_resolved_signal(symbol, winning_signal, timestamp=timestamp)
+            
+            # Update metadata for existing multi-leg positions involving this symbol
+            # (e.g. Sync Z-Scores from Strategy Memory to Database for Dashboard)
+            ml_pos = self._get_multi_leg_position_for_symbol(symbol)
+            if ml_pos and ml_pos.strategy == 'stat_arb':
+                strategy = self.strategies.get('stat_arb')
+                if strategy and hasattr(strategy, 'get_spread_status'):
+                    status = strategy.get_spread_status(symbol)
+                    if status:
+                        # Only update if changed significantly to save DB writes
+                        # Or just update memory and let periodic save handle DB?
+                        # For now, update memory. Dashboard reads from memory (self.multi_leg_positions)
+                        ml_pos.metadata.update(status)
                 
         except Exception as e:
             self.logger.error(f"Error analyzing {symbol}: {e}")

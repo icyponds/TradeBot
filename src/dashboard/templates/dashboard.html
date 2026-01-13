@@ -904,6 +904,30 @@
                                 ${formatCurrency(pos.unrealized_pnl)}
                             </div>
                         </div>
+                        
+                        <!-- Z-Score Metrics (Stat Arb) -->
+                        ${(pos.metadata && pos.metadata.entry_z_score !== undefined) ? `
+                        <div class="strategy-metric">
+                            <div class="strategy-metric-label">Current Z</div>
+                            <div class="strategy-metric-value ${(pos.metadata.current_z || pos.metadata.entry_z_score) > 0 ? 'pnl-positive' : 'pnl-negative'
+                        }">
+                                ${formatDecimal(pos.metadata.current_z || pos.metadata.entry_z_score || 0, 2)}
+                            </div>
+                        </div>
+                        <div class="strategy-metric">
+                            <div class="strategy-metric-label">Max Adverse Z</div>
+                            <div class="strategy-metric-value warning-text">
+                                ${formatDecimal(pos.metadata.max_adverse_z || pos.metadata.entry_z_score || 0, 2)}
+                            </div>
+                        </div>
+                        <div class="strategy-metric">
+                            <div class="strategy-metric-label">Entry Z</div>
+                            <div class="strategy-metric-value text-muted">
+                                ${formatDecimal(pos.metadata.entry_z_score, 2)}
+                            </div>
+                        </div>
+                        ` : ''}
+
                         <div class="strategy-metric">
                             <div class="strategy-metric-label">Capital at Risk</div>
                             <div class="strategy-metric-value">
@@ -914,12 +938,6 @@
                             <div class="strategy-metric-label">Funding Collected</div>
                             <div class="strategy-metric-value pnl-positive">
                                 ${formatCurrency(pos.funding_collected)}
-                            </div>
-                        </div>
-                        <div class="strategy-metric">
-                            <div class="strategy-metric-label">Current Rate</div>
-                            <div class="strategy-metric-value">
-                                ${pos.current_funding_rate ? formatPct(pos.current_funding_rate * 100, 4) : '--'}
                             </div>
                         </div>
                     </div>

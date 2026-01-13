@@ -51,6 +51,7 @@ class StatisticalArbitrageStrategy(BaseStrategy):
         self.window_size = stat_arb_config.get('window_size', 100)
         self.zscore_lookback = coint_config.get('lookback_period', 20)
         self.max_holding_hours = stat_arb_config.get('max_holding_hours', 120) # Default 5 days
+        self.max_adverse_z_delta = stat_arb_config.get('max_adverse_z_delta', 1.5)  # Exit if z moves 1.5σ against entry
         
         # Cointegration parameters
         self.adf_pvalue_threshold = coint_config.get('adf_pvalue_threshold', 0.05)
@@ -161,14 +162,55 @@ class StatisticalArbitrageStrategy(BaseStrategy):
         if has_position:
             position_side = self.active_spreads[pair_key].get('side')
             # Exit if Z-score crosses zero or hits exit threshold
-            if position_side == 'short' and z_score < self.z_score_exit:
-                signal = 'buy'
-                reason = f'Stat Arb Exit: {pair_key} Z-Score {z_score:.2f} < {self.z_score_exit} (Close Short)'
-                del self.active_spreads[pair_key]
-            elif position_side == 'long' and z_score > -self.z_score_exit:
-                signal = 'sell'
-                reason = f'Stat Arb Exit: {pair_key} Z-Score {z_score:.2f} > -{self.z_score_exit} (Close Long)'
-                del self.active_spreads[pair_key]
+            if position_side == 'short':
+                if z_score < self.z_score_exit:
+                    signal = 'buy'
+                    reason = f'Stat Arb Exit: {pair_key} Z-Score {z_score:.2f} < {self.z_score_exit} (Close Short)'
+                    del self.active_spreads[pair_key]
+                # Stop Loss Handling
+                elif z_score > 4.0: # Hard Stop
+                    signal = 'buy' 
+                    reason = f'Stat Arb Stop: {pair_key} Regime Break Z-Score {z_score:.2f} > 4.0'
+                    del self.active_spreads[pair_key]
+                else:
+                    # Max Adverse Stop (Check entry z-score)
+                    entry_z = self.active_spreads[pair_key].get('entry_zscore')
+                    if entry_z and entry_z > 0 and z_score > (entry_z + self.max_adverse_z_delta):
+                        signal = 'buy'
+                        reason = f'Stat Arb Stop: {pair_key} Max Adverse {z_score:.2f} > Entry {entry_z:.2f} + {self.max_adverse_z_delta}'
+                        del self.active_spreads[pair_key]
+
+            elif position_side == 'long':
+                if z_score > -self.z_score_exit:
+                    signal = 'sell'
+                    reason = f'Stat Arb Exit: {pair_key} Z-Score {z_score:.2f} > -{self.z_score_exit} (Close Long)'
+                    del self.active_spreads[pair_key]
+                # Stop Loss Handling
+                elif z_score < -4.0: # Hard Stop
+                    signal = 'sell'
+                    reason = f'Stat Arb Stop: {pair_key} Regime Break Z-Score {z_score:.2f} < -4.0'
+                    del self.active_spreads[pair_key]
+                else:
+                    # Max Adverse Stop (Check entry z-score)
+                    entry_z = self.active_spreads[pair_key].get('entry_zscore')
+                    if entry_z and entry_z < 0 and z_score < (entry_z - self.max_adverse_z_delta):
+                        signal = 'sell'
+                        reason = f'Stat Arb Stop: {pair_key} Max Adverse {z_score:.2f} < Entry {entry_z:.2f} - {self.max_adverse_z_delta}'
+                        del self.active_spreads[pair_key]
+
+            # Update Metadata if still active
+            if signal == 'hold' and pair_key in self.active_spreads:
+                entry_z = self.active_spreads[pair_key].get('entry_zscore')
+                if entry_z is not None:
+                    # Update max adverse
+                    current_max = self.active_spreads[pair_key].get('max_adverse_z', entry_z)
+                    if entry_z < 0: # Long spread
+                         self.active_spreads[pair_key]['max_adverse_z'] = min(current_max, z_score)
+                    else: # Short spread
+                         self.active_spreads[pair_key]['max_adverse_z'] = max(current_max, z_score)
+                
+                self.active_spreads[pair_key]['current_z'] = z_score
+
         else:
             # Check for entry signal
             # Additional Filter: Hurst Exponent Check
@@ -184,7 +226,9 @@ class StatisticalArbitrageStrategy(BaseStrategy):
                     'side': 'short',
                     'entry_zscore': z_score,
                     'hedge_ratio': hedge_ratio,
-                    'hurst': hurst
+                    'hurst': hurst,
+                    'max_adverse_z': z_score,
+                    'current_z': z_score
                 }
             elif z_score < -self.z_score_entry:
                 signal = 'buy'
@@ -193,7 +237,9 @@ class StatisticalArbitrageStrategy(BaseStrategy):
                     'side': 'long',
                     'entry_zscore': z_score,
                     'hedge_ratio': hedge_ratio,
-                    'hurst': hurst
+                    'hurst': hurst,
+                    'max_adverse_z': z_score,
+                    'current_z': z_score
                 }
         
         if signal == 'hold':
@@ -372,6 +418,16 @@ class StatisticalArbitrageStrategy(BaseStrategy):
             # If Z-score expands beyond 4.0, the correlation is likely broken.
             if abs(z_score) > 4.0:
                 return True, f"spread_regime_break_stop (z={z_score:.2f})"
+            
+            # 3. Max Adverse Spread Stop (1.5σ from entry)
+            entry_z = current_data.get('entry_z_score')
+            if entry_z:
+                # Long spread (negative entry z): adverse = more negative
+                if entry_z < 0 and z_score < entry_z - self.max_adverse_z_delta:
+                    return True, f"max_adverse_spread_stop (entry={entry_z:.2f}, now={z_score:.2f})"
+                # Short spread (positive entry z): adverse = more positive
+                elif entry_z > 0 and z_score > entry_z + self.max_adverse_z_delta:
+                    return True, f"max_adverse_spread_stop (entry={entry_z:.2f}, now={z_score:.2f})"
                 
         # 3. Max Hold Time Limit (Safety)
         # Prevents holding losing positions indefinitely (Survivor Bias)
@@ -431,3 +487,23 @@ class StatisticalArbitrageStrategy(BaseStrategy):
             return 1.0
             
         return 0.5 + 0.5 * (z_score - self.z_score_entry) / (z_max - self.z_score_entry)
+
+    def get_spread_status(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Get z-score status for a spread involving this symbol."""
+        # Find pair for this symbol
+        active_pair_key = None
+        for pair_key in self.active_spreads.keys():
+            sym_a, sym_b = pair_key.split('/')
+            if symbol == sym_a or symbol == sym_b:
+                active_pair_key = pair_key
+                break
+        
+        if not active_pair_key:
+            return None
+            
+        data = self.active_spreads[active_pair_key]
+        return {
+            'current_z': data.get('current_z'),
+            'entry_z': data.get('entry_zscore'),
+            'max_adverse_z': data.get('max_adverse_z')
+        }
