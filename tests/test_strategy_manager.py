@@ -340,7 +340,7 @@ class TestStrategyManager:
         }
         
         # Mock pair_selector to return mixed order (positions NOT first)
-        strategy_manager.pair_selector.get_current_pairs = MagicMock(
+        strategy_manager.pair_selector.get_ready_pairs = MagicMock(
             return_value=['BTC', 'SOL', 'DOGE', 'ETH', 'XRP']
         )
         

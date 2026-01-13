@@ -186,3 +186,43 @@ class TestExecutionEngine:
         execution_engine.save_positions_to_db.assert_called()
         # Verify position exists in memory
         assert len(execution_engine.multi_leg_positions) > 0
+
+    def test_multi_leg_scales_to_minimum_order(self, execution_engine, mock_market_api):
+        """Verify multi-leg entry scales up when a leg is below $10 minimum."""
+        from unittest.mock import MagicMock
+        
+        # Setup: Prices so that hedge leg would be sub-$10
+        # Leg 1: BTC @ $100, hedge_ratio 1.0 -> $100 notional (OK)
+        # Leg 2: ETH @ $100, hedge_ratio 0.05 -> $5 notional (below $10)
+        mock_market_api.execute_order.return_value = {
+            'filled_size': 1.0, 'avg_fill_price': 100.0, 'order_id': 'test123'
+        }
+        mock_market_api.get_current_price.return_value = 100.0
+        mock_market_api.get_spot_token_for_perp.return_value = None
+        mock_market_api.get_spot_price.return_value = None
+        mock_market_api.get_spot_balance.return_value = 10000.0
+        mock_market_api.get_perp_balance.return_value = {'withdrawable': 10000.0}
+        mock_market_api.ensure_perp_funds.return_value = True
+        mock_market_api.ensure_spot_funds.return_value = True
+        
+        execution_engine.leverage_manager.calculate_leveraged_position_size.return_value = (1.0, 100.0, 1.0)
+        execution_engine.leverage_manager.can_open_position.return_value = True
+        execution_engine.portfolio_manager.calculate_available_capital_for_trading.return_value = 10000.0
+        execution_engine.save_positions_to_db = MagicMock()
+        
+        signal = {
+            'action': 'enter',
+            'atomic': True,
+            'legs': [
+                {'symbol': 'BTC', 'market_type': 'perp', 'order_side': 'buy', 'side': 'long', 'hedge_ratio': 1.0},
+                {'symbol': 'ETH', 'market_type': 'perp', 'order_side': 'sell', 'side': 'short', 'hedge_ratio': 0.05},  # Would be $5 < $10
+            ]
+        }
+        
+        # Execute with $100 notional (leg2 would be $5)
+        execution_engine.execute_multi_leg_entry('BTC-ETH', signal, 100.0, 'test_strat', {}, 0.8)
+        
+        # Verify: should have scaled up and executed
+        assert len(execution_engine.multi_leg_positions) > 0
+        # Check that execute_order was called (trade went through after scaling)
+        assert mock_market_api.execute_order.called

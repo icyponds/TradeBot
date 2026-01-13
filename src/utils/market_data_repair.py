@@ -206,3 +206,27 @@ class MarketDataRepairer:
                 
             # Sleep slightly to allow other threads priority
             time.sleep(0.1)
+
+    def process_asset(self, symbol: str, days_back: int = 2):
+        """
+        Process a single asset for integrity checks (Integration with Background Fetcher).
+        Checks 5m and 15m timeframes for the specified lookback period.
+        """
+        if not self.db:
+            return
+            
+        try:
+            end_dt = datetime.now(timezone.utc).replace(tzinfo=None)
+            start_dt = end_dt - timedelta(days=days_back)
+            
+            # Check key timeframes
+            for tf in ['5m', '15m']:
+                try:
+                    mismatches = self.verify_and_repair(symbol, tf, start_dt, end_dt, repair=True)
+                    if mismatches > 0:
+                        logger.info(f"[Integrity] {symbol} {tf}: Repaired {mismatches} mismatches")
+                except Exception as e:
+                    logger.debug(f"[Integrity] {symbol} {tf} check failed: {e}")
+                    
+        except Exception as e:
+            logger.error(f"[Integrity] Processing error for {symbol}: {e}")

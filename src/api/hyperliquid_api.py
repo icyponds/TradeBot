@@ -1135,14 +1135,18 @@ class HyperliquidAPI(MarketInterface):
             
             self.repairer = MarketDataRepairer(self, repair_db)
             
-            self._stop_integrity_event.clear()
-            self._integrity_thread = threading.Thread(
-                target=self._run_integrity_check_loop,
-                name="IntegrityCheck",
-                daemon=True
-            )
-            self._integrity_thread.start()
-            self.logger.info("Integrity Check thread started")
+            # Only start if explicitly enabled (defaults to False to prevent startup API contention)
+            if self.config.get('data_collection', {}).get('enable_integrity_check', False):
+                self._stop_integrity_event.clear()
+                self._integrity_thread = threading.Thread(
+                    target=self._run_integrity_check_loop,
+                    name="IntegrityCheck",
+                    daemon=True
+                )
+                self._integrity_thread.start()
+                self.logger.info("Integrity Check thread started")
+            else:
+                self.logger.info("Integrity Check thread disabled (config)")
         except Exception as e:
             self.logger.error(f"Failed to start Integrity Check thread: {e}")
         
@@ -1437,7 +1441,7 @@ class HyperliquidAPI(MarketInterface):
         return result
     
     # @with_retry removed: Avoid double retry logic (outer decorator * inner _rate_limited_call)
-    def get_ohlcv(self, symbol: str, timeframe: str = '1h', limit: int = 100) -> Optional[pd.DataFrame]:
+    def get_ohlcv(self, symbol: str, timeframe: str = '1h', limit: int = 100, market_type: str = None) -> Optional[pd.DataFrame]:
         """
         Get OHLCV candlestick data with in-memory rolling cache.
         Seed once, then serve from cache (updated via ticks).
@@ -1454,10 +1458,15 @@ class HyperliquidAPI(MarketInterface):
         
         # 2. Resolve to API symbol for network requests
         # e.g. "BTC_SPOT" -> "@109", "BTC" -> "BTC"
-        if self._is_spot_symbol(internal_symbol):
+        is_spot = (market_type == 'spot') if market_type else self._is_spot_symbol(internal_symbol)
+
+        if is_spot:
              # It's a spot asset (e.g. BTC_SPOT), resolve to API name (e.g. @109)
              # First map back to API token name (e.g. BTC_SPOT -> UBTC)
-             api_token_name = self.SPOT_INTERNAL_TO_API.get(internal_symbol, internal_symbol)
+             # Fallback: Strip _SPOT to handle dynamic assets (e.g. WOW_SPOT -> WOW)
+             base_name_fallback = internal_symbol.replace('_SPOT', '')
+             api_token_name = self.SPOT_INTERNAL_TO_API.get(internal_symbol, base_name_fallback)
+             
              # Then get the internal ID (e.g. @109)
              api_symbol = self.get_spot_api_name(api_token_name)
              if not api_symbol:
@@ -1795,14 +1804,11 @@ class HyperliquidAPI(MarketInterface):
         Fetch in-progress candles for all timeframes and subscribe to WebSocket.
         If fails after retries, adds to pending queue for later retry.
         """
-        timeframes = ['5m', '15m', '1h', '4h']
+        # timeframes = ['5m', '15m', '1h', '4h']
         
         try:
-            # Step 1: Fetch current in-progress candles for all timeframes
-            for tf in timeframes:
-                self._append_current_candle(symbol, tf, api_symbol)
-                # [RATE-LIMIT] Throttle concurrent requests for same symbol to avoid burst limit (429)
-                time.sleep(0.5)
+            # Step 1: No API fetch needed - Background Fetcher handles all history/gap-filling
+            # We just enable the WebSocket subscription here
             
             # Step 2: Finalize subscription (caches, active set)
             self._finalize_subscription(symbol)

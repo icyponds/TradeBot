@@ -494,12 +494,33 @@ class ExecutionEngine:
             
             if position_size <= 0:
                 return
-                
-            if not self.leverage_manager.can_open_position(symbol, margin_required, float(available_capital)):
-                return
-                
+            
+            # =========================================================================
+            # MINIMUM ORDER VALIDATION: Scale up if any leg would fall below $10
+            # This MUST happen before capital checks so scaled positions respect limits
+            # =========================================================================
             notional_value = position_size * current_price
             legs = signal.get('legs', [])
+            min_notional = 10.0  # Hyperliquid minimum order value
+            scale_factor = 1.0
+            
+            for leg_spec in legs:
+                leg_price = self.get_leg_price(leg_spec['symbol'], leg_spec['market_type'])
+                if leg_price and leg_price > 0:
+                    leg_notional = notional_value * leg_spec.get('hedge_ratio', 1.0)
+                    if leg_notional < min_notional:
+                        scale_factor = max(scale_factor, min_notional / leg_notional)
+            
+            if scale_factor > 1.0:
+                self.logger.info(f"Scaling multi-leg position by {scale_factor:.2f}x to meet ${min_notional} leg minimum")
+                position_size *= scale_factor
+                margin_required *= scale_factor
+                notional_value = position_size * current_price  # Recalculate
+            
+            # Now check if scaled position is still within risk limits
+            if not self.leverage_manager.can_open_position(symbol, margin_required, float(available_capital)):
+                self.logger.warning(f"Multi-leg position for {symbol} blocked after scaling: exceeds risk limits")
+                return
             
             # =========================================================================
             # FUND ALLOCATION: Ensure funds are in the correct accounts
@@ -588,6 +609,7 @@ class ExecutionEngine:
             
             self.logger.info("Fund allocation complete, executing legs...")
             
+
             # Execute legs
             executed_legs = []
             is_atomic = signal.get('atomic', True)

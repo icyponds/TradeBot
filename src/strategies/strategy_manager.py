@@ -1312,6 +1312,15 @@ class StrategyManager:
             # Update regime and change-point gating from market proxy (once per cycle)
             self._maybe_update_regime_and_changepoint()
             
+            # Check for pair rotation/rescanning (Critical for initial load)
+            if hasattr(self.pair_selector, 'should_rescan') and self.pair_selector.should_rescan():
+                # Trigger scan to populate backfill_queue
+                self.logger.info("Triggering pair selection scan...")
+                if hasattr(self.pair_selector, '_trigger_background_scan'):
+                    self.pair_selector._trigger_background_scan()
+                else:
+                    self.pair_selector.scan_and_select_pairs()
+            
             # Retry any pending symbol subscriptions from previous failures
             if hasattr(self.market_api, 'retry_pending_subscriptions'):
                 self.market_api.retry_pending_subscriptions()
@@ -1356,18 +1365,19 @@ class StrategyManager:
             # Update correlations periodically
             if self.correlation_manager.should_update(current_time=current_datetime):
                 # Get all potential symbols from pair selector or config
-                all_symbols = self.pair_selector.get_current_pairs()
+                all_symbols = self.pair_selector.get_ready_pairs()
                 if all_symbols:
                     self.correlation_manager.update_correlations(all_symbols, current_time=current_datetime)
             
-            # Get current trading pairs
-            trading_pairs = self.pair_selector.get_current_pairs()
+            # Get current trading pairs that are fully loaded
+            trading_pairs = self.pair_selector.get_ready_pairs()
             
             if not trading_pairs:
-                self.logger.warning("No trading pairs available")
+                # This is normal during startup while background fetcher loads data
+                self.logger.warning("No ready trading pairs available (waiting for data loading)")
                 return False
             
-            self.logger.debug(f"Analyzing {len(trading_pairs)} trading pairs")
+            self.logger.info(f"Analyzing {len(trading_pairs)} ready trading pairs")
             
             # Prioritize symbols with open positions to ensure they get data
             # before rate limits are exhausted during timeframe boundaries

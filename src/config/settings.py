@@ -95,6 +95,7 @@ def load_config() -> Dict[str, Any]:
             "dynamic_pair_selection": os.getenv("DYNAMIC_PAIR_SELECTION", "true").lower() == "true",
             "min_open_interest": float(os.getenv("MIN_OPEN_INTEREST", "1000000")),
             "scan_interval_minutes": int(os.getenv("SCAN_INTERVAL_MINUTES", "60")),
+            "max_pairs_to_trade": int(os.getenv("MAX_PAIRS_TO_TRADE", "50")),
             "excluded_assets": [asset.strip() for asset in os.getenv("EXCLUDED_ASSETS", "").split(",") if asset.strip()],
             "included_assets": [asset.strip() for asset in os.getenv("INCLUDED_ASSETS", "").split(",") if asset.strip()],
             "base_currency": os.getenv("BASE_CURRENCY", "USDC"),
@@ -449,6 +450,8 @@ def load_config() -> Dict[str, Any]:
         "data_collection": {
             "price_history_max_length": int(os.getenv("PRICE_HISTORY_MAX_LENGTH", "1000")),
             "ohlcv_history_max_length": int(os.getenv("OHLCV_HISTORY_MAX_LENGTH", "1000")),
+            # Startup Integrity Check (Disable by default to prioritize trading startup speed and avoid rate limits)
+            "enable_integrity_check": os.getenv("ENABLE_INTEGRITY_CHECK", "false").lower() == "true",
         },
         
         # Pair Selection Configuration

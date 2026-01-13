@@ -168,6 +168,7 @@ class DynamicPairSelector:
         
         # State tracking
         self.selected_pairs = []
+        self.ready_pairs = set()  # Assets fully loaded and ready to trade
         self.selected_pairs_metadata = {}
         self.asset_metrics: Dict[str, AssetMetrics] = {}
         self.price_history: Dict[str, pd.Series] = {}
@@ -534,7 +535,7 @@ class DynamicPairSelector:
             self.logger.debug(f"Error calculating historical performance for {symbol}: {e}")
             return 0.5, 0.0
     
-    def _get_price_history(self, symbol: str) -> Optional[pd.Series]:
+    def _get_price_history(self, symbol: str, market_type: str = None) -> Optional[pd.Series]:
         """
         Get price history for a symbol.
         
@@ -551,7 +552,8 @@ class DynamicPairSelector:
                 ohlcv = self.market_api.get_ohlcv(
                     symbol, 
                     timeframe='1d',
-                    limit=self.volatility_lookback_days + 5
+                    limit=self.volatility_lookback_days + 5,
+                    market_type=market_type
                 )
                 if ohlcv and len(ohlcv) > 0:
                     df = pd.DataFrame(ohlcv)
@@ -864,8 +866,10 @@ class DynamicPairSelector:
                 base_name = token_list[base_idx].get('name', '')
                 quote_name = token_list[quote_idx].get('name', '')
                 
-                # Get asset context for market data
-                ctx = asset_contexts[i] if i < len(asset_contexts) else {}
+                # Get asset context for market data using explicit index from metadata
+                # (Universe index 'i' may not match context index if lists differ in length)
+                ctx_idx = pair.get('index', i)
+                ctx = asset_contexts[ctx_idx] if ctx_idx < len(asset_contexts) else {}
                 
                 volume_24h = float(ctx.get('dayNtlVlm', 0))
                 
@@ -893,6 +897,8 @@ class DynamicPairSelector:
                     'openInterest': 0,  # Spot doesn't have OI
                     'maxLeverage': 1,   # No leverage on spot
                 })
+                
+
             
             return assets
         except Exception as e:
@@ -964,7 +970,7 @@ class DynamicPairSelector:
                     continue
                 
                 type_label = f"HIP-3 {market_type}" if is_hip3 else market_type
-                self.logger.info(f"Adding {asset_name} ({type_label}) to eligible assets")
+                self.logger.info(f"Adding {asset_name} ({type_label}) to eligible assets | Vol: ${volume_24h:,.0f} | Price: ${mark_price:.4f}")
                 eligible_assets.append(asset)
         
         except Exception as e:
@@ -1121,140 +1127,65 @@ class DynamicPairSelector:
         self.logger.info(f"Top 5 by volume: {[a.get('name', '') for a in sorted_by_volume[:5]]}")
         
         # =====================================================================
-        # STEP 2: Sequential loading with rate limit awareness
-        # Rate limits: ~1200 weight/min, OHLCV ~1-2 weight each
-        # Safe rate: 30-40 requests per minute = ~1.5-2 seconds between requests
+        # STEP 2: Unified Background Loading
+        # Queue ALL assets for background loading to avoid API rate limits
         # =====================================================================
-        # Check for backtest mode or overrides in config
-        is_backtest = self.config.get('backtesting', {}).get('enabled', False) or self.config.get('mode') == 'backtest'
         
-        if is_backtest:
-            # In backtest, load everything instantly
-            RATE_LIMIT_DELAY = 0.0
-            MAX_INITIAL_LOAD = 1000 # Effectively infinite
-            self.logger.info("Backtest mode detected: Disabling rate limits and initial load caps")
-        else:
-            RATE_LIMIT_DELAY = 4.0  # seconds between OHLCV fetches (~15/min) - Slower to protect Persistence
-            MAX_INITIAL_LOAD = 15   # Load top 15 assets initially
+        max_active = self._get_max_pairs_to_trade()
+        self.logger.info(f"Queueing {len(sorted_by_volume)} assets for background scouting (Active Set Cap: {max_active})...")
         
-        # Note: No max_pairs limit - all assets passing quality filters are traded
-        loaded_symbols = set()  # Track what we've loaded
-        assets_with_data = []   # Assets that have OHLCV data ready
-        
-        self.logger.info(f"Loading top {MAX_INITIAL_LOAD} assets by volume (~{MAX_INITIAL_LOAD * 1.5:.0f}s), then strategies start...")
-        
-        for i, asset in enumerate(sorted_by_volume):
-            symbol = asset.get('name', '')
-            market_type = asset.get('market_type', 'perp')
-            
-            if not symbol or symbol in loaded_symbols:
-                continue
-            
-            # Stop initial loading after MAX_INITIAL_LOAD, queue rest for backfill
-            if len(assets_with_data) >= MAX_INITIAL_LOAD:
-                # Queue remaining for staged backfill (thread-safe)
-                remaining = [a for a in sorted_by_volume[i:] if a.get('name', '') not in loaded_symbols]
-                with self._backfill_lock:
-                    for rem_asset in remaining:
-                        sym = rem_asset.get('name', '')
-                        if sym and sym not in self.backfill_symbols_in_queue:
-                            self.backfill_queue.append(rem_asset)
-                            self.backfill_symbols_in_queue.add(sym)
-                self.logger.info(f"Queued {len(remaining)} assets for background fetching")
-                break
-            
-            # Load this asset's data with correct order for continuity
-            try:
-                self.logger.info(f"  [{len(assets_with_data)+1}/{MAX_INITIAL_LOAD}] Loading {symbol} ({market_type})...")
+        # Add all selected assets to queue immediately
+        with self._backfill_lock:
+            for asset in sorted_by_volume:
+                # User Request: Strictly filter zero volume assets
+                if float(asset.get('volume24h', 0)) <= 0:
+                    continue
+                    
+                # 1. Queue the main asset (Perp)
+                sym = asset.get('name', '')
+                market_type = asset.get('market_type', 'perp')
+                queue_key = f"{market_type}:{sym}"
                 
-                # STEP 2a: Subscribe to WebSocket FIRST so ticks can flow immediately
-                if hasattr(self.market_api, 'subscribe_symbol'):
-                    self.market_api.subscribe_symbol(symbol)
+                if sym and queue_key not in self.backfill_symbols_in_queue:
+                    self.backfill_queue.append(asset)
+                    self.backfill_symbols_in_queue.add(queue_key)
                 
-                # STEP 2b: Now fetch historical data (includes current candle)
-                # WebSocket is already connected, so any new ticks will update the current bar
-                t0 = time.time()
-                self._get_price_history(symbol)
-                fetch_duration = time.time() - t0
-                
-                loaded_symbols.add(symbol)
-                assets_with_data.append(asset)
-                
-                # STEP 2c: If this is a perp with a corresponding spot, also load the spot
-                # Use a separate key for spot to handle direct-match tokens (HYPE perp -> HYPE spot)
+                # 2. Queue corresponding Spot asset if applicable (ONLY if it passed eligibility filters)
                 if market_type == 'perp':
-                    spot_token = self.market_api.get_spot_token_for_perp(symbol) if hasattr(self.market_api, 'get_spot_token_for_perp') else None
-                    spot_key = f"{spot_token}_spot" if spot_token else None  # Unique key for spot
-                    if spot_token and spot_key not in loaded_symbols:
-                        self.logger.info(f"       -> Also loading spot: {spot_token}/USDC")
-                        try:
-                            # Subscribe to spot WebSocket first
-                            if hasattr(self.market_api, 'subscribe_symbol'):
-                                self.market_api.subscribe_symbol(spot_token)
+                     if hasattr(self.market_api, 'get_spot_token_for_perp'):
+                        spot_token = self.market_api.get_spot_token_for_perp(sym)
+                        if spot_token:
+                            # Use internal naming convention (e.g., "BTC_SPOT")
+                            spot_internal = f"{spot_token}_SPOT" if not spot_token.endswith('_SPOT') else spot_token
+                            spot_key = f"spot:{spot_internal}"
                             
-                            # Smart sleep before spot fetch if needed
-                            if fetch_duration > 0.2:
-                                time.sleep(RATE_LIMIT_DELAY)
-                                
-                            t0_spot = time.time()
-                            self._get_price_history(spot_token)
-                            spot_fetch_duration = time.time() - t0_spot
+                            # Validates that the spot asset itself passed _filter_assets (volume, price, etc.)
+                            # We check if spot_internal is in the list of eligible assets
+                            is_eligible_spot = any(a.get('name') == spot_internal for a in eligible_assets)
                             
-                            loaded_symbols.add(spot_key)  # Use spot_key to track
-                            
-                            # Update main duration to include spot if it was a heavy fetch
-                            if spot_fetch_duration > 0.2:
-                                fetch_duration = spot_fetch_duration
-                                
-                        except Exception as e:
-                            self.logger.warning(f"       -> Failed to load spot {spot_token}: {e}")
-                
-                # Smart Rate Limiting:
-                # If fetch was fast (< 0.2s), it likely came from Cache/DB -> No API weight used -> Minimal sleep
-                # If fetch was slow (>= 0.2s), it likely hit the API -> Sleep to respect rate limits
-                if fetch_duration < 0.2:
-                    time.sleep(0.01) # Micro-sleep for thread safety
-                else:
-                    time.sleep(RATE_LIMIT_DELAY)
-                
-            except Exception as e:
-                msg = str(e)
-                if "Circuit breaker is open" in msg or "429" in msg:
-                    self.logger.warning(f"Rate limit hit at {symbol}, queueing remaining for background fetch...")
-                    # Queue this and remaining for backfill (thread-safe)
-                    remaining = [a for a in sorted_by_volume[i:] if a.get('name', '') not in loaded_symbols]
-                    with self._backfill_lock:
-                        for rem_asset in remaining:
-                            sym = rem_asset.get('name', '')
-                            if sym and sym not in self.backfill_symbols_in_queue:
-                                self.backfill_queue.append(rem_asset)
-                                self.backfill_symbols_in_queue.add(sym)
-                    self.logger.info(f"Queued {len(remaining)} assets for background fetching")
-                    break
-                else:
-                    self.logger.warning(f"Error loading {symbol}: {e}")
-        
-        self.logger.info(f"Loaded historical data for {len(loaded_symbols)} symbols")
-        
-        # =====================================================================
-        # STEP 3: Build correlation matrix and calculate metrics
-        # =====================================================================
-        # Update Cointegrated Pairs if manager is available (using loaded assets)
-        if self.correlation_manager:
-            relevant_symbols = [a.get('name', '') for a in assets_with_data if a.get('name')]
-            if len(relevant_symbols) >= 2:
-                self.logger.info(f"Updating cointegration for {len(relevant_symbols)} loaded assets...")
-                try:
-                    self.correlation_manager.update_cointegrated_pairs(relevant_symbols)
-                except Exception as e:
-                    self.logger.warning(f"Failed to update cointegration: {e}")
+                            if is_eligible_spot and spot_key not in self.backfill_symbols_in_queue:
+                                self.logger.info(f"  -> Queueing spot pair: {spot_internal}")
+                                spot_asset = {'name': spot_internal, 'market_type': 'spot'}
+                                self.backfill_queue.append(spot_asset)
+                                self.backfill_symbols_in_queue.add(spot_key)
 
-        self._build_correlation_matrix()
+        self.logger.info(f"Queued total {len(self.backfill_queue)} assets (Perp/HIP-3 + Spot) for background fetching")
         
-        # Calculate metrics for loaded assets
+        # In unified mode, nothing is 'loaded' yet
+        assets_with_data = [] 
+        loaded_symbols = set()
+        
+        # Break here - the loop below is removed
+        
+        # =====================================================================
+        # STEP 3: Initial Scoring (using defaults for missing history)
+        # =====================================================================
+        
+        # Calculate metrics for ALL eligible assets (using defaults where history is missing)
         all_metrics: List[AssetMetrics] = []
         
-        for asset in assets_with_data:
+        # In unified mode, we iterate over all eligible assets, not just loaded ones
+        for asset in sorted_by_volume:
             symbol = asset.get('name', '')
             market_type = asset.get('market_type', 'perp')
             is_hip3 = asset.get('is_hip3', False)
@@ -1456,6 +1387,15 @@ class DynamicPairSelector:
         with self._pairs_lock:
             return self.selected_pairs.copy()
     
+    def get_ready_pairs(self) -> List[str]:
+        """
+        Get list of pairs that are fully loaded and ready for trading.
+        Thread-safe.
+        """
+        with self._pairs_lock:
+            # Only return pairs that are both SELECTED and READY
+            return [p for p in self.selected_pairs if p in self.ready_pairs]
+
     def _trigger_background_scan(self):
         """Start a background scan if not already running."""
         if self._scan_in_progress:
@@ -1510,9 +1450,19 @@ class DynamicPairSelector:
         Runs independently of the strategy loop, respecting rate limits.
         """
         RATE_LIMIT_DELAY = 1.5  # ~40 requests per minute
+        STARTUP_DELAY = 1  # Reduced from 30s since initial load is distinct now
         
         try:
-            self.logger.info("Background data fetcher started")
+            self.logger.info(f"Background data fetcher started (waiting {STARTUP_DELAY}s for subscriptions to settle)")
+            # Wait for initial subscriptions to complete before starting scouting
+            # This prevents concurrent API calls from initial load + scouting
+            # Use interruptible sleep loop
+            for _ in range(STARTUP_DELAY):
+                if not self._backfill_running:
+                    return
+                time.sleep(1.0)
+                
+            self.logger.info("Background data fetcher now actively scouting")
         except Exception as log_error:
             print(f"[BackgroundFetcher] Log error: {log_error}")
         
@@ -1533,45 +1483,71 @@ class DynamicPairSelector:
                 
                 sym = asset.get('name', '')
                 market_type = asset.get('market_type', 'perp')
+                queue_key = f"{market_type}:{sym}"
                 
                 if not sym:
                     continue
                 
-                # Skip if already loaded
-                with self._data_lock:
-                    if sym in self.price_history:
+                # High-visibility logging to prove processing order (User Request)
+                self.logger.info(f"[BackgroundFetcher] Processing #{assets_loaded+1}: {sym} ({market_type})")
+                print(f"DEBUG: Processing #{assets_loaded+1}: {sym} ({market_type})", flush=True)  # FORCE PRINT for user visibility
+                
+                # Check if already ready
+                with self._pairs_lock:
+                    if sym in self.ready_pairs:
                         with self._backfill_lock:
-                            self.backfill_symbols_in_queue.discard(sym)
+                            self.backfill_symbols_in_queue.discard(queue_key)
                         continue
                 
                 # Fetch data for this asset
                 try:
                     assets_loaded += 1
-                    # Log every 10 assets or first few for visibility
                     if assets_loaded <= 3 or assets_loaded % 10 == 0:
-                        self.logger.info(f"[BackgroundFetcher] Loading {sym} ({market_type})... [{assets_loaded} loaded]")
+                        self.logger.info(f"[BackgroundFetcher] Scouting {sym} ({market_type})... [{assets_loaded} scouted]")
                     else:
-                        self.logger.debug(f"[BackgroundFetcher] Loading {sym} ({market_type})...")
+                        self.logger.debug(f"[BackgroundFetcher] Scouting {sym} ({market_type})...")
                     
-                    # Subscribe to WebSocket FIRST so ticks flow immediately
-                    if hasattr(self.market_api, 'subscribe_symbol'):
-                        self.market_api.subscribe_symbol(sym)
+                    # Fetch historical data (for scoring) - NO subscription yet
+                    # Subscription happens in _add_to_pool if the asset qualifies
+                    self._get_price_history(sym, market_type=market_type)
                     
-                    # Now fetch historical data
-                    self._get_price_history(sym)
+                    # Interleaved Integrity Check (User Request: Sequential Repair)
+                    # Check/Repair this specific asset NOW, respecting rate limits and priority order
+                    if hasattr(self.market_api, 'repairer') and self.market_api.repairer:
+                        self.logger.debug(f"[BackgroundFetcher] Running integrity check for {sym}")
+                        self.market_api.repairer.process_asset(sym)
                     
                     with self._backfill_lock:
-                        self.backfill_symbols_in_queue.discard(sym)
+                        self.backfill_symbols_in_queue.discard(queue_key)
                     
-                    # Dynamically add to trading pairs if it qualifies
+                    # Dynamically add to trading pairs using rotational scouting
                     self._try_add_to_trading_pairs(asset)
                     
-                    # Also load corresponding spot if this is a perp
-                    # For direct-match tokens (HYPE perp -> HYPE spot), always try to load spot
-                    if market_type == 'perp':
+                    # Check if asset was selected and pre-warm data
+                    with self._pairs_lock:
+                        perp_in_pool = sym in self.selected_pairs
+                    
+                    if perp_in_pool:
+                        # Pre-warm all required timeframes so strategies have data immediately
+                        # This replaces the initial load logic
+                        try:
+                            # 1h is usually covered by history fetch, but ensure all
+                            for tf in ['5m', '15m', '1h', '4h']:
+                                self.market_api.get_ohlcv(sym, tf, market_type=market_type)
+                            
+                            # Mark as ready for trading logic
+                            with self._pairs_lock:
+                                self.ready_pairs.add(sym)
+                            
+                            self.logger.info(f"  -> {sym} fully loaded and ready for trading")
+                        except Exception as e:
+                            self.logger.warning(f"  -> Failed to pre-warm {sym}: {e}")
+                    
+                    # Also load corresponding spot if this perp was ADDED to the pool
+                    # (Spot is only needed for stat arb if the perp is actively traded)
+                    
+                    if market_type == 'perp' and perp_in_pool:
                         spot_token = self.market_api.get_spot_token_for_perp(sym) if hasattr(self.market_api, 'get_spot_token_for_perp') else None
-                        # For U-prefix tokens, check if spot is already loaded
-                        # For direct-match tokens (sym == spot_token), always load spot data
                         with self._data_lock:
                             is_direct_match = (spot_token == sym) if spot_token else False
                             spot_already_loaded = (not is_direct_match) and (spot_token in self.price_history) if spot_token else True
@@ -1579,15 +1555,13 @@ class DynamicPairSelector:
                         if spot_token and not spot_already_loaded:
                             time.sleep(RATE_LIMIT_DELAY)
                             try:
-                                self._get_price_history(spot_token)
+                                self._get_price_history(spot_token, market_type='spot')
+                                # Subscribe spot for real-time data since perp is in pool
                                 if hasattr(self.market_api, 'subscribe_symbol'):
                                     self.market_api.subscribe_symbol(spot_token)
-                                self.logger.debug(f"[BackgroundFetcher] Loaded spot {spot_token}/USDC")
+                                self.logger.debug(f"[BackgroundFetcher] Loaded spot {spot_token}/USDC for {sym}")
                             except Exception as e:
                                 self.logger.warning(f"[BackgroundFetcher] Failed spot {spot_token}: {e}")
-                                # Still subscribe to WebSocket
-                                if hasattr(self.market_api, 'subscribe_symbol'):
-                                    self.market_api.subscribe_symbol(spot_token)
                     
                     # Rate limit delay
                     time.sleep(RATE_LIMIT_DELAY)
@@ -1603,7 +1577,7 @@ class DynamicPairSelector:
                     else:
                         self.logger.warning(f"[BackgroundFetcher] Error for {sym}: {e}")
                         with self._backfill_lock:
-                            self.backfill_symbols_in_queue.discard(sym)
+                            self.backfill_symbols_in_queue.discard(queue_key)
                         time.sleep(RATE_LIMIT_DELAY)
                         
             except Exception as e:
@@ -1628,11 +1602,13 @@ class DynamicPairSelector:
     
     def _try_add_to_trading_pairs(self, asset: Dict[str, Any]):
         """
-        Try to add a newly-loaded asset to the trading pairs pool.
+        Try to add a newly-loaded asset to the trading pairs pool using rotational scouting.
         
         Called by background fetcher after loading an asset's data.
-        Adds the asset if it passes quality filters (no max_pairs limit).
-        Quality filters: min_open_interest, min_volume_threshold, liquidity.
+        
+        Rotational Scouting Logic:
+        1. If pool has room (< max_pairs_to_trade): Add immediately.
+        2. If pool is full: Only add if score > lowest existing score (swap).
         
         Thread-safe: Uses _pairs_lock to prevent race conditions with main thread.
         """
@@ -1647,39 +1623,91 @@ class DynamicPairSelector:
             if market_type == 'spot':
                 return
             
+            # Calculate metrics for this asset BEFORE acquiring lock
+            metrics = self._calculate_asset_metrics(asset)
+            if not metrics or metrics.composite_score <= 0:
+                self.logger.debug(f"[DynamicPairs] Skipped {symbol}: insufficient metrics or score")
+                return
+            
             # Thread-safe check and add
             with self._pairs_lock:
                 # Already in selected pairs?
                 if symbol in self.selected_pairs:
                     return
                 
-                # Calculate metrics for this asset
-                metrics = self._calculate_asset_metrics(asset)
-                if not metrics or metrics.composite_score <= 0:
-                    self.logger.debug(f"[DynamicPairs] Skipped {symbol}: insufficient metrics or score")
-                    return
-                
                 # Apply diversification penalty based on current pairs
                 final_score = self._calculate_composite_score(metrics, self.selected_pairs)
                 
                 current_count = len(self.selected_pairs)
+                max_pool_size = self._get_max_pairs_to_trade()
                 
-                # No max_pairs limit - add all assets that pass quality filters
-                self.selected_pairs.append(symbol)
-                self.selected_pairs_metadata[symbol] = {
-                    'market_type': market_type,
-                    'is_hip3': asset.get('is_hip3', False),
-                    'dex': asset.get('dex', ''),
-                    'open_interest': asset.get('openInterest', 0),
-                    'volume_24h': asset.get('volume_24h', 0),
-                    'max_leverage': asset.get('maxLeverage', 10),
-                    'composite_score': final_score,
-                }
-            
-            self.logger.info(f"[DynamicPairs] Added {symbol} to trading pool (total: {current_count + 1}) | Score: {final_score:.3f}")
+                # Rotational Scouting Logic
+                if current_count < max_pool_size:
+                    # Pool has room - add directly
+                    self._add_to_pool(symbol, asset, market_type, final_score)
+                    self.logger.info(f"[DynamicPairs] Promoted {symbol} into Core Pool (total: {current_count + 1}) | Score: {final_score:.3f}")
+                else:
+                    # Pool is full - check if we should swap
+                    lowest_symbol, lowest_score = self._get_lowest_scorer()
                     
+                    if lowest_symbol and final_score > lowest_score:
+                        # Swap: Evict lowest, add new
+                        self._remove_from_pool(lowest_symbol)
+                        self._add_to_pool(symbol, asset, market_type, final_score)
+                        self.logger.info(f"[DynamicPairs] Swapped {symbol} (Score: {final_score:.3f}) into Core Pool. Evicted {lowest_symbol} (Score: {lowest_score:.3f})")
+                    else:
+                        # Asset data is in DB (scouted) but not in trading pool
+                        self.logger.debug(f"[DynamicPairs] Scouted {symbol} (Score: {final_score:.3f}) - below cutoff {lowest_score:.3f}")
+                
         except Exception as e:
             self.logger.debug(f"[DynamicPairs] Error adding {asset.get('name', '?')}: {e}")
+    
+    def _add_to_pool(self, symbol: str, asset: Dict[str, Any], market_type: str, score: float):
+        """Add a symbol to the trading pool. Must be called within _pairs_lock."""
+        self.selected_pairs.append(symbol)
+        self.selected_pairs_metadata[symbol] = {
+            'market_type': market_type,
+            'is_hip3': asset.get('is_hip3', False),
+            'dex': asset.get('dex', ''),
+            'open_interest': asset.get('openInterest', 0),
+            'volume_24h': asset.get('volume_24h', 0),
+            'max_leverage': asset.get('maxLeverage', 10),
+            'composite_score': score,
+        }
+        # Subscribe to WebSocket for real-time data
+        if hasattr(self.market_api, 'subscribe_symbol'):
+            self.market_api.subscribe_symbol(symbol)
+    
+    def _remove_from_pool(self, symbol: str):
+        """Remove a symbol from the trading pool. Must be called within _pairs_lock."""
+        if symbol in self.selected_pairs:
+            self.selected_pairs.remove(symbol)
+        if symbol in self.selected_pairs_metadata:
+            del self.selected_pairs_metadata[symbol]
+        
+        # Remove from ready set
+        self.ready_pairs.discard(symbol)
+        
+        # Unsubscribe from WebSocket
+        if hasattr(self.market_api, 'unsubscribe_symbol'):
+            self.market_api.unsubscribe_symbol(symbol)
+    
+    def _get_lowest_scorer(self) -> tuple:
+        """Get the symbol with the lowest score in the pool. Must be called within _pairs_lock."""
+        if not self.selected_pairs:
+            return None, float('inf')
+        
+        lowest_symbol = None
+        lowest_score = float('inf')
+        
+        for sym in self.selected_pairs:
+            meta = self.selected_pairs_metadata.get(sym, {})
+            score = meta.get('composite_score', 0.0)
+            if score < lowest_score:
+                lowest_score = score
+                lowest_symbol = sym
+        
+        return lowest_symbol, lowest_score
     
     def update_pair_performance(self, symbol: str, pnl: float):
         """
