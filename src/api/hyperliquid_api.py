@@ -989,7 +989,7 @@ class HyperliquidAPI(MarketInterface):
             # Record WebSocket message for health monitoring
             self.health_monitor.record_ws_message()
             
-            mids = data.get('mids', {})
+            mids = data.get('data', {}).get('mids', {}) if 'data' in data else data.get('mids', {})
             timestamp = time.time()
             
             with self._data_lock:
