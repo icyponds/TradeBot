@@ -14,8 +14,8 @@ class TestDataIntegrity:
         shared_api_client.market_db.reset_mock()
         return shared_api_client
 
-    def test_on_bar_complete_delegation(self, api_client):
-        """Verify _on_bar_complete submits task to executor and does NOT write directly."""
+    def test_on_bar_complete_optimistic_delegation(self, api_client):
+        """Verify _on_bar_complete submits task to executor for optimistic persistence."""
         symbol = "BTC"
         timeframe = "1h"
         bar = {'time': 1700000000, 'open': 100, 'close': 110}
@@ -30,46 +30,27 @@ class TestDataIntegrity:
         api_client._persistence_executor.submit.assert_called_once()
         args = api_client._persistence_executor.submit.call_args[0]
         # First arg should be the function
-        assert args[0] == api_client._fetch_and_persist_candle
+        assert args[0] == api_client._persist_optimistic_candle
         # Other args matches
         assert args[1] == symbol
         assert args[2] == timeframe
-        assert args[3] == bar['time']
+        assert args[3] == bar
         
-        # Verify DB NOT touched directly
-        api_client.market_db.insert_market_data.assert_not_called()
-
-    @patch('time.sleep') # Don't wait in test
-    def test_fetch_and_persist_success(self, mock_sleep, api_client):
-        """Verify worker fetches from API and persists verified candle."""
+    def test_persist_optimistic_candle_success(self, api_client):
+        """Verify _persist_optimistic_candle writes directly to DB without API calls."""
         symbol = "BTC"
-        api_symbol = "BTC" # assume same
         timeframe = "5m"
-        timestamp = 1700000000 # Start time
-        
-        # Mock API response for candles_snapshot
-        # It should request range [start, end]
-        # Let's say we return the correct candle
-        verified_candle = {
-            't': timestamp * 1000,
-            'o': 100.0,
-            'h': 105.0,
-            'l': 99.0,
-            'c': 102.0,
-            'v': 500.0
+        bar = {
+            'time': 1700000000,
+            'open': 100.0,
+            'high': 105.0,
+            'low': 99.0,
+            'close': 102.0,
+            'volume': 500.0
         }
-        api_client.info.candles_snapshot.return_value = [verified_candle]
         
-        # Setup interval mock
-        with patch.object(api_client, '_get_interval_ms', return_value=300000): # 5m
-             with patch.object(api_client, '_get_api_symbol', return_value="BTC"):
-                 # Trigger worker directly
-                 api_client._fetch_and_persist_candle(symbol, timeframe, timestamp)
-        
-        # Verify API called with correct range
-        # start = 1700000000000
-        # end =   1700000300000 - 1 + 1000 (buffer)
-        api_client.info.candles_snapshot.assert_called_once()
+        # Trigger worker directly
+        api_client._persist_optimistic_candle(symbol, timeframe, bar)
         
         # Verify DB Insert
         api_client.market_db.insert_market_data.assert_called_once()
@@ -78,41 +59,21 @@ class TestDataIntegrity:
         assert len(df_arg) == 1
         assert df_arg.iloc[0]['close'] == 102.0
         assert df_arg.index[0].timestamp() == 1700000000
+        
+        # Verify NO API calls made (redundant check but good for integrity)
+        api_client.info.candles_snapshot.assert_not_called()
 
-    @patch('time.sleep')
-    def test_fetch_and_persist_verification_failed(self, mock_sleep, api_client):
-        """Verify worker does NOT persist if API returns no data or mismatch."""
+    def test_persist_optimistic_candle_error_handling(self, api_client):
+        """Verify exception handling during persistence."""
         symbol = "BTC"
         timeframe = "5m"
-        timestamp = 1700000000
+        bar = {'time': 1700000000}
         
-        # Mock API returning EMPTY list (e.g. data not ready yet)
-        api_client.info.candles_snapshot.return_value = []
+        # Simulate DB error
+        api_client.market_db.insert_market_data.side_effect = Exception("DB Disk Full")
         
-        with patch.object(api_client, '_get_interval_ms', return_value=300000):
-            with patch.object(api_client, '_get_api_symbol', return_value="BTC"):
-                api_client._fetch_and_persist_candle(symbol, timeframe, timestamp)
+        # Should catch exception and log error, NOT raise
+        api_client._persist_optimistic_candle(symbol, timeframe, bar)
         
-        # Verify NO DB Insert
-        api_client.market_db.insert_market_data.assert_not_called()
-        
-    @patch('time.sleep')
-    def test_fetch_and_persist_mismatch(self, mock_sleep, api_client):
-        """Verify worker ignores candles with wrong timestamp."""
-        symbol = "BTC"
-        timeframe = "5m"
-        timestamp = 1700000000
-        
-        # Mock API returning candle from DIFFERENT time (weird edge case)
-        wrong_candle = {
-            't': (timestamp + 600) * 1000, # 10 mins later
-            'o': 100.0, 'h': 101.0, 'l': 99.0, 'c': 100.0, 'v': 10.0
-        }
-        api_client.info.candles_snapshot.return_value = [wrong_candle]
-        
-        with patch.object(api_client, '_get_interval_ms', return_value=300000):
-            with patch.object(api_client, '_get_api_symbol', return_value="BTC"):
-                api_client._fetch_and_persist_candle(symbol, timeframe, timestamp)
-        
-        # Verify NO DB Insert
-        api_client.market_db.insert_market_data.assert_not_called()
+        # Verify DB attempted
+        api_client.market_db.insert_market_data.assert_called_once()

@@ -10,6 +10,38 @@ from unittest.mock import MagicMock, patch
 import pandas as pd
 
 
+class TestSymbolResolution:
+    """Tests for symbol resolution logic."""
+
+    def test_hip3_symbol_preserved(self):
+        """Verify that HIP-3 symbols with colons (e.g. km:US500) are NOT stripped."""
+        from src.utils.market_data_repair import MarketDataRepairer
+        
+        mock_api = MagicMock()
+        mock_api.get_spot_api_name.return_value = None  # Default: not a spot asset
+        mock_db = MagicMock()
+        repairer = MarketDataRepairer(mock_api, mock_db)
+        
+        # Should be preserved
+        assert repairer.resolve_api_symbol("km:US500") == "km:US500"
+
+        
+    def test_spot_internal_resolution(self):
+        """Verify internal spot naming conventions still resolve."""
+        from src.utils.market_data_repair import MarketDataRepairer
+        
+        mock_api = MagicMock()
+        # Mock spot resolution
+        mock_api.get_spot_api_name.side_effect = lambda x: "@109" if x == "UBTC" else None
+        mock_api.SPOT_INTERNAL_TO_API = {"BTC_SPOT": "UBTC"}
+        
+        mock_db = MagicMock()
+        repairer = MarketDataRepairer(mock_api, mock_db)
+        
+        # BTC_SPOT -> UBTC -> @109
+        assert repairer.resolve_api_symbol("BTC_SPOT") == "@109"
+
+
 class TestTimezoneHandling:
     """Tests for correct timezone handling in MarketDataRepairer."""
     

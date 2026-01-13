@@ -804,6 +804,11 @@ class HyperliquidAPI(MarketInterface):
         self.cache_ttl_asset_info = cache_config.get('asset_info_ttl', 5.0)
         self.cache_ttl_positions = cache_config.get('positions_ttl', 1.0)
         self.ohlcv_cache = OhlcvCache()
+        self.ohlcv_cache.on_bar_complete_callback = self._on_bar_complete
+        
+        # Backfill state to prevent infinite loops on pre-genesis data
+        # Structure: {(symbol, timeframe): min_timestamp_checked_ms}
+        self._backfill_state = {}
         
         # Health monitoring configuration
         health_config = config.get('api', {}).get('health_monitor', {})
@@ -1449,6 +1454,7 @@ class HyperliquidAPI(MarketInterface):
         Handles both perp symbols (e.g., "BTC") and spot tokens (e.g., "UBTC").
         Spot tokens are automatically converted to their API name (e.g., "@109").
         """
+
         # Determine the API symbol to use for fetching
         # Perp symbols work directly, spot tokens need conversion to @N format
         
@@ -1540,35 +1546,43 @@ class HyperliquidAPI(MarketInterface):
                                     # Append to local df so we return full dataset
                                     df = pd.concat([df, new_df_db]).sort_index()
                                 
-                                # Prepare for Cache (All including Incomplete) - Handle separately if needed, 
-                                # but for get_ohlcv strictly returning DB+Gap is usually enough. 
-                                # The original code updated cache here too. maintaining structure:
-                                
                         # --- 2. Backward Gap Logic (New: Historical Backfill) ---
                         earliest_ts = df.index.min()
                         # Calculate required start time based on limit
+                        # Calculate required start time based on limit
                         required_duration_ms = limit * interval_ms
                         required_start_dt = (pd.Timestamp.utcnow().replace(tzinfo=None) - 
-                                           pd.Timedelta(milliseconds=required_duration_ms))
+                                            pd.Timedelta(milliseconds=required_duration_ms))
                         
                         # Add a small buffer (e.g. 1 interval) to avoid fencepost errors
                         if earliest_ts > required_start_dt + pd.Timedelta(milliseconds=interval_ms):
-                            self.logger.info(f"Historical Backfill needed for {symbol} {timeframe}. "
-                                           f"Have from {earliest_ts}, need from {required_start_dt}")
-                            
                             backfill_start_ms = int(required_start_dt.timestamp() * 1000)
-                            backfill_end_ms = int(earliest_ts.timestamp() * 1000)
                             
-                            # Sanity check
-                            if backfill_end_ms > backfill_start_ms:
-                                try:
-                                    hist_candles = self.info.candles_snapshot(api_symbol, timeframe, 
-                                                                            backfill_start_ms, backfill_end_ms)
-                                    if hist_candles:
-                                        # Filter strictly before earliest_ts to avoid dupes
-                                        hist_candles = [c for c in hist_candles if c['t'] < backfill_end_ms]
+                            # Loop Prevention: Check if we already tried this far back
+                            min_checked_ms = self._backfill_state.get((symbol, timeframe))
+                            
+                            if min_checked_ms and backfill_start_ms < min_checked_ms:
+                                # We already checked past this point and found nothing (genesis limit)
+                                # Silently skip to avoid log spam
+                                pass
+                            else:
+                                self.logger.info(f"Historical Backfill needed for {symbol} {timeframe}. "
+                                               f"Have from {earliest_ts}, need from {required_start_dt}")
+                                
+                                backfill_end_ms = int(earliest_ts.timestamp() * 1000)
+                            
+                                # Sanity check
+                                if backfill_end_ms > backfill_start_ms:
+                                    try:
+                                        hist_candles = self.info.candles_snapshot(api_symbol, timeframe, 
+                                                                                backfill_start_ms, backfill_end_ms)
                                         
+                                        # Filter strictly before earliest_ts to avoid dupes
+                                        valid_candles = []
                                         if hist_candles:
+                                            valid_candles = [c for c in hist_candles if c['t'] < backfill_end_ms]
+                                        
+                                        if valid_candles:
                                             hist_bars = [{
                                                 'time': c['t'] // 1000,
                                                 'open': float(c['o']),
@@ -1576,7 +1590,7 @@ class HyperliquidAPI(MarketInterface):
                                                 'low': float(c['l']),
                                                 'close': float(c['c']),
                                                 'volume': float(c['v']),
-                                            } for c in hist_candles]
+                                            } for c in valid_candles]
                                             hist_df = pd.DataFrame(hist_bars)
                                             hist_df['timestamp'] = pd.to_datetime(hist_df['time'], unit='s')
                                             hist_df.set_index('timestamp', inplace=True)
@@ -1586,9 +1600,15 @@ class HyperliquidAPI(MarketInterface):
                                             
                                             # Prepend to local df
                                             df = pd.concat([hist_df, df]).sort_index()
-                                            
-                                except Exception as e:
-                                    self.logger.warning(f"Failed to backfill history for {symbol}: {e}")
+                                        else:
+                                            # No candles found in this range (either empty fetch or all filtered).
+                                            # This likely means we hit the asset genesis.
+                                            # Update state to prevent infinite retries.
+                                            self._backfill_state[(symbol, timeframe)] = backfill_end_ms
+                                            self.logger.info(f"BACKFILL: No data found for {symbol} {timeframe} before {earliest_ts}. Marked genesis.")
+                                                
+                                    except Exception as e:
+                                        self.logger.warning(f"Failed to backfill history for {symbol}: {e}")
 
 
 
@@ -1712,88 +1732,35 @@ class HyperliquidAPI(MarketInterface):
         # Submit to background executor to avoid blocking WebSocket thread
         try:
             self._persistence_executor.submit(
-                self._fetch_and_persist_candle, 
+                self._persist_optimistic_candle, 
                 symbol, 
                 timeframe, 
-                bar['time']
+                bar
             )
-            self.logger.info(f"CALLBACK: Subscribed task for {symbol} {timeframe}")
+            self.logger.debug(f"CALLBACK: Subscribed persist task for {symbol} {timeframe}")
         except Exception as e:
             self.logger.error(f"CALLBACK: Failed to submit task: {e}")
 
-    def _fetch_and_persist_candle(self, symbol: str, timeframe: str, timestamp: int):
+    def _persist_optimistic_candle(self, symbol: str, timeframe: str, bar: dict):
         """
-        Worker method to fetch the official finalized candle from API and persist it.
+        Worker method to persist the cached candle directly to the DB.
+        Optimistic write: Assumes WebSocket data is correct for the closed candle.
         """
         try:
-            self.logger.info(f"PERSIST_WORKER: Starting {symbol} {timeframe} for {timestamp}")
-            # Wait a brief buffer to ensure exchange engine has finalized the candle
-            time.sleep(2.0)
+            # Format for DB (Direct from OhlcvCache bar)
+            # Market Data Table Schema: symbol, timeframe, timestamp, open, high, low, close, volume
+            # No 'trades' column required.
             
-            # Fetch specific candle from API (Source of Truth)
-            # We want the candle STARTING at timestamp
-            start_ms = timestamp * 1000
-            end_ms = start_ms + self._get_interval_ms(timeframe) - 1
+            df = pd.DataFrame([bar])
+            df['timestamp'] = pd.to_datetime(df['time'], unit='s')
+            df.set_index('timestamp', inplace=True)
             
-            # Wrapper for rate-limited fetch
-            def _fetch():
-                return self.info.candles_snapshot(
-                    self._get_api_symbol(symbol), 
-                    timeframe, 
-                    start_ms, 
-                    end_ms + 1000 # Buffer to ensure we cover the range
-                )
-
-            # Use rate limiter to prevent spamming on batch persistence
-            candles = self._rate_limited_call(_fetch)
-            
-            # Log what we got
-            if not candles:
-                self.logger.warning(f"PERSIST_WORKER: No candles returned for {symbol} {timeframe} start_ms={start_ms}")
-            else:
-                self.logger.info(f"PERSIST_WORKER: Got {len(candles)} candles for {symbol}. First t={candles[0]['t']}, Target={start_ms}")
-
-            # Find the exact candle matching our timestamp
-            target_candle = None
-            if candles:
-                for c in candles:
-                    if c['t'] == start_ms:
-                        target_candle = c
-                        break
-            
-            if target_candle:
-                # Format for DB
-                bar = {
-                    'time': target_candle['t'] // 1000,
-                    'open': float(target_candle['o']),
-                    'high': float(target_candle['h']),
-                    'low': float(target_candle['l']),
-                    'close': float(target_candle['c']),
-                    'volume': float(target_candle['v']),
-                    'trades': int(target_candle.get('n', 0))
-                }
-                
-                # Persist to DB
-                df = pd.DataFrame([bar])
-                df['timestamp'] = pd.to_datetime(df['time'], unit='s')
-                df.set_index('timestamp', inplace=True)
-                
-                self.logger.info(f"PERSIST_WORKER: Inserting {symbol} into DB...")
-                self.market_db.insert_market_data(df, symbol, timeframe)
-                self.logger.info(f"Persisted VERIFIED {symbol}/{timeframe} candle @ {bar['time']}")
-                
-                # OPTIONAL: Self-heal in-memory cache if needed (omitted for safety to avoid race conditions 
-                # with active WebSocket updates, as the next in-memory candle is already building)
-                
-            else:
-                self.logger.warning(
-                    f"Could not verify candle for {symbol}/{timeframe} @ {timestamp}. "
-                    f"Range requested: {start_ms}-{end_ms}. "
-                    f"Returned candidates: {[c['t'] for c in candles] if candles else 'None'}"
-                )
+            # Persist to DB
+            self.market_db.insert_market_data(df, symbol, timeframe)
+            self.logger.info(f"PERSIST: Wrote {symbol}/{timeframe} candle @ {bar['time']} (Optimistic)")
                 
         except Exception as e:
-            self.logger.error(f"Failed to persist verified candle for {symbol}/{timeframe}: {e}", exc_info=True)
+            self.logger.error(f"Failed to persist optimistic candle for {symbol}/{timeframe}: {e}", exc_info=True)
     
     def _get_api_symbol(self, symbol: str) -> str:
         """Get symbol formatted for API requests."""

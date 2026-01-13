@@ -44,9 +44,11 @@ class MarketDataRepairer:
             'BTC_SPOT' -> '@109' (internal spot name resolved)
         """
         # Handle deployer prefixes (e.g., 'xyz:SOL' -> 'SOL')
-        if ':' in symbol:
-            parts = symbol.split(':')
-            return parts[1]
+        # [MODIFIED] Removed prefix stripping. HIP-3 assets like 'km:US500' MUST keep their prefix.
+        # if ':' in symbol:
+        #    parts = symbol.split(':')
+        #    return parts[1]
+
         
         # Handle spot assets - need to convert to @index format
         # Check if this is a spot asset that needs resolution

@@ -2,6 +2,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 import pandas as pd
 from datetime import datetime, timedelta, timezone
+import time
 
 class TestAPIBackfill:
     
@@ -147,4 +148,50 @@ class TestAPIBackfill:
              # If fetch_start is >= db_min_ts, it's a forward fill. 
              # If fetch_start < db_min_ts, it's a backfill (BAD for this test).
              assert fetch_start >= db_min_ts, "Triggered historical backfill when not needed!"
+
+    def test_backfill_loop_prevention(self, api_client):
+        """Test that infinite backfill loops are prevented by state checking."""
+        
+        # 1. Setup Wrapper
+        symbol = "BTC"
+        interval = "1h"
+        # Mock API to return empty list (Simulating Genesis)
+        api_client.info.candles_snapshot.return_value = []
+        api_client.info.candles_snapshot.side_effect = None # Clear leaky side_effect from previous tests
+        # Clear backfill state to ensure clean test
+        if hasattr(api_client, '_backfill_state'):
+            api_client._backfill_state.clear()
+        
+        # Seed cache with some recent data
+        now = time.time()
+        recent_bars = [{
+            'time': int(now - i*3600),
+            'open': 100, 'high': 101, 'low': 99, 'close': 100, 'volume': 100
+        } for i in range(10)]
+        api_client.ohlcv_cache.seed(symbol, interval, recent_bars)
+        
+        # FIX: Also seed market_db so _fetch logic sees "partial data" and triggers backfill check
+        df_db = pd.DataFrame(recent_bars)
+        df_db['timestamp'] = pd.to_datetime(df_db['time'], unit='s')
+        df_db.set_index('timestamp', inplace=True)
+        # Ensure index is sorted ascending (recent_bars creation was descending)
+        df_db.sort_index(inplace=True)
+        api_client.market_db.get_market_data.return_value = df_db
+        
+        # 2. First Call: Should attempt to fetch history
+        # Requiring 20 bars (we have 10), so it will look back
+        df = api_client.get_ohlcv(symbol, interval, limit=20)
+        
+        # Verify call was made
+        assert api_client.info.candles_snapshot.call_count == 1
+        
+        # 3. Second Call: Should SHORT-CIRCUIT
+        # The first call returned empty, so _backfill_state should be updated
+        df = api_client.get_ohlcv(symbol, interval, limit=20)
+        
+        # Verify call count is STILL 1 (No new call)
+        assert api_client.info.candles_snapshot.call_count == 1
+        
+        # Verify state was set
+        assert (symbol, interval) in api_client._backfill_state
              

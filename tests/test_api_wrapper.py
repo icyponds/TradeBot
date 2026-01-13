@@ -16,6 +16,11 @@ class TestHyperliquidAPI:
         """Test API client initialization."""
         assert api_client.base_url == mock_config['api']['base_url']
         assert api_client.wallet_address == mock_config['api']['wallet_address']
+        
+    def test_ohlcv_callback_assignment(self, api_client):
+        """Test that OhlcvCache callback is correctly assigned."""
+        # This prevents regression where callback was left None
+        assert api_client.ohlcv_cache.on_bar_complete_callback == api_client._on_bar_complete
 
     def test_get_ohlcv_retry_logic(self, api_client):
         """Test that get_ohlcv retries on failure."""
@@ -186,3 +191,66 @@ class TestHyperliquidAPI:
         # Verify integrity thread stopped
         assert api_client._stop_integrity_event.set.called
         api_client._integrity_thread.join.assert_called_with(timeout=2.0)
+
+    def test_persistence_direct_write(self, api_client):
+        """
+        Verify that _on_bar_complete triggers direct DB persistence via _persist_optimistic_candle
+        AND does NOT make API calls.
+        """
+        # 1. Setup Mock DB
+        api_client.market_db = MagicMock()
+        
+        # 2. Mock Executor to run synchronously (or capture the task)
+        # Replacing submit with a direct call lambda for simplicity in verifying the worker logic too
+        def immediate_submit(fn, *args, **kwargs):
+            fn(*args, **kwargs)
+        
+        api_client._persistence_executor = MagicMock()
+        api_client._persistence_executor.submit.side_effect = immediate_submit
+        
+        # 3. Setup Mock Data
+        symbol = "BTC"
+        timeframe = "1h"
+        bar = {
+            'time': 1700000000, 
+            'open': 100.0, 
+            'high': 105.0, 
+            'low': 95.0, 
+            'close': 102.0, 
+            'volume': 500.0
+        }
+        
+        # 4. Mock API client info to ensure it's NOT used
+        api_client.info = MagicMock()
+        
+        # 5. Trigger Callback
+        api_client._on_bar_complete(symbol, timeframe, bar)
+        
+        # 6. Verify Executor submitted the task (since we mocked side_effect, it ran too)
+        api_client._persistence_executor.submit.assert_called_once()
+        
+        # 7. Verify DB Insert Called
+        assert api_client.market_db.insert_market_data.called
+        call_args = api_client.market_db.insert_market_data.call_args
+        df_arg = call_args[0][0]
+        sym_arg = call_args[0][1]
+        tf_arg = call_args[0][2]
+        
+        assert sym_arg == symbol
+        assert tf_arg == timeframe
+        assert len(df_arg) == 1
+        assert df_arg.iloc[0]['close'] == 102.0
+        # Check index
+        assert df_arg.index[0].timestamp() == 1700000000
+        
+        # 8. CRITICAL: Verify NO API calls were made (Zero API Calls requirement)
+        api_client.info.candles_snapshot.assert_not_called()
+        
+    def test_on_bar_complete_no_db(self, api_client):
+        """Verify _on_bar_complete does nothing if market_db is None."""
+        api_client.market_db = None
+        api_client._persistence_executor = MagicMock()
+        
+        api_client._on_bar_complete("BTC", "1h", {})
+        
+        api_client._persistence_executor.submit.assert_not_called()
