@@ -34,10 +34,36 @@ class MarketDataRepairer:
         return mapping.get(timeframe, 3600)
 
     def resolve_api_symbol(self, symbol: str) -> str:
-        """Resolve internal symbol to API symbol (e.g., 'xyz:SOL' -> 'SOL')."""
+        """
+        Resolve internal symbol to API symbol.
+        
+        Examples:
+            'xyz:SOL' -> 'SOL' (HIP-3 deployer prefix stripped)
+            'BTC' -> 'BTC' (perp symbol unchanged)
+            'UENA' -> '@142' (spot symbol resolved to @index)
+            'BTC_SPOT' -> '@109' (internal spot name resolved)
+        """
+        # Handle deployer prefixes (e.g., 'xyz:SOL' -> 'SOL')
         if ':' in symbol:
             parts = symbol.split(':')
             return parts[1]
+        
+        # Handle spot assets - need to convert to @index format
+        # Check if this is a spot asset that needs resolution
+        if hasattr(self.api, 'get_spot_api_name'):
+            # Try direct lookup first (e.g., 'UENA' -> '@142')
+            spot_api = self.api.get_spot_api_name(symbol)
+            if spot_api:
+                return spot_api
+            
+            # Try internal naming convention (e.g., 'BTC_SPOT' -> 'UBTC' -> '@109')
+            if symbol.endswith('_SPOT') and hasattr(self.api, 'SPOT_INTERNAL_TO_API'):
+                api_token_name = self.api.SPOT_INTERNAL_TO_API.get(symbol)
+                if api_token_name:
+                    spot_api = self.api.get_spot_api_name(api_token_name)
+                    if spot_api:
+                        return spot_api
+        
         return symbol
 
     def _ingest_range(self, symbol: str, timeframe: str, start_dt: datetime, end_dt: datetime):
@@ -241,7 +267,14 @@ class MarketDataRepairer:
             
         try:
             end_dt = datetime.now(timezone.utc).replace(tzinfo=None)
-            start_dt = end_dt - timedelta(days=days_back)
+            # Add 0.1 day (~2.4 hours) buffer to prevent edge-case mismatches at window boundary
+            start_dt = end_dt - timedelta(days=days_back + 0.1)
+            
+            # SNAP to the start of the hour to ensure we capture the full candle at the boundary
+            # logic: API includes candle overlapping start, DB query excludes if start > candle_time
+            start_dt = start_dt.replace(minute=0, second=0, microsecond=0)
+            
+            logger.info(f"[MarketDataRepairer] Checking integrity from {start_dt} to {end_dt} (~{days_back:.1f} days)")
             
             # Check key timeframes
             for tf in ['5m', '15m']:

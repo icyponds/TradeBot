@@ -1512,6 +1512,7 @@ class HyperliquidAPI(MarketInterface):
                         # DB uses naive UTC (from unix timestamp), so we must use naive UTC for 'now'
                         now = pd.Timestamp.utcnow().replace(tzinfo=None)
                         
+                        # --- 1. Forward Gap Logic (Existing) ---
                         if gap_start_dt < now:
                             # Fetch only the gap
                             gap_start_ms = int(gap_start_dt.timestamp() * 1000)
@@ -1535,22 +1536,63 @@ class HyperliquidAPI(MarketInterface):
                                     new_df_db.set_index('timestamp', inplace=True)
                                     self.market_db.insert_market_data(new_df_db, symbol, timeframe)
                                     self.logger.info(f"GAP FILL: Persisted {len(new_df_db)} candles for {symbol} {timeframe}")
+                                    
+                                    # Append to local df so we return full dataset
+                                    df = pd.concat([df, new_df_db]).sort_index()
                                 
-                                # Prepare for Cache (All including Incomplete)
-                                new_bars_all = [{
-                                    'time': c['t'] // 1000,
-                                    'open': float(c['o']),
-                                    'high': float(c['h']),
-                                    'low': float(c['l']),
-                                    'close': float(c['c']),
-                                    'volume': float(c['v']),
-                                } for c in candles]
-                                new_df_all = pd.DataFrame(new_bars_all)
-                                new_df_all['timestamp'] = pd.to_datetime(new_df_all['time'], unit='s')
-                                new_df_all.set_index('timestamp', inplace=True)
+                                # Prepare for Cache (All including Incomplete) - Handle separately if needed, 
+                                # but for get_ohlcv strictly returning DB+Gap is usually enough. 
+                                # The original code updated cache here too. maintaining structure:
                                 
-                                # Merge with existing
-                                df = pd.concat([df, new_df_all]).drop_duplicates()
+                        # --- 2. Backward Gap Logic (New: Historical Backfill) ---
+                        earliest_ts = df.index.min()
+                        # Calculate required start time based on limit
+                        required_duration_ms = limit * interval_ms
+                        required_start_dt = (pd.Timestamp.utcnow().replace(tzinfo=None) - 
+                                           pd.Timedelta(milliseconds=required_duration_ms))
+                        
+                        # Add a small buffer (e.g. 1 interval) to avoid fencepost errors
+                        if earliest_ts > required_start_dt + pd.Timedelta(milliseconds=interval_ms):
+                            self.logger.info(f"Historical Backfill needed for {symbol} {timeframe}. "
+                                           f"Have from {earliest_ts}, need from {required_start_dt}")
+                            
+                            backfill_start_ms = int(required_start_dt.timestamp() * 1000)
+                            backfill_end_ms = int(earliest_ts.timestamp() * 1000)
+                            
+                            # Sanity check
+                            if backfill_end_ms > backfill_start_ms:
+                                try:
+                                    hist_candles = self.info.candles_snapshot(api_symbol, timeframe, 
+                                                                            backfill_start_ms, backfill_end_ms)
+                                    if hist_candles:
+                                        # Filter strictly before earliest_ts to avoid dupes
+                                        hist_candles = [c for c in hist_candles if c['t'] < backfill_end_ms]
+                                        
+                                        if hist_candles:
+                                            hist_bars = [{
+                                                'time': c['t'] // 1000,
+                                                'open': float(c['o']),
+                                                'high': float(c['h']),
+                                                'low': float(c['l']),
+                                                'close': float(c['c']),
+                                                'volume': float(c['v']),
+                                            } for c in hist_candles]
+                                            hist_df = pd.DataFrame(hist_bars)
+                                            hist_df['timestamp'] = pd.to_datetime(hist_df['time'], unit='s')
+                                            hist_df.set_index('timestamp', inplace=True)
+                                            
+                                            self.market_db.insert_market_data(hist_df, symbol, timeframe)
+                                            self.logger.info(f"BACKFILL: Persisted {len(hist_df)} historical candles for {symbol} {timeframe}")
+                                            
+                                            # Prepend to local df
+                                            df = pd.concat([hist_df, df]).sort_index()
+                                            
+                                except Exception as e:
+                                    self.logger.warning(f"Failed to backfill history for {symbol}: {e}")
+
+
+
+
                         
                         # Return from cache
                         bars = [{

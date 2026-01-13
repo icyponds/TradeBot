@@ -1444,12 +1444,6 @@ class DynamicPairSelector:
                     # Subscription happens in _add_to_pool if the asset qualifies
                     self._get_price_history(sym, market_type=market_type)
                     
-                    # Interleaved Integrity Check (User Request: Sequential Repair)
-                    # Check/Repair this specific asset NOW, respecting rate limits and priority order
-                    if hasattr(self.market_api, 'repairer') and self.market_api.repairer:
-                        self.logger.debug(f"[BackgroundFetcher] Running integrity check for {sym}")
-                        self.market_api.repairer.process_asset(sym)
-                    
                     with self._backfill_lock:
                         self.backfill_symbols_in_queue.discard(queue_key)
                     
@@ -1461,6 +1455,12 @@ class DynamicPairSelector:
                         perp_in_pool = sym in self.selected_pairs
                     
                     if perp_in_pool:
+                        # Run integrity check ONLY for assets in the Core Pool
+                        # This prevents wasting API calls on non-tradeable assets
+                        if hasattr(self.market_api, 'repairer') and self.market_api.repairer:
+                            self.logger.debug(f"[BackgroundFetcher] Running integrity check for {sym}")
+                            self.market_api.repairer.process_asset(sym)
+                        
                         # Pre-warm all required timeframes so strategies have data immediately
                         # This replaces the initial load logic
                         try:

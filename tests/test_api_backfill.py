@@ -1,0 +1,150 @@
+import pytest
+from unittest.mock import MagicMock, patch
+import pandas as pd
+from datetime import datetime, timedelta, timezone
+
+class TestAPIBackfill:
+    
+    @pytest.fixture
+    def mock_db(self):
+        db = MagicMock()
+        db.get_market_data.return_value = pd.DataFrame() # Default empty
+        return db
+        
+    @pytest.fixture
+    def api_client(self, shared_api_client, mock_db):
+        """Use shared module-scoped client, reset mocks."""
+        shared_api_client.exchange.reset_mock()
+        shared_api_client.info.reset_mock()
+        shared_api_client.market_db = mock_db
+        return shared_api_client
+
+    def test_get_ohlcv_backfills_history(self, api_client):
+        """
+        Test that get_ohlcv fetches missing history when DB has recent data 
+        but insufficient length for the requested limit.
+        """
+        symbol = "BTC"
+        interval = "1h"
+        limit = 100
+        
+        # 1. Setup DB state: 48h of recent data
+        now = datetime.now(timezone.utc)
+        start_db_time = now - timedelta(hours=48)
+        
+        # Create dummy dataframe with 48 hours of data
+        dates = pd.date_range(start=start_db_time, periods=48, freq='1h', tz='UTC')
+        # DB returns naive UTC
+        dates_naive = [d.replace(tzinfo=None) for d in dates]
+        
+        initial_df = pd.DataFrame({
+            'open': [100.0] * 48,
+            'high': [105.0] * 48,
+            'low': [95.0] * 48,
+            'close': [102.0] * 48,
+            'volume': [1000.0] * 48
+        }, index=pd.DatetimeIndex(dates_naive, name='timestamp'))
+        
+        api_client.market_db.get_market_data.return_value = initial_df
+        
+        # 2. Mock API Response for the BACKFILL (hours 49-100)
+        # We expect a fetch from T-100h to T-48h
+        backfill_candles = []
+        backfill_start_ts = int((start_db_time - timedelta(hours=52)).timestamp() * 1000)
+        
+        for i in range(52):
+            backfill_candles.append({
+                't': backfill_start_ts + (i * 3600000),
+                'o': 90.0, 'h': 95.0, 'l': 85.0, 'c': 92.0, 'v': 500.0, 'n': 10
+            })
+            
+        def candles_side_effect(symbol, timeframe, start_time, end_time):
+            # If start_time is "recent" (Forward Fill), return empty
+            recent_threshold = int((now - timedelta(hours=10)).timestamp() * 1000)
+            if start_time > recent_threshold:
+                return []
+            # Else return backfill data
+            return backfill_candles
+            
+        api_client.info.candles_snapshot.side_effect = candles_side_effect
+        api_client._get_asset_info_for_symbol = MagicMock(return_value={'name': 'BTC'})
+        
+        # 3. Call get_ohlcv
+        with patch('time.sleep'): # skip sleeps
+            # We must clear cache or it might return cached result if shared_api_client is dirty
+            api_client.ohlcv_cache.cache.clear()
+            
+            result_df = api_client.get_ohlcv(symbol, interval, limit=limit)
+            
+        # 4. Verifications
+        
+        # Should have called API to backfill
+        assert api_client.info.candles_snapshot.called, "Should have called API for backfill"
+        
+        # Check call arguments (scan all calls for the backfill one)
+        # We might have 2 calls: Forward Gap Fill (due to test date gap) and Backward Backfill
+        # We want to verify the BACKFILL happened.
+        
+        backfill_found = False
+        expected_backfill_start = int((now - timedelta(hours=100)).timestamp() * 1000)
+        
+        for call in api_client.info.candles_snapshot.call_args_list:
+            args, _ = call
+            start_ts = args[2]
+            # Check if this call looks like the backfill (start time ~ T-100h)
+            if abs(start_ts - expected_backfill_start) < 60000:
+                backfill_found = True
+                break
+                
+        assert backfill_found, f"Backfill call not found! Calls: {api_client.info.candles_snapshot.call_args_list}"
+        
+        # Should have persisted the backfilled data
+        assert api_client.market_db.insert_market_data.called
+        
+        # Result should combine DB data (48) + Backfill (52) -> 100 (or close)
+        assert len(result_df) >= 90, f"Expected ~100 rows, got {len(result_df)}"
+        
+    def test_get_ohlcv_no_backfill_needed(self, api_client):
+        """Test that no backfill occurs if DB has sufficient history."""
+        symbol = "BTC"
+        interval = "1h"
+        limit = 24
+        
+        # Setup DB with 48h data (more than limit)
+        now = datetime.now(timezone.utc)
+        dates = pd.date_range(end=now, periods=48, freq='1h', tz='UTC')
+        dates_naive = [d.replace(tzinfo=None) for d in dates]
+        
+        initial_df = pd.DataFrame({
+            'open': [100.0] * 48,
+            'high': [105.0] * 48,
+            'low': [95.0] * 48,
+            'close': [102.0] * 48,
+            'volume': [1000.0] * 48
+        }, index=pd.DatetimeIndex(dates_naive, name='timestamp'))
+        
+        api_client.market_db.get_market_data.return_value = initial_df
+        api_client.info.candles_snapshot.reset_mock()
+        api_client._get_asset_info_for_symbol = MagicMock(return_value={'name': 'BTC'})
+
+        with patch('time.sleep'):
+            api_client.ohlcv_cache.cache.clear()
+            result_df = api_client.get_ohlcv(symbol, interval, limit=limit)
+            
+        # Should NOT have called API (except maybe for forward gap-fill if 'now' is ahead, 
+        # but here DB ends at 'now', so no gap fill technically needed if synced)
+        
+        # Note: If gap-fill logic sees end_time > DB_max, it calls API. 
+        # In this test setup, date_range ends at 'now'. 
+        # Depending on exactly how 'now' aligns with candle close, forward gap fill might trigger.
+        # But we specifically want to verify BACKWARD gap fill logic isn't triggered.
+        
+        # We can inspect the call args if it IS called to ensure it wasn't a historical fetch.
+        if api_client.info.candles_snapshot.called:
+             args, _ = api_client.info.candles_snapshot.call_args
+             fetch_start = args[2]
+             db_min_ts = int(dates[0].timestamp() * 1000)
+             # If fetch_start is >= db_min_ts, it's a forward fill. 
+             # If fetch_start < db_min_ts, it's a backfill (BAD for this test).
+             assert fetch_start >= db_min_ts, "Triggered historical backfill when not needed!"
+             

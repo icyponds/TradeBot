@@ -66,6 +66,12 @@ class TradeDatabase:
             conn.rollback()
             raise e
         finally:
+            # Checkpoint WAL to ensure data persists to main database file
+            # PASSIVE mode: checkpoints without waiting, non-blocking
+            try:
+                conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            except Exception:
+                pass  # Ignore checkpoint errors (e.g., if other connections exist)
             conn.close()
     
     def _init_database(self):
@@ -705,10 +711,13 @@ class TradeDatabase:
         
         if start_date:
             query += " AND timestamp >= ?"
-            params.append(start_date.isoformat())
+            # DB stores naive UTC timestamps, strip tzinfo for comparison
+            ts_str = start_date.replace(tzinfo=None).isoformat() if start_date.tzinfo else start_date.isoformat()
+            params.append(ts_str)
         if end_date:
             query += " AND timestamp <= ?"
-            params.append(end_date.isoformat())
+            ts_str = end_date.replace(tzinfo=None).isoformat() if end_date.tzinfo else end_date.isoformat()
+            params.append(ts_str)
             
         query += " ORDER BY timestamp ASC"
 
