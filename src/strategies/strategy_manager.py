@@ -2033,7 +2033,8 @@ class StrategyManager:
             symbol, signal, current_price, strategy_name, ohlcv, 
             self.strategies[strategy_name].calculate_signal_strength,
             self.strategies,
-            timestamp=timestamp
+            timestamp=timestamp,
+            strategy_manager=self
         )
     
     def _get_leg_price(self, symbol: str, market_type: str) -> Optional[float]:
@@ -2727,6 +2728,133 @@ class StrategyManager:
             )
         
         return False
+    
+    def _should_displace_position(self, existing_score: float, new_strength: float) -> bool:
+        """
+        Shared threshold logic for position displacement decisions.
+        
+        Used by both single-leg capital rotation and multi-leg conflict resolution.
+        
+        Args:
+            existing_score: Profitability score of existing position (0-1)
+            new_strength: Signal strength of new potential trade (0-1)
+            
+        Returns:
+            True if new position should displace existing, False otherwise
+        """
+        at_limit = self._check_position_limit()
+        threshold = 0.05 if at_limit else 0.10
+        return new_strength > existing_score + threshold
+    
+    def _get_multi_leg_profitability_score(self, position) -> float:
+        """
+        Calculate profitability score for a multi-leg position.
+        
+        Adapts _get_position_profitability_score logic for multi-leg positions.
+        
+        Score components:
+        - Current PnL (30%): Combined unrealized P&L across all legs
+        - Strategy Performance (30%): Historical win rate and profit factor
+        - Expected Value (25%): Spread convergence potential
+        - Time & Momentum (15%): Position age and spread momentum
+        
+        Args:
+            position: MultiLegPosition object
+            
+        Returns:
+            Profitability score (0-1, higher = more profitable to keep)
+        """
+        # ===== 1. Current PnL Score (30%) =====
+        pnl = position.unrealized_pnl or 0.0
+        capital_at_risk = position.capital_at_risk or position.total_notional or 1.0
+        
+        if capital_at_risk > 0:
+            pnl_percentage = (pnl / capital_at_risk) * 100
+        else:
+            pnl_percentage = 0.0
+        
+        # Normalize PnL to 0-1 scale (cap at +/- 10%)
+        pnl_score = max(-1.0, min(1.0, pnl_percentage / 10.0))
+        pnl_score = (pnl_score + 1.0) / 2.0  # Shift to 0-1 range
+        
+        # ===== 2. Strategy Performance Score (30%) =====
+        strategy_score = 0.5  # Default neutral
+        strategy_name = position.strategy
+        
+        if strategy_name and self.performance_tracker:
+            try:
+                strategy_stats = self.performance_tracker.db.get_strategy_stats(strategy_name)
+                
+                total_trades = strategy_stats.get('total_trades', 0) or 0
+                winning_trades = strategy_stats.get('winning_trades', 0) or 0
+                if total_trades >= 5:
+                    win_rate = winning_trades / total_trades
+                    win_rate_score = win_rate
+                else:
+                    win_rate_score = 0.5
+                
+                gross_profit = strategy_stats.get('gross_profit', 0) or 0
+                gross_loss = strategy_stats.get('gross_loss', 0) or 1
+                profit_factor = gross_profit / max(gross_loss, 0.01)
+                pf_score = min(1.0, profit_factor / 2.0)
+                
+                weight_score = 0.5
+                if self.strategy_selector and strategy_name in self.strategy_selector.strategy_rankings:
+                    ranking = self.strategy_selector.strategy_rankings[strategy_name]
+                    weight_score = min(1.0, ranking.weight)
+                
+                strategy_score = (win_rate_score * 0.4) + (pf_score * 0.3) + (weight_score * 0.3)
+                
+            except Exception as e:
+                self.logger.debug(f"Could not get strategy stats for {strategy_name}: {e}")
+        
+        # ===== 3. Expected Value Score (25%) =====
+        # For multi-leg (stat_arb), EV is about spread convergence
+        ev_score = 0.5  # Default neutral
+        
+        # If position is profitable, it's likely converging
+        if pnl > 0:
+            ev_score = min(1.0, 0.5 + (pnl_percentage / 20.0))
+        else:
+            ev_score = max(0.0, 0.5 + (pnl_percentage / 20.0))
+        
+        # ===== 4. Time & Momentum Score (15%) =====
+        time_open = (datetime.now() - position.entry_time).total_seconds() / 3600  # hours
+        
+        if time_open < 1:
+            time_score = 1.0  # Protected
+        elif time_open < 6:
+            time_score = 0.8
+        elif time_open < 12:
+            time_score = 0.6
+        elif time_open < 24:
+            time_score = 0.4
+        else:
+            time_score = 0.2
+        
+        # Momentum based on P&L direction
+        if pnl > 0:
+            momentum_score = min(1.0, 0.5 + abs(pnl_percentage) / 10.0)
+        else:
+            momentum_score = max(0.0, 0.5 - abs(pnl_percentage) / 10.0)
+        
+        time_momentum_score = (time_score * 0.6) + (momentum_score * 0.4)
+        
+        # ===== Final Score =====
+        final_score = (
+            (pnl_score * 0.30) +
+            (strategy_score * 0.30) +
+            (ev_score * 0.25) +
+            (time_momentum_score * 0.15)
+        )
+        
+        self.logger.debug(
+            f"Multi-leg score for {position.position_id}: PnL={pnl_score:.2f}, "
+            f"Strategy={strategy_score:.2f}, EV={ev_score:.2f}, "
+            f"TimeMom={time_momentum_score:.2f}, Final={final_score:.2f}"
+        )
+        
+        return final_score
     
     def _check_portfolio_allocation(self) -> Dict[str, Any]:
         """

@@ -446,7 +446,8 @@ class ExecutionEngine:
         ohlcv: Dict[str, pd.DataFrame],
         calculate_signal_strength_fn,
         strategies_map: Dict[str, Any],
-        timestamp: datetime = None
+        timestamp: datetime = None,
+        strategy_manager = None
     ):
         """Handle multi-leg signals (entry or exit)."""
         action = signal.get('action')
@@ -455,13 +456,13 @@ class ExecutionEngine:
             signal_strength = calculate_signal_strength_fn(ohlcv, symbol=symbol, signal_context=signal)
             # Position limit check logic would need to be moved or passed in
             # Assuming simplified flow for now or we will add the method
-            self.execute_multi_leg_entry(symbol, signal, current_price, strategy_name, ohlcv, signal_strength, timestamp)
+            self.execute_multi_leg_entry(symbol, signal, current_price, strategy_name, ohlcv, signal_strength, timestamp, strategy_manager)
         elif action == 'exit':
             self.execute_multi_leg_exit(symbol, signal, strategy_name, strategies_map, timestamp)
         # Also accept 'open'/'close' variants used by StatisticalArbitrageStrategy
         elif action == 'open':
             signal_strength = calculate_signal_strength_fn(ohlcv, symbol=symbol, signal_context=signal)
-            self.execute_multi_leg_entry(symbol, signal, current_price, strategy_name, ohlcv, signal_strength, timestamp)
+            self.execute_multi_leg_entry(symbol, signal, current_price, strategy_name, ohlcv, signal_strength, timestamp, strategy_manager)
         elif action == 'close':
             self.execute_multi_leg_exit(symbol, signal, strategy_name, strategies_map, timestamp)
     
@@ -473,7 +474,8 @@ class ExecutionEngine:
         strategy_name: str,
         ohlcv: Dict[str, pd.DataFrame],
         signal_strength: float,
-        timestamp: datetime = None
+        timestamp: datetime = None,
+        strategy_manager = None
     ):
         """Execute a multi-leg position entry."""
         try:
@@ -482,6 +484,18 @@ class ExecutionEngine:
             if self._get_multi_leg_position_for_symbol(symbol):
                 self.logger.info(f"Already have multi-leg position for {symbol}, skipping")
                 return
+            
+            # =========================================================================
+            # LEG CONFLICT DETECTION: Check if any leg conflicts with existing positions
+            # =========================================================================
+            legs = signal.get('legs', [])
+            if legs and strategy_manager:
+                conflicts = self._detect_leg_conflicts(legs)
+                if conflicts:
+                    if not self._resolve_leg_conflicts(conflicts, signal_strength, strategy_manager):
+                        self.logger.info(f"Multi-leg entry for {symbol} blocked by leg conflicts")
+                        return
+            
             
             market_volatility = self.calculate_market_volatility(ohlcv)
             available_capital = self.portfolio_manager.calculate_available_capital_for_trading()
@@ -902,6 +916,126 @@ class ExecutionEngine:
                 if leg.symbol == leg_symbol:
                     return position
         return None
+    
+    def _detect_leg_conflicts(self, legs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Detect conflicts between new multi-leg position legs and existing positions.
+        
+        Checks:
+        1. Single-leg positions with same symbol
+        2. Multi-leg position legs with same symbol
+        
+        Args:
+            legs: List of leg specs from the signal (e.g., [{'symbol': 'BTC', 'side': 'long', ...}])
+            
+        Returns:
+            List of conflicts: [{'type': 'single_leg'|'multi_leg', 'symbol': ..., 'position': ...}]
+        """
+        conflicts = []
+        
+        for leg_spec in legs:
+            leg_symbol = leg_spec.get('symbol', '')
+            
+            # Check single-leg positions
+            if leg_symbol in self.positions:
+                conflicts.append({
+                    'type': 'single_leg',
+                    'symbol': leg_symbol,
+                    'position': self.positions[leg_symbol]
+                })
+            
+            # Check multi-leg positions
+            for pos_id, multi_pos in self.multi_leg_positions.items():
+                for existing_leg in multi_pos.legs:
+                    if existing_leg.symbol == leg_symbol:
+                        # Don't add duplicate conflicts for same position
+                        already_added = any(
+                            c.get('position') == multi_pos or 
+                            (hasattr(c.get('position'), 'position_id') and 
+                             c['position'].position_id == multi_pos.position_id)
+                            for c in conflicts
+                        )
+                        if not already_added:
+                            conflicts.append({
+                                'type': 'multi_leg',
+                                'symbol': leg_symbol,
+                                'position': multi_pos
+                            })
+                        break  # Found conflict in this position, move to next
+        
+        return conflicts
+    
+    def _resolve_leg_conflicts(
+        self, 
+        conflicts: List[Dict[str, Any]], 
+        new_signal_strength: float,
+        strategy_manager
+    ) -> bool:
+        """
+        Resolve leg conflicts using scoring-based displacement.
+        
+        Args:
+            conflicts: List of conflicts from _detect_leg_conflicts()
+            new_signal_strength: Signal strength of new multi-leg position
+            strategy_manager: Reference to StrategyManager for scoring methods
+            
+        Returns:
+            True if all conflicts resolved (can proceed), False if blocked
+        """
+        if not conflicts:
+            return True
+        
+        self.logger.info(f"🔍 Detected {len(conflicts)} leg conflict(s) for new multi-leg position")
+        
+        positions_to_close = []
+        
+        for conflict in conflicts:
+            conflict_type = conflict['type']
+            position = conflict['position']
+            conflict_symbol = conflict['symbol']
+            
+            if conflict_type == 'single_leg':
+                # Score single-leg position
+                existing_score = strategy_manager._get_position_profitability_score(
+                    conflict_symbol, new_signal_strength
+                )
+                pos_id = conflict_symbol
+            else:
+                # Score multi-leg position
+                existing_score = strategy_manager._get_multi_leg_profitability_score(position)
+                pos_id = position.position_id
+            
+            # Check if new position should displace existing
+            should_displace = strategy_manager._should_displace_position(existing_score, new_signal_strength)
+            
+            self.logger.info(
+                f"  Conflict: {conflict_type} {pos_id} (score={existing_score:.3f}) vs "
+                f"new signal (strength={new_signal_strength:.3f}) → "
+                f"{'DISPLACE' if should_displace else 'BLOCK'}"
+            )
+            
+            if should_displace:
+                positions_to_close.append((conflict_type, position, conflict_symbol))
+            else:
+                # If ANY conflict wins, the new position is blocked
+                self.logger.info(f"❌ Multi-leg entry blocked by stronger conflicting position: {pos_id}")
+                return False
+        
+        # Close all positions that need to be displaced
+        for conflict_type, position, symbol in positions_to_close:
+            if conflict_type == 'single_leg':
+                self.logger.info(f"🔄 Displacing single-leg position {symbol} for new multi-leg")
+                self.close_position(symbol, reason='leg_conflict_displacement')
+            else:
+                self.logger.info(f"🔄 Displacing multi-leg position {position.position_id} for new multi-leg")
+                self.execute_multi_leg_exit(
+                    symbol=position.primary_symbol,
+                    signal={'urgency': 'high', 'reason': 'leg_conflict_displacement'},
+                    strategy_name=position.strategy,
+                    strategies_map={},  # Not needed for exit
+                )
+        
+        return True
         
     def calculate_market_volatility(self, ohlcv: Dict[str, pd.DataFrame]) -> float:
         """Calculate market volatility."""
