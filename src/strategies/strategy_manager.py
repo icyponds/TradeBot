@@ -486,6 +486,54 @@ class StrategyManager:
                     
                     self.logger.warning(f"Closing ghost multi-leg position {pos_id} (External Close)")
                     
+                    # Calculate combined PnL from all legs by fetching exit fills
+                    total_pnl = 0.0
+                    total_fees = 0.0
+                    exit_time = datetime.now()
+                    reason = "External Close"
+                    
+                    for leg in pos.legs:
+                        # Get exit details for each leg from exchange fills
+                        exit_price, leg_exit_time, leg_reason, leg_fee = self._find_closing_fill(
+                            leg.symbol, leg.side, pos.entry_time
+                        )
+                        
+                        if exit_price == 0.0:
+                            exit_price = leg.entry_price  # Fallback
+                        
+                        # Calculate leg PnL
+                        price_diff = exit_price - leg.entry_price
+                        if leg.side == 'short':
+                            price_diff = -price_diff
+                        leg_pnl = price_diff * leg.size
+                        
+                        total_pnl += leg_pnl
+                        total_fees += leg_fee
+                        exit_time = leg_exit_time  # Use last leg's exit time
+                        if 'liquidation' in leg_reason.lower():
+                            reason = "Liquidation"
+                    
+                    # Record trade to trades table
+                    avg_entry = sum(leg.entry_price * leg.size for leg in pos.legs) / sum(leg.size for leg in pos.legs) if pos.legs else 0
+                    total_size = sum(leg.size for leg in pos.legs)
+                    
+                    self.performance_tracker.record_trade_from_position(
+                        symbol=pos.primary_symbol,
+                        strategy=pos.strategy,
+                        side="multi_leg",
+                        entry_price=avg_entry,
+                        exit_price=avg_entry,  # Not meaningful for multi-leg, use pnl_override
+                        size=total_size,
+                        entry_time=pos.entry_time,
+                        exit_time=exit_time,
+                        capital_at_risk=pos.capital_at_risk or 0,
+                        exit_reason=reason,
+                        pnl_override=total_pnl,
+                        fees=total_fees
+                    )
+                    
+                    self.logger.info(f"Recorded ghost multi-leg trade {pos_id}: PnL=${total_pnl:.2f}, Fees=${total_fees:.2f}")
+                    
                     # Remove from DB
                     try:
                         if hasattr(self.execution_engine, 'delete_position_from_db'):

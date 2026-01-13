@@ -181,12 +181,19 @@ class TestGhostPositionSync(unittest.TestCase):
         # Setup: Multi-Leg Position exists locally
         from src.strategies.execution_engine import MultiLegPosition
         
-        # Create a mock MultiLegPosition
-        # structure of MultiLegPosition is simpler, usually has .legs list
+        # Create a mock MultiLegPosition with required attributes
         mock_leg = MagicMock()
         mock_leg.symbol = 'BTC'
+        mock_leg.side = 'long'
+        mock_leg.size = 0.5
+        mock_leg.entry_price = 42000.0
+        
         mock_pos = MagicMock()
         mock_pos.position_id = 'ml_123'
+        mock_pos.primary_symbol = 'BTC_ETH_ARB'
+        mock_pos.strategy = 'stat_arb_4h'
+        mock_pos.entry_time = datetime.now()
+        mock_pos.capital_at_risk = 1000.0
         mock_pos.legs = [mock_leg]
         
         # execution_engine.multi_leg_positions is where they live
@@ -194,11 +201,9 @@ class TestGhostPositionSync(unittest.TestCase):
         # Use configure_mock to ensure it sticks
         self.mock_execution_engine.configure_mock(multi_leg_positions=ml_dict)
         
-        # Also try explicitly setting the MagicMock return value if it's being treated as a method (unlikely but possible)
-        # self.mock_execution_engine.multi_leg_positions = ml_dict
-        
         # Setup: Exchange has NO positions (BTC is missing)
         self.mock_market_api.get_positions.return_value = []
+        self.mock_market_api.get_user_fills.return_value = []  # No fills
         
         # Mock DB
         mock_db = MagicMock()
@@ -210,11 +215,17 @@ class TestGhostPositionSync(unittest.TestCase):
         # Execute
         manager.sync_positions_with_exchange()
         
+        # Verify: Trade recorded for PnL
+        self.mock_performance_tracker.record_trade_from_position.assert_called_once()
+        call_kwargs = self.mock_performance_tracker.record_trade_from_position.call_args[1]
+        self.assertEqual(call_kwargs['symbol'], 'BTC_ETH_ARB')
+        self.assertEqual(call_kwargs['strategy'], 'stat_arb_4h')
+        self.assertEqual(call_kwargs['side'], 'multi_leg')
+        
         # Verify: Position removed from local dict
         self.assertNotIn('ml_123', ml_dict)
         
         # Verify: DB delete called
-        # Verify: ExecutionEngine delete called (which handles DB)
         self.mock_execution_engine.delete_position_from_db.assert_called_with('ml_123')
 
 
