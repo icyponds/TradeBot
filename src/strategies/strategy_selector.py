@@ -343,7 +343,8 @@ class StrategySelector:
             is_enabled = True
             if metrics.get('total_trades', 0) >= self.min_trades_for_ranking:
                  if metrics.get('expectancy', 0) < self.min_expectancy:
-                     is_enabled = False
+                     if self.selection_mode != SelectionMode.AUTO:
+                         is_enabled = False
             
             # Calculate Weight
             weight = 1.0

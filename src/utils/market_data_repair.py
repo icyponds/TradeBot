@@ -41,22 +41,20 @@ class MarketDataRepairer:
         return symbol
 
     def _ingest_range(self, symbol: str, timeframe: str, start_dt: datetime, end_dt: datetime):
-        """Fetch and replace data for a specific range."""
+        """Fetch and replace data for a specific range. Only persists CLOSED candles."""
+        # IMPORTANT: Treat naive datetimes as UTC (they come from DB which stores UTC)
+        # Using .timestamp() on naive datetime assumes LOCAL timezone, causing offset errors
+        if start_dt.tzinfo is None:
+            start_dt = start_dt.replace(tzinfo=timezone.utc)
+        if end_dt.tzinfo is None:
+            end_dt = end_dt.replace(tzinfo=timezone.utc)
+        
         start_ms = int(start_dt.timestamp() * 1000)
         end_ms = int(end_dt.timestamp() * 1000)
         target_symbol = self.resolve_api_symbol(symbol)
+        interval_ms = self.get_interval_seconds(timeframe) * 1000
         
         try:
-            # Use the API's rate-limited call if possible, or direct info client access 
-            # (which now has retry wrapper if accessing via API wrapper, but here we access info directly?)
-            # Wait, self.api.info is the SDK client. It doesn't use _rate_limited_call unless we wrap it.
-            # However, if we are part of the bot logic, maybe we should use api.get_candles wrapper?
-            # But api.get_ohlcv implements the split logic (db/cache).
-            # We want RAW API access here.
-            # To benefit from retry logic, we should probably wrap this call or rely on SDK retries?
-            # The user asked for robust retry. 
-            # self.api._rate_limited_call(self.api.info.candles_snapshot, ...)
-            
             candles = self.api._rate_limited_call(
                 self.api.info.candles_snapshot, 
                 target_symbol, timeframe, start_ms, end_ms
@@ -68,9 +66,16 @@ class MarketDataRepairer:
         if not candles:
             return
 
+        # Filter to only persist CLOSED candles (candle_start + interval <= now)
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        closed_candles = [c for c in candles if c['t'] + interval_ms <= now_ms]
+        
+        if not closed_candles:
+            return
+
         # Convert to DataFrame
         bars = []
-        for c in candles:
+        for c in closed_candles:
             bars.append({
                 'time': c['t'] // 1000,
                 'open': float(c['o']),
@@ -91,9 +96,17 @@ class MarketDataRepairer:
     def verify_and_repair(self, symbol: str, timeframe: str, start_dt: datetime, end_dt: datetime, repair: bool = True) -> int:
         """
         Verify data against API and repair if needed.
+        Only compares CLOSED candles to avoid false positives from incomplete data.
         Returns number of mismatches found.
         """
         interval = self.get_interval_seconds(timeframe)
+        interval_ms = interval * 1000
+        
+        # IMPORTANT: Treat naive datetimes as UTC (they come from DB which stores UTC)
+        if start_dt.tzinfo is None:
+            start_dt = start_dt.replace(tzinfo=timezone.utc)
+        if end_dt.tzinfo is None:
+            end_dt = end_dt.replace(tzinfo=timezone.utc)
         
         # 1. Fetch Local
         df_db = self.db.get_market_data(symbol, timeframe, start_date=start_dt, end_date=end_dt)
@@ -104,7 +117,6 @@ class MarketDataRepairer:
         target_symbol = self.resolve_api_symbol(symbol)
         
         try:
-            # Wrap with robust retry
             candles = self.api._rate_limited_call(
                 self.api.info.candles_snapshot,
                 target_symbol, timeframe, start_ms, end_ms
@@ -115,10 +127,17 @@ class MarketDataRepairer:
             
         if not candles:
             return 0
+        
+        # Filter to only compare CLOSED candles
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        closed_candles = [c for c in candles if c['t'] + interval_ms <= now_ms]
+        
+        if not closed_candles:
+            return 0
             
-        # Map API candles
+        # Map API candles (closed only)
         api_map = {}
-        for c in candles:
+        for c in closed_candles:
             ts = pd.to_datetime(c['t'], unit='ms')
             api_map[ts] = {
                 'close': float(c['c']),
@@ -129,18 +148,23 @@ class MarketDataRepairer:
         mismatches = []
         
         # Check DB rows against API
-        # note: df_db index is timestamp
         for ts, row in df_db.iterrows():
             if ts not in api_map:
                 continue
                 
             api_row = api_map[ts]
-            # Floating point tolerance
-            if abs(row['close'] - api_row['close']) > 1e-8 or abs(row['volume'] - api_row['volume']) > 1e-4:
+            
+            # Close price tolerance (fixed, very tight for prices)
+            close_mismatch = abs(row['close'] - api_row['close']) > 1e-6
+            
+            # Volume tolerance (relative: 1% of volume, min 0.01)
+            volume_tol = max(0.01, api_row['volume'] * 0.01)
+            volume_mismatch = abs(row['volume'] - api_row['volume']) > volume_tol
+            
+            if close_mismatch or volume_mismatch:
                 mismatches.append(ts)
         
         # Check API rows against DB (Missing candles)
-        # Note: df_db might represent a subset if gaps exist.
         db_index_set = set(df_db.index)
         for ts in api_map:
             if ts not in db_index_set:
@@ -161,7 +185,7 @@ class MarketDataRepairer:
         
         clusters = []
         current_cluster = [mismatches[0]]
-        threshold_seconds = interval * 50 # Gap threshold to split request
+        threshold_seconds = interval * 500  # Match API max candles per call
         
         for m in mismatches[1:]:
             t1 = m

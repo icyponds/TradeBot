@@ -1171,89 +1171,22 @@ class DynamicPairSelector:
 
         self.logger.info(f"Queued total {len(self.backfill_queue)} assets (Perp/HIP-3 + Spot) for background fetching")
         
-        # In unified mode, nothing is 'loaded' yet
-        assets_with_data = [] 
-        loaded_symbols = set()
-        
-        # Break here - the loop below is removed
-        
         # =====================================================================
-        # STEP 3: Initial Scoring (using defaults for missing history)
+        # STEP 3: Start Background Fetcher (Scoring happens there, not here)
         # =====================================================================
+        # The background fetcher will:
+        # 1. Load data for each asset in priority order (BTC first)
+        # 2. Score the asset after loading
+        # 3. Add to selected_pairs / ready_pairs if it qualifies
+        # 
+        # This ensures NO synchronous API calls during scan.
+        # The trading loop will use ready_pairs which gets populated by the fetcher.
         
-        # Calculate metrics for ALL eligible assets (using defaults where history is missing)
-        all_metrics: List[AssetMetrics] = []
+        self.start_background_fetcher()
         
-        # In unified mode, we iterate over all eligible assets, not just loaded ones
-        for asset in sorted_by_volume:
-            symbol = asset.get('name', '')
-            market_type = asset.get('market_type', 'perp')
-            is_hip3 = asset.get('is_hip3', False)
-            
-            # Create metrics object
-            metrics = AssetMetrics(
-                symbol=symbol,
-                market_type=market_type,
-                is_hip3=is_hip3,
-                open_interest=float(asset.get('openInterest', 0)),
-                volume_24h=float(asset.get('volume24h', 0)),
-                mark_price=float(asset.get('markPrice', 0)),
-                bid=float(asset.get('bid', 0)),
-                ask=float(asset.get('ask', 0)),
-                funding_rate=float(asset.get('fundingRate', 0)),
-                max_leverage=float(asset.get('maxLeverage', 1)),
-                dex=asset.get('dex', ''),
-            )
-            
-            # Calculate individual scores
-            metrics.liquidity_score = self._calculate_liquidity_score(asset)
-            metrics.volatility_score, metrics.volatility = self._calculate_volatility_score(symbol, asset)
-            (metrics.strategy_fit_score, 
-             metrics.momentum_score, 
-             metrics.mean_reversion_score) = self._calculate_strategy_fit_score(symbol, asset, metrics.volatility, btc_history)
-            metrics.historical_perf_score, metrics.sharpe_ratio = self._calculate_historical_performance_score(symbol)
-            
-            # Store for later reference
-            self.asset_metrics[symbol] = metrics
-            all_metrics.append(metrics)
-        
-        # Sort by composite score for final selection
-        for metrics in all_metrics:
-            metrics.composite_score = self._calculate_composite_score(metrics, [])
-        
-        all_metrics.sort(key=lambda m: m.composite_score, reverse=True)
-        
-        # =====================================================================
-        # STEP 4: Select ALL pairs that pass quality filters (no max limit)
-        # Quality filtering already happened in _filter_assets based on:
-        # - min_open_interest, min_volume_threshold, liquidity requirements
-        # =====================================================================
-        selected_pairs = []
-        pairs_metadata = {}
-        
-        # Rank by score desc
-        all_metrics.sort(key=lambda m: m.composite_score, reverse=True)
-        scored_pairs = [{'symbol': m.symbol, 'score': m.composite_score, 'metrics': m} for m in all_metrics]
-        
-        max_pairs = self._get_max_pairs_to_trade()
-        
-        if self.cluster_enabled and self.cluster_manager and len(scored_pairs) > max_pairs:
-             # CLUSTERED SELECTION
-             selected_symbols = self._select_clustered_pairs(scored_pairs, max_pairs)
-        else:
-             # STANDARD TOP-N SELECTION
-             selected_symbols = [p['symbol'] for p in scored_pairs[:max_pairs]]
-        
-        selected_pairs = selected_symbols
-        
-        for p in scored_pairs:
-            if p['symbol'] in selected_pairs:
-                pairs_metadata[p['symbol']] = {
-                    'score': p['score'],
-                    'metrics': p['metrics']
-                }
-                
-        return selected_pairs, pairs_metadata
+        # Return empty - actual selection happens in _background_data_fetcher
+        # as assets are loaded and scored
+        return [], {}
 
     def _select_clustered_pairs(self, scored_pairs: List[Dict[str, Any]], n: int) -> List[str]:
         """
