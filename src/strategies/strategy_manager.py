@@ -1475,6 +1475,10 @@ class StrategyManager:
         """Main trading loop."""
         self.logger.info("Starting trading loop...")
         
+        # Initial pair selection scan - populates backfill queue and starts background fetcher
+        self.logger.info("Triggering initial pair selection scan...")
+        self.pair_selector.scan_and_select_pairs()
+        
         while self.is_running:
             try:
                 # Run one cycle of trading logic
