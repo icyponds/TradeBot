@@ -3,6 +3,7 @@ import pytest
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+from unittest.mock import patch
 
 @pytest.fixture
 def mock_config():
@@ -46,6 +47,12 @@ def mock_config():
             }
         }
     }
+
+@pytest.fixture(autouse=True)
+def mock_sleep():
+    """Patches time.sleep to avoid waiting during tests."""
+    with patch('time.sleep'):
+        yield
 
 @pytest.fixture
 def sample_ohlcv_data():

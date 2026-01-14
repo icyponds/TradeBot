@@ -130,10 +130,9 @@ class TestHyperliquidAPIDataMethods:
     """Tests for HyperliquidAPI data management methods."""
     
     @pytest.fixture
-    def api_client(self, mock_config):
-        """Creates an API client instance."""
-        from src.api.hyperliquid_api import HyperliquidAPI
-        return HyperliquidAPI(mock_config)
+    def api_client(self, shared_api_client):
+        """Reuses the module-scoped shared client."""
+        return shared_api_client
     
     def test_pending_init_symbols_initialized(self, api_client):
         """Test that _pending_init_symbols is initialized as empty set."""

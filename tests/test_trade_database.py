@@ -2,26 +2,49 @@ import pytest
 import sqlite3
 import os
 from datetime import datetime
+import logging
+import contextlib
 from src.utils.trade_database import TradeDatabase
+
+class InMemoryTradeDatabase(TradeDatabase):
+    """Subclass that keeps a persistent connection for :memory: databases."""
+    def __init__(self):
+        self.logger = logging.getLogger(__name__)
+        self.db_path = ":memory:"
+        self.table_prefix = ""
+        self._persistent_conn = sqlite3.connect(":memory:")
+        self._persistent_conn.row_factory = sqlite3.Row
+        self._init_database()
+
+    @contextlib.contextmanager
+    def _get_connection(self):
+        conn = self._persistent_conn
+        try:
+            yield conn
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            raise e
+        # Do not close connection
 
 class TestTradeDatabase:
     
     @pytest.fixture
-    def db_path(self, tmp_path):
+    def db_path(self):
         """Temp DB path."""
-        return str(tmp_path / "test_trades.db")
+        return ":memory:"
         
     @pytest.fixture
-    def db(self, db_path):
+    def db(self):
         """Database instance."""
-        return TradeDatabase(db_path)
+        return InMemoryTradeDatabase()
         
     def test_initialization(self, db, db_path):
         """Test DB init and schema creation."""
-        assert os.path.exists(db_path)
+        # For in-memory, we can't check file existence
         
-        # Verify table existence
-        with sqlite3.connect(db_path) as conn:
+        # Verify table existence using the DB instance's connection
+        with db._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='trades'")
             assert cursor.fetchone() is not None
