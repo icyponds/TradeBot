@@ -254,3 +254,33 @@ class TestHyperliquidAPI:
         api_client._on_bar_complete("BTC", "1h", {})
         
         api_client._persistence_executor.submit.assert_not_called()
+
+    def test_update_ohlcv_from_tick_milliseconds(self, api_client):
+        """
+        [BUG FIX VERIFICATION]
+        Verify update_ohlcv_from_tick detects and converts millisecond timestamps
+        to prevent cache key mismatches (premature candle closing).
+        """
+        symbol = "BTC"
+        price = 60000.0
+        
+        # Scenario: Timestamp in milliseconds (e.g. 1.76e12)
+        # 1700000000 seconds = 1700000000000 ms
+        ts_secs = 1700000000.0
+        ts_ms = 1700000000000.0
+        
+        # Mock the underlying cache
+        api_client.ohlcv_cache = MagicMock()
+        
+        # 1. Update with MS timestamp
+        api_client.update_ohlcv_from_tick(symbol, price, ts=ts_ms)
+        
+        # Verify it passed SECONDS to the cache
+        api_client.ohlcv_cache.update_from_tick.assert_called_once()
+        args = api_client.ohlcv_cache.update_from_tick.call_args
+        # args: (symbol, price, volume, ts)
+        passed_ts = args[0][3]
+        
+        assert passed_ts == ts_secs
+        assert passed_ts < 3e10  # Ensure it's in seconds range
+

@@ -70,7 +70,8 @@ def create_dashboard_app() -> Flask:
     def get_summary():
         """Get account and performance summary."""
         try:
-            summary = _get_summary_data()
+            timeframe = request.args.get('timeframe', '7d')
+            summary = _get_summary_data(timeframe)
             return jsonify({
                 'success': True,
                 'timestamp': datetime.now().isoformat(),
@@ -446,21 +447,61 @@ def _format_multi_leg_position(multi_pos) -> Dict[str, Any]:
         'funding_collected': metadata.get('funding_collected', 0),
         'entry_funding_rate': metadata.get('entry_funding_rate'),
         'current_funding_rate': metadata.get('current_funding_rate'),
+        'stop_loss': getattr(multi_pos, 'stop_loss', None),
+        'take_profit': getattr(multi_pos, 'take_profit', None),
     }
 
 
-def _get_summary_data() -> Dict[str, Any]:
+from datetime import datetime, timedelta
+
+def _get_start_time_for_frame(frame: str) -> Optional[datetime]:
+    """Calculate start time for a given timeframe."""
+    now = datetime.now()
+    
+    if frame == 'session':
+        # Handled by caller or special case
+        return None
+    elif frame == '1d':
+        return now - timedelta(days=1)
+    elif frame == '7d':
+        return now - timedelta(days=7)
+    elif frame == '14d':
+        return now - timedelta(days=14)
+    elif frame == '30d':
+        return now - timedelta(days=30)
+    elif frame == '90d':
+        return now - timedelta(days=90)
+    elif frame == '365d':
+        return now - timedelta(days=365)
+    elif frame == 'ytd':
+        return datetime(now.year, 1, 1)
+    elif frame == 'lifetime':
+        # Return a very old date to capture everything
+        return datetime(2020, 1, 1)
+    
+    # Default fallback
+    return now - timedelta(days=7)
+
+
+def _get_summary_data(timeframe: str = '7d') -> Dict[str, Any]:
     """Get account summary data."""
     if _strategy_manager is not None:
         portfolio = _strategy_manager.portfolio_manager
         summary = portfolio.get_portfolio_summary()
         
+        # Determine start time based on timeframe
+        start_time = None
+        if timeframe == 'session':
+            start_time = getattr(_strategy_manager, "session_start_time", None)
+        else:
+            start_time = _get_start_time_for_frame(timeframe)
+
         # Get realized and unrealized PnL
-        total_realized_pnl = _get_total_realized_pnl()
+        total_realized_pnl = _get_total_realized_pnl(start_time)
         total_unrealized_pnl = _get_total_unrealized_pnl()
         
         # Get trade stats
-        trade_stats = _get_trade_stats()
+        trade_stats = _get_trade_stats(start_time)
 
         # Session start time (if available)
         session_start = getattr(_strategy_manager, "session_start_time", None)
@@ -482,6 +523,7 @@ def _get_summary_data() -> Dict[str, Any]:
                 'total_realized_pnl': total_realized_pnl,
                 'total_unrealized_pnl': total_unrealized_pnl,
                 'total_pnl': total_realized_pnl + total_unrealized_pnl,
+                'timeframe': timeframe  # Echo back for UI
             },
             'bot_status': {
                 'is_running': _strategy_manager.is_running,
@@ -591,7 +633,7 @@ def _get_leg_current_price(symbol: str, market_type: str) -> Optional[float]:
             if spot_api_name:
                 return _market_api.get_current_price(spot_api_name)
             
-            # Fallback: try raw symbol or exchange method if available
+            # Fallback: try raw symbol or exchange method
             return _market_api.get_current_price(symbol)
             
         else:
@@ -649,16 +691,19 @@ def _get_win_rate() -> float:
     return 0
 
 
-def _get_total_realized_pnl() -> float:
-    """Get realized PnL since the bot session started."""
+def _get_total_realized_pnl(start_time: Optional[datetime] = None) -> float:
+    """Get realized PnL since start_time."""
     if _strategy_manager is not None and hasattr(_strategy_manager, 'performance_tracker'):
         try:
-            start_time = getattr(_strategy_manager, "session_start_time", None)
+            # If no start time (e.g. session requested but not set), fallback to recent
             if not start_time:
-                # If the bot was started before this code existed, we can't know session start.
-                # Fall back to 7 days instead of showing a wrong "since start" value.
-                trades = _strategy_manager.performance_tracker.db.get_recent_trades(7)
-                return sum(t.get('pnl', 0) or 0 for t in trades)
+                # Default logic if session has n/a start time
+                 start_time = getattr(_strategy_manager, "session_start_time", None)
+            
+            if not start_time:
+                 # Last resort fallback
+                 trades = _strategy_manager.performance_tracker.db.get_recent_trades(7)
+                 return sum(t.get('pnl', 0) or 0 for t in trades)
 
             trades = _strategy_manager.performance_tracker.db.get_trades_in_range(start_time, datetime.now())
             return sum(t.get('pnl', 0) or 0 for t in trades)
@@ -683,8 +728,8 @@ def _get_total_unrealized_pnl() -> float:
     return total
 
 
-def _get_trade_stats() -> Dict[str, Any]:
-    """Get comprehensive trade statistics."""
+def _get_trade_stats(start_time: Optional[datetime] = None) -> Dict[str, Any]:
+    """Get comprehensive trade statistics since start_time."""
     stats = {
         'total_trades': 0,
         'winning_trades': 0,
@@ -694,11 +739,14 @@ def _get_trade_stats() -> Dict[str, Any]:
     
     if _strategy_manager is not None and hasattr(_strategy_manager, 'performance_tracker'):
         try:
-            start_time = getattr(_strategy_manager, "session_start_time", None)
-            if start_time:
-                trades = _strategy_manager.performance_tracker.db.get_trades_in_range(start_time, datetime.now())
-            else:
+            if not start_time:
+                 start_time = getattr(_strategy_manager, "session_start_time", None)
+            
+            if not start_time:
                 trades = _strategy_manager.performance_tracker.db.get_recent_trades(7)
+            else:
+                trades = _strategy_manager.performance_tracker.db.get_trades_in_range(start_time, datetime.now())
+                
             if trades:
                 stats['total_trades'] = len(trades)
                 stats['winning_trades'] = sum(1 for t in trades if (t.get('pnl') or 0) > 0)

@@ -559,31 +559,36 @@
             <div class="summary-card">
                 <div class="summary-label">Total Equity</div>
                 <div class="summary-value" id="total-equity">--</div>
-                <div class="summary-change" id="realized-scope"></div>
             </div>
 
-            <div class="summary-card">
-                <div class="summary-label">Realized PnL</div>
-                <div class="summary-value" id="realized-pnl">--</div>
-                <div class="summary-change" id="session-start" style="font-size: 10px; color: var(--text-muted);"></div>
-            </div>
+            <div class="summary-card" style="grid-column: span 2;">
+                <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 16px;">
+                    <div class="summary-label">Performance</div>
+                    <select id="timeframe-select"
+                        style="background: var(--bg-hover); color: var(--text-primary); border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px; font-size: 11px; cursor: pointer;">
+                        <option value="session">Session</option>
+                        <option value="1d">24h</option>
+                        <option value="7d" selected>7 Days</option>
+                        <option value="14d">14 Days</option>
+                        <option value="30d">30 Days</option>
+                        <option value="90d">90 Days</option>
+                        <option value="ytd">YTD</option>
+                        <option value="lifetime">Lifetime</option>
+                    </select>
+                </div>
 
-            <div class="summary-card">
-                <div class="summary-label">Unrealized PnL</div>
-                <div class="summary-value" id="unrealized-pnl">--</div>
-                <div class="summary-change">Open Positions</div>
-            </div>
-
-            <div class="summary-card">
-                <div class="summary-label">Open Positions</div>
-                <div class="summary-value" id="position-count">0</div>
-                <div class="summary-change">Notional: <span id="total-notional">--</span></div>
-            </div>
-
-            <div class="summary-card">
-                <div class="summary-label">Win Rate</div>
-                <div class="summary-value" id="win-rate">--</div>
-                <div class="summary-change" id="trade-stats" style="font-size: 11px;"></div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px;">
+                    <div>
+                        <div class="summary-label" style="font-size: 11px;">Realized PnL</div>
+                        <div class="summary-value" id="realized-pnl">--</div>
+                    </div>
+                    <div>
+                        <div class="summary-label" style="font-size: 11px;">Win Rate</div>
+                        <div class="summary-value" id="win-rate">--</div>
+                        <div class="summary-change" id="trade-stats"
+                            style="font-size: 10px; color: var(--text-muted); margin-top: 4px;">--</div>
+                    </div>
+                </div>
             </div>
 
             <div class="summary-card">
@@ -622,6 +627,8 @@
                             <th>Notional</th>
                             <th>Entry</th>
                             <th>Mark</th>
+                            <th>TP</th>
+                            <th>SL</th>
                             <th>Liq. Price</th>
                             <th>PnL</th>
                             <th>PnL %</th>
@@ -684,97 +691,98 @@
                 <button class="pagination-btn" id="next-page" onclick="changePage(1)">Next</button>
             </div>
         </div>
-    </div>
 
-    <script>
-        // Helper functions
-        function formatCurrency(value) {
-            if (value === undefined || value === null) return '--';
-            return new Intl.NumberFormat('en-US', {
-                style: 'currency',
-                currency: 'USD'
-            }).format(value);
-        }
-
-        function formatPrice(value) {
-            if (value === undefined || value === null) return '--';
-            return new Intl.NumberFormat('en-US', {
-                minimumFractionDigits: 2,
-                maximumFractionDigits: 6
-            }).format(value);
-        }
-
-        function formatSize(value) {
-            if (value === undefined || value === null) return '--';
-            return new Intl.NumberFormat('en-US', {
-                minimumFractionDigits: 0,
-                maximumFractionDigits: 4
-            }).format(value);
-        }
-
-        function formatPct(value, decimals = 2) {
-            if (value === undefined || value === null) return '--';
-            return value.toFixed(decimals) + '%';
-        }
-
-        function getPnlClass(pnl) {
-            if (!pnl) return '';
-            return pnl >= 0 ? 'pnl-positive' : 'pnl-negative';
-        }
-
-        async function closePosition(identifier, type) {
-            if (!confirm(`Are you sure you want to close this ${type} position?`)) {
-                return;
+        <script>
+            // Helper functions
+            function formatCurrency(value) {
+                if (value === undefined || value === null) return '--';
+                return new Intl.NumberFormat('en-US', {
+                    style: 'currency',
+                    currency: 'USD'
+                }).format(value);
             }
 
-            try {
-                const response = await fetch('/api/close_position', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({
-                        identifier: identifier,
-                        type: type
-                    })
-                });
+            function formatPrice(value) {
+                if (value === undefined || value === null) return '--';
+                return new Intl.NumberFormat('en-US', {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 6
+                }).format(value);
+            }
 
-                const result = await response.json();
+            function formatSize(value) {
+                if (value === undefined || value === null) return '--';
+                return new Intl.NumberFormat('en-US', {
+                    minimumFractionDigits: 0,
+                    maximumFractionDigits: 4
+                }).format(value);
+            }
 
-                if (result.success) {
-                    // Show success toast (or just alert for now)
-                    // alert('Close request sent: ' + result.message);
-                    updateDashboard(); // Refresh immediately
-                } else {
-                    alert('Error closing position: ' + result.error);
+            function formatPct(value, decimals = 2) {
+                if (value === undefined || value === null) return '--';
+                return value.toFixed(decimals) + '%';
+            }
+
+            function getPnlClass(pnl) {
+                if (!pnl) return '';
+                return pnl >= 0 ? 'pnl-positive' : 'pnl-negative';
+            }
+
+            async function closePosition(identifier, type) {
+                if (!confirm(`Are you sure you want to close this ${type} position?`)) {
+                    return;
                 }
-            } catch (error) {
-                console.error('Error closing position:', error);
-                alert('Failed to send close request');
+
+                try {
+                    const response = await fetch('/api/close_position', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            identifier: identifier,
+                            type: type
+                        })
+                    });
+
+                    const result = await response.json();
+
+                    if (result.success) {
+                        // Show success toast (or just alert for now)
+                        // alert('Close request sent: ' + result.message);
+                        updateDashboard(); // Refresh immediately
+                    } else {
+                        alert('Error closing position: ' + result.error);
+                    }
+                } catch (error) {
+                    console.error('Error closing position:', error);
+                    alert('Failed to send close request');
+                }
             }
-        }
 
-        // Render positions table (missing function from original file)
-        function renderPositionsTable(positions) {
-            const tbody = document.getElementById('positions-body');
-            document.getElementById('single-leg-count').textContent = positions.length;
+            // Render positions table (missing function from original file)
+            function renderPositionsTable(positions) {
+                const tbody = document.getElementById('positions-body');
+                document.getElementById('single-leg-count').textContent = positions.length;
 
-            if (positions.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="12" style="text-align: center; color: var(--text-muted);">No active positions</td></tr>';
-                return;
-            }
+                if (positions.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="15" style="text-align: center; color: var(--text-muted);">No active positions</td></tr>';
+                    return;
+                }
 
-            let html = '';
-            for (const pos of positions) {
-                const sideClass = pos.side === 'long' ? 'side-long' : 'side-short';
-                const pnlClass = getPnlClass(pos.unrealized_pnl);
+                let html = '';
+                for (const pos of positions) {
+                    const sideClass = pos.side === 'long' ? 'side-long' : 'side-short';
+                    const pnlClass = getPnlClass(pos.unrealized_pnl);
 
-                html += `<tr>
+                    html += `<tr>
                     <td><span class="symbol">${pos.symbol}</span></td>
                     <td><span class="${sideClass}">${pos.side.toUpperCase()}</span></td>
                     <td>${formatCurrency(pos.size * pos.current_price)}</td>
                     <td>${formatPrice(pos.entry_price)}</td>
                     <td>${formatPrice(pos.current_price)}</td>
+                    <td>${pos.take_profit ? formatPrice(pos.take_profit) : '--'}</td>
+                    <td>${pos.stop_loss ? formatPrice(pos.stop_loss) : '--'}</td>
                     <td>${pos.liquidation_price ? formatPrice(pos.liquidation_price) : '--'}</td>
                     <td class="${pnlClass}">${formatCurrency(pos.unrealized_pnl)}</td>
                     <td class="${pnlClass}">${formatPct(pos.unrealized_pnl_pct)}</td>
@@ -786,67 +794,63 @@
                         <button class="btn-close" onclick="closePosition('${pos.symbol}', 'single')">Close</button>
                     </td>
                 </tr>`;
+                }
+                tbody.innerHTML = html;
             }
-            tbody.innerHTML = html;
-        }
+            function renderMultiLegPositions(positions) {
+                const section = document.getElementById('multi-leg-section');
+                const container = document.getElementById('multi-leg-container');
+                document.getElementById('multi-leg-count').textContent = positions.length;
 
+                if (positions.length === 0) {
+                    section.style.display = 'none';
+                    return;
+                }
 
+                section.style.display = 'block';
+                let html = '';
 
-        // Render multi-leg positions
-        function renderMultiLegPositions(positions) {
-            const section = document.getElementById('multi-leg-section');
-            const container = document.getElementById('multi-leg-container');
-            document.getElementById('multi-leg-count').textContent = positions.length;
+                for (const pos of positions) {
+                    const netPnlClass = getPnlClass(pos.unrealized_pnl);
+                    let legsRows = '';
 
-            if (positions.length === 0) {
-                section.style.display = 'none';
-                return;
-            }
+                    for (const leg of (pos.legs || [])) {
+                        const sideClass = leg.side === 'long' ? 'side-long' : 'side-short';
+                        const legPnlClass = getPnlClass(leg.unrealized_pnl);
+                        const spotBadge = leg.is_spot ? '<span class="spot-badge">SPOT</span>' : '';
 
-            section.style.display = 'block';
-            let html = '';
+                        // Identify Role
+                        const isPrimary = pos.primary_symbol && leg.symbol.startsWith(pos.primary_symbol); // Simple heuristic or use exact match if available
+                        // Better: check against pos.symbol which is likely the primary
 
-            for (const pos of positions) {
-                const netPnlClass = getPnlClass(pos.unrealized_pnl);
-                let legsRows = '';
+                        const roleLabel = leg.symbol === pos.primary_symbol ?
+                            '<span style="background:var(--accent-glow); color:var(--accent); padding:2px 6px; border-radius:4px; font-size:10px; margin-right:6px; font-weight:bold;">PRIMARY</span>' :
+                            '<span style="background:var(--bg-hover); color:var(--text-muted); padding:2px 6px; border-radius:4px; font-size:10px; margin-right:6px;">HEDGE</span>';
 
-                for (const leg of (pos.legs || [])) {
-                    const sideClass = leg.side === 'long' ? 'side-long' : 'side-short';
-                    const legPnlClass = getPnlClass(leg.unrealized_pnl);
-                    const spotBadge = leg.is_spot ? '<span class="spot-badge">SPOT</span>' : '';
-
-                    // Identify Role
-                    const isPrimary = pos.primary_symbol && leg.symbol.startsWith(pos.primary_symbol); // Simple heuristic or use exact match if available
-                    // Better: check against pos.symbol which is likely the primary
-
-                    const roleLabel = leg.symbol === pos.primary_symbol ?
-                        '<span style="background:var(--accent-glow); color:var(--accent); padding:2px 6px; border-radius:4px; font-size:10px; margin-right:6px; font-weight:bold;">PRIMARY</span>' :
-                        '<span style="background:var(--bg-hover); color:var(--text-muted); padding:2px 6px; border-radius:4px; font-size:10px; margin-right:6px;">HEDGE</span>';
-
-                    // Calculations
-                    const notional = leg.size * leg.current_price;
-                    let pnlPct = 0;
-                    if (leg.entry_price > 0) {
-                        if (leg.side === 'long') {
-                            pnlPct = ((leg.current_price - leg.entry_price) / leg.entry_price) * 100;
-                        } else {
-                            pnlPct = ((leg.entry_price - leg.current_price) / leg.entry_price) * 100;
+                        // Calculations
+                        const notional = leg.size * leg.current_price;
+                        let pnlPct = 0;
+                        if (leg.entry_price > 0) {
+                            if (leg.side === 'long') {
+                                pnlPct = ((leg.current_price - leg.entry_price) / leg.entry_price) * 100;
+                            } else {
+                                pnlPct = ((leg.entry_price - leg.current_price) / leg.entry_price) * 100;
+                            }
                         }
-                    }
 
-                    // Margin estimation (Spot = 100%, Perp = assume from strategy/pos leverage or default)
-                    // Margin estimation (Prioritize backend value)
-                    let marginDisplay = '--';
-                    if (leg.margin !== undefined && leg.margin !== null && leg.margin !== 0) {
-                        marginDisplay = formatCurrency(leg.margin);
-                    } else if (leg.is_spot || leg.market_type === 'spot') {
-                        marginDisplay = formatCurrency(notional);
-                    } else if (pos.leverage) {
-                        // LEgacy fallback: Estimate based on position leverage if available
-                        marginDisplay = formatCurrency(notional / pos.leverage);
-                    }
+                        // Margin estimation (Spot = 100%, Perp = assume from strategy/pos leverage or default)
+                        // Margin estimation (Prioritize backend value)
+                        let marginDisplay = '--';
+                        if (leg.margin !== undefined && leg.margin !== null && leg.margin !== 0) {
+                            marginDisplay = formatCurrency(leg.margin);
+                        } else if (leg.is_spot || leg.market_type === 'spot') {
+                            marginDisplay = formatCurrency(notional);
+                        } else if (pos.leverage) {
+                            // LEgacy fallback: Estimate based on position leverage if available
+                            marginDisplay = formatCurrency(notional / pos.leverage);
+                        }
 
-                    legsRows += `
+                        legsRows += `
                     <tr>
                         <td>
                             ${roleLabel}
@@ -861,56 +865,56 @@
                         <td class="${legPnlClass}">${formatCurrency(leg.unrealized_pnl)}</td>
                         <td class="${legPnlClass}">${formatPct(pnlPct)}</td>
                     </tr>`;
-                }
+                    }
 
-                html += `
-                <div class="multi-leg-card">
-                    <div class="multi-leg-header">
-                        <div>
-                            <div class="multi-leg-title">
-                                ${pos.primary_symbol} Arbitrage 
-                                <span class="strategy-tag">${pos.strategy}</span>
+                    html += `
+                    <div class="multi-leg-card">
+                        <div class="multi-leg-header">
+                            <div>
+                                <div class="multi-leg-title">
+                                    ${pos.primary_symbol} Arbitrage
+                                    <span class="strategy-tag">${pos.strategy}</span>
+                                </div>
+                                <button class="btn-close" style="margin-top: 4px;" onclick="closePosition('${pos.position_id}', 'multi')">Close Position</button>
                             </div>
-                            <button class="btn-close" style="margin-top: 4px;" onclick="closePosition('${pos.position_id}', 'multi')">Close Position</button>
-                        </div>
-                        <div class="text-muted">
-                            <small>Held for</small> ${pos.holding_time}
-                        </div>
-                    </div>
-                    
-                    <table class="legs-table">
-                        <thead>
-                            <tr>
-                                <th>Leg / Role</th>
-                                <th>Side</th>
-                                <th>Notional</th>
-                                <th>Size</th>
-                                <th>Entry</th>
-                                <th>Mark</th>
-                                <th>Margin</th>
-                                <th>PnL</th>
-                                <th>PnL %</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            ${legsRows}
-                        </tbody>
-                    </table>
-                    
-                    <div class="multi-leg-metrics">
-                        <div class="strategy-metric">
-                            <div class="strategy-metric-label">Net Unrealized PnL</div>
-                            <div class="strategy-metric-value ${netPnlClass}" style="font-size: 16px;">
-                                ${formatCurrency(pos.unrealized_pnl)}
+                            <div class="text-muted">
+                                <small>Held for</small> ${pos.holding_time}
                             </div>
                         </div>
-                        
-                        <!-- Z-Score Metrics (Stat Arb) -->
-                        ${(pos.metadata && pos.metadata.entry_z_score !== undefined) ? `
+
+                        <table class="legs-table">
+                            <thead>
+                                <tr>
+                                    <th>Leg / Role</th>
+                                    <th>Side</th>
+                                    <th>Notional</th>
+                                    <th>Size</th>
+                                    <th>Entry</th>
+                                    <th>Mark</th>
+                                    <th>Margin</th>
+                                    <th>PnL</th>
+                                    <th>PnL %</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${legsRows}
+                            </tbody>
+                        </table>
+
+                        <div class="multi-leg-metrics">
+                            <div class="strategy-metric">
+                                <div class="strategy-metric-label">Net Unrealized PnL</div>
+                                <div class="strategy-metric-value ${netPnlClass}" style="font-size: 16px;">
+                                    ${formatCurrency(pos.unrealized_pnl)}
+                                </div>
+                            </div>
+
+                            <!-- Z-Score Metrics (Stat Arb) -->
+                            ${(pos.metadata && pos.metadata.entry_z_score !== undefined) ? `
                         <div class="strategy-metric">
                             <div class="strategy-metric-label">Current Z</div>
                             <div class="strategy-metric-value ${(pos.metadata.current_z || pos.metadata.entry_z_score) > 0 ? 'pnl-positive' : 'pnl-negative'
-                        }">
+                            }">
                                 ${formatDecimal(pos.metadata.current_z || pos.metadata.entry_z_score || 0, 2)}
                             </div>
                         </div>
@@ -928,381 +932,399 @@
                         </div>
                         ` : ''}
 
+                            <!-- SL / TP Metrics (Generic) -->
+                            ${(pos.take_profit || pos.stop_loss) ? `
+                        ${pos.take_profit ? `
                         <div class="strategy-metric">
-                            <div class="strategy-metric-label">Capital at Risk</div>
-                            <div class="strategy-metric-value">
-                                ${formatCurrency(pos.capital_at_risk)}
-                            </div>
-                        </div>
-                        <div class="strategy-metric">
-                            <div class="strategy-metric-label">Funding Collected</div>
+                            <div class="strategy-metric-label">Take Profit</div>
                             <div class="strategy-metric-value pnl-positive">
-                                ${formatCurrency(pos.funding_collected)}
+                                ${formatPrice(pos.take_profit)}
+                            </div>
+                        </div>` : ''}
+                        ${pos.stop_loss ? `
+                        <div class="strategy-metric">
+                            <div class="strategy-metric-label">Stop Loss</div>
+                            <div class="strategy-metric-value warning-text">
+                                ${formatPrice(pos.stop_loss)}
+                            </div>
+                        </div>` : ''}
+                        ` : ''}
+
+                            <div class="strategy-metric">
+                                <div class="strategy-metric-label">Capital at Risk</div>
+                                <div class="strategy-metric-value">
+                                    ${formatCurrency(pos.capital_at_risk)}
+                                </div>
+                            </div>
+                            <div class="strategy-metric">
+                                <div class="strategy-metric-label">Funding Collected</div>
+                                <div class="strategy-metric-value pnl-positive">
+                                    ${formatCurrency(pos.funding_collected)}
+                                </div>
                             </div>
                         </div>
-                    </div>
-                </div>`;
-            }
-
-            container.innerHTML = html;
-        }
-
-        // Render strategies
-        function renderStrategies(strategies) {
-            const container = document.getElementById('strategies-container');
-
-            if (strategies.length === 0) {
-                container.innerHTML = `<div class="empty-state"><div class="empty-state-icon">🎯</div><p>No strategies configured</p></div>`;
-                return;
-            }
-
-            let html = '';
-
-            for (const strat of strategies) {
-                const statusClass = strat.on_probation ? 'probation' : (strat.enabled ? 'enabled' : 'disabled');
-                const statusText = strat.on_probation ? 'PROBATION' : (strat.enabled ? 'ACTIVE' : 'DISABLED');
-                const cardClass = strat.on_probation ? 'probation' : (strat.enabled ? '' : 'disabled');
-                const pnlClass = getPnlClass(strat.recent_pnl);
-
-                html += `
-                <div class="strategy-card ${cardClass}">
-                    <div class="strategy-header">
-                        <div class="strategy-name">${strat.name}</div>
-                        <span class="strategy-status ${statusClass}">${statusText}</span>
-                    </div>
-                    <div class="strategy-metrics">
-                        <div class="strategy-metric">
-                            <div class="strategy-metric-label">Weight</div>
-                            <div class="strategy-metric-value">${formatPct(strat.weight * 100, 0)}</div>
-                        </div>
-                        <div class="strategy-metric">
-                            <div class="strategy-metric-label">Recent PnL</div>
-                            <div class="strategy-metric-value ${pnlClass}">${formatCurrency(strat.recent_pnl)}</div>
-                        </div>
-                        <div class="strategy-metric">
-                            <div class="strategy-metric-label">Win Rate</div>
-                            <div class="strategy-metric-value">${formatPct(strat.win_rate)}</div>
-                        </div>
-                        <div class="strategy-metric">
-                            <div class="strategy-metric-label">Trades</div>
-                            <div class="strategy-metric-value">${strat.trade_count || 0}</div>
-                        </div>
-                    </div>
-                </div>`;
-            }
-
-            container.innerHTML = html;
-        }
-
-        // Render trade history table
-        function renderTradesTable(trades) {
-            const container = document.getElementById('trades-table-container');
-            document.getElementById('trade-count').textContent = trades.length;
-
-            if (trades.length === 0) {
-                container.innerHTML = `<div class="empty-state"><div class="empty-state-icon">📜</div><p>No trade history yet</p></div>`;
-                return;
-            }
-
-            // Pagination: Show only last 25 trades
-            const recentTrades = trades.slice(0, 25);
-
-            let html = `<table>
-                <thead>
-                    <tr>
-                        <th>Time</th>
-                        <th>Symbol</th>
-                        <th>Side</th>
-                        <th>Entry</th>
-                        <th>Exit</th>
-                        <th>Size</th>
-                        <th>PnL</th>
-                        <th>PnL %</th>
-                        <th>Duration</th>
-                        <th>Exit Reason</th>
-                        <th>Strategy</th>
-                    </tr>
-                </thead>
-                <tbody>`;
-
-            for (const trade of recentTrades) {
-                const sideClass = trade.side === 'long' ? 'side-long' : 'side-short';
-                const pnlClass = getPnlClass(trade.realized_pnl);
-                const exitTime = trade.exit_time ? formatTime(trade.exit_time) : '--';
-                const exitReason = formatExitReason(trade.exit_reason);
-
-                html += `
-                <tr>
-                    <td class="text-muted">${exitTime}</td>
-                    <td class="symbol">${trade.symbol}</td>
-                    <td><span class="${sideClass}">${(trade.side || 'unknown').toUpperCase()}</span></td>
-                    <td>${formatPrice(trade.entry_price)}</td>
-                    <td>${formatPrice(trade.exit_price)}</td>
-                    <td>${formatSize(trade.size)}</td>
-                    <td class="${pnlClass}">${formatCurrency(trade.realized_pnl)}</td>
-                    <td class="${pnlClass}">${formatPct(trade.realized_pnl_pct)}</td>
-                    <td class="text-muted">${trade.holding_time || '--'}</td>
-                    <td><span class="exit-reason-tag ${getExitReasonClass(trade.exit_reason)}">${exitReason}</span></td>
-                    <td><span class="strategy-tag">${trade.strategy || 'unknown'}</span></td>
-                </tr>`;
-            }
-
-            html += '</tbody></table>';
-            container.innerHTML = html;
-        }
-
-        // Format exit time
-        function formatTime(timeStr) {
-            if (!timeStr) return '--';
-            try {
-                const date = new Date(timeStr);
-                return date.toLocaleString('en-US', {
-                    month: 'short',
-                    day: 'numeric',
-                    hour: '2-digit',
-                    minute: '2-digit'
-                });
-            } catch {
-                return '--';
-            }
-        }
-
-        // Format date time
-        function formatDateTime(timeStr) {
-            if (!timeStr) return '--';
-            try {
-                const date = new Date(timeStr);
-                return date.toLocaleString('en-US', {
-                    month: 'short',
-                    day: 'numeric',
-                    hour: '2-digit',
-                    minute: '2-digit',
-                    second: '2-digit'
-                });
-            } catch {
-                return '--';
-            }
-        }
-
-        // Format exit reason
-        function formatExitReason(reason) {
-            if (!reason) return 'Unknown';
-            const reasonMap = {
-                'take_profit': 'Take Profit',
-                'stop_loss': 'Stop Loss',
-                'trailing_stop': 'Trail Stop',
-                'strategy_exit': 'Strategy',
-                'position_limit': 'Pos. Limit',
-                'manual': 'Manual',
-                'timeout': 'Timeout',
-                'unknown': 'Unknown'
-            };
-            return reasonMap[reason] || reason.replace(/_/g, ' ');
-        }
-
-        // Get exit reason class for styling
-        function getExitReasonClass(reason) {
-            if (!reason) return '';
-            if (reason === 'take_profit') return 'reason-profit';
-            if (reason === 'stop_loss' || reason === 'trailing_stop') return 'reason-loss';
-            return 'reason-neutral';
-        }
-
-        // Update summary
-        function updateSummary(summary, positionTotals) {
-            const account = summary.account || {};
-            const performance = summary.performance || {};
-            const botStatus = summary.bot_status || {};
-
-            document.getElementById('total-equity').textContent = formatCurrency(account.total_equity);
-
-            // Session label for realized pnl
-            const sessionStartTime = performance.session_start_time || null;
-            const realizedScopeEl = document.getElementById('realized-scope');
-            const sessionStartEl = document.getElementById('session-start');
-
-            if (sessionStartTime) {
-                if (realizedScopeEl) realizedScopeEl.textContent = '(since bot start)';
-                if (sessionStartEl) sessionStartEl.textContent = `Start: ${formatDateTime(sessionStartTime)}`;
-            } else {
-                if (realizedScopeEl) realizedScopeEl.textContent = '';
-                if (sessionStartEl) sessionStartEl.textContent = '';
-            }
-
-            // Realized PnL
-            const realizedPnl = performance.total_realized_pnl || 0;
-            const realizedPnlEl = document.getElementById('realized-pnl');
-            realizedPnlEl.textContent = formatCurrency(realizedPnl);
-            realizedPnlEl.className = 'summary-value ' + getPnlClass(realizedPnl);
-
-            // Unrealized PnL
-            const unrealizedPnl = positionTotals.total_unrealized_pnl || 0;
-            const unrealizedPnlEl = document.getElementById('unrealized-pnl');
-            unrealizedPnlEl.textContent = formatCurrency(unrealizedPnl);
-            unrealizedPnlEl.className = 'summary-value ' + getPnlClass(unrealizedPnl);
-
-            document.getElementById('position-count').textContent = positionTotals.position_count || 0;
-            document.getElementById('total-notional').textContent = formatCurrency(positionTotals.total_notional);
-            document.getElementById('win-rate').textContent = formatPct(performance.win_rate);
-
-            // Trade statistics
-            const wins = performance.winning_trades || 0;
-            const losses = performance.losing_trades || 0;
-            const total = performance.total_trades || 0;
-
-            document.getElementById('trade-stats').textContent = `${wins} W / ${losses} L (${total} total)`;
-
-            document.getElementById('selected-pairs').textContent = botStatus.selected_pairs || 0;
-
-            // Update status
-            const statusDot = document.getElementById('status-dot');
-            const statusText = document.getElementById('status-text');
-
-            if (botStatus.is_running) {
-                statusDot.className = 'status-dot connected';
-                statusText.textContent = 'Active';
-                statusText.style.color = 'var(--green)';
-            } else {
-                statusDot.className = 'status-dot disconnected';
-                statusText.textContent = 'Standby';
-                statusText.style.color = 'var(--text-muted)';
-            }
-        }
-
-        // Pagination State
-        let currentTradePage = 1;
-        const tradesPerPage = 25;
-
-        // Fetch paginated trades
-        async function fetchTrades(page = 1) {
-            try {
-                const response = await fetch(`/api/trades?page=${page}&limit=${tradesPerPage}`);
-                const data = await response.json();
-
-                if (data.success) {
-                    currentTradePage = data.pagination.page;
-                    renderTrades(data.data);
-                    renderPagination(data.pagination);
-                }
-            } catch (error) {
-                console.error('Error fetching trades:', error);
-            }
-        }
-
-        function changePage(delta) {
-            fetchTrades(currentTradePage + delta);
-        }
-
-        function renderPagination(pagination) {
-            const container = document.getElementById('trades-pagination');
-            const prevBtn = document.getElementById('prev-page');
-            const nextBtn = document.getElementById('next-page');
-            const pageInfo = document.getElementById('current-page');
-            const totalPagesInfo = document.getElementById('total-pages');
-
-            if (pagination.total_trades > 0) {
-                container.style.display = 'flex';
-                prevBtn.disabled = !pagination.has_prev;
-                nextBtn.disabled = !pagination.has_next;
-                pageInfo.textContent = pagination.page;
-                totalPagesInfo.textContent = pagination.total_pages;
-            } else {
-                container.style.display = 'none';
-            }
-        }
-
-        function renderTrades(trades) {
-            const tbody = document.getElementById('trades-body');
-            document.getElementById('trade-count').textContent = trades.length;
-
-            if (trades.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="11" style="text-align: center; color: var(--text-muted);">No recent trades</td></tr>';
-                return;
-            }
-
-            let html = '';
-            for (const trade of trades) {
-                const sideClass = trade.side === 'long' ? 'side-long' : 'side-short';
-                const pnlClass = getPnlClass(trade.realized_pnl);
-
-                // Format dates
-                let timeDisplay = '--';
-                if (trade.exit_time) {
-                    const date = new Date(trade.exit_time);
-                    timeDisplay = date.toLocaleDateString() + ' at ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                    </div>`;
                 }
 
-                html += `<tr>
-                    <td class="text-muted" style="font-size: 11px;">${timeDisplay}</td>
-                    <td><span class="symbol">${trade.symbol}</span></td>
-                    <td><span class="${sideClass}">${(trade.side || 'unknown').toUpperCase()}</span></td>
-                    <td>${formatPrice(trade.entry_price)}</td>
-                    <td>${formatPrice(trade.exit_price)}</td>
-                    <td>${formatSize(trade.size)}</td>
-                    <td class="${pnlClass}">${formatCurrency(trade.realized_pnl)}</td>
-                    <td class="${pnlClass}">${formatPct(trade.realized_pnl_pct)}</td>
-                    <td class="text-muted">${trade.holding_time || '--'}</td>
-                    <td><span class="exit-reason-tag reason-neutral">${formatExitReason(trade.exit_reason)}</span></td>
-                    <td><span class="strategy-tag">${trade.strategy}</span></td>
-                </tr>`;
+                container.innerHTML = html;
             }
-            tbody.innerHTML = html;
-        }
 
-        // Main Dashboard Update
-        async function updateDashboard() {
-            try {
-                const [positionsRes, summaryRes, strategiesRes] = await Promise.all([
-                    fetch('/api/positions'),
-                    fetch('/api/summary'),
-                    fetch('/api/strategies')
-                ]);
+            // Render strategies
+            function renderStrategies(strategies) {
+                const container = document.getElementById('strategies-container');
 
-                const positions = await positionsRes.json();
-                const summary = await summaryRes.json();
-                const strategies = await strategiesRes.json();
+                if (strategies.length === 0) {
+                    container.innerHTML = `<div class="empty-state"><div class="empty-state-icon">🎯</div><p>No strategies configured</p></div>`;
+                    return;
+                }
 
-                if (positions.success) {
-                    renderPositionsTable(positions.data.single_leg || []);
-                    renderMultiLegPositions(positions.data.multi_leg || []);
-                    if (summary.success) {
-                        updateSummary(summary.data, positions.data.totals || {});
+                let html = '';
+
+                for (const strat of strategies) {
+                    const statusClass = strat.on_probation ? 'probation' : (strat.enabled ? 'enabled' : 'disabled');
+                    const statusText = strat.on_probation ? 'PROBATION' : (strat.enabled ? 'ACTIVE' : 'DISABLED');
+                    const cardClass = strat.on_probation ? 'probation' : (strat.enabled ? '' : 'disabled');
+                    const pnlClass = getPnlClass(strat.recent_pnl);
+
+                    html += `
+                    <div class="strategy-card ${cardClass}">
+                        <div class="strategy-header">
+                            <div class="strategy-name">${strat.name}</div>
+                            <span class="strategy-status ${statusClass}">${statusText}</span>
+                        </div>
+                        <div class="strategy-metrics">
+                            <div class="strategy-metric">
+                                <div class="strategy-metric-label">Weight</div>
+                                <div class="strategy-metric-value">${formatPct(strat.weight * 100, 0)}</div>
+                            </div>
+                            <div class="strategy-metric">
+                                <div class="strategy-metric-label">Recent PnL</div>
+                                <div class="strategy-metric-value ${pnlClass}">${formatCurrency(strat.recent_pnl)}</div>
+                            </div>
+                            <div class="strategy-metric">
+                                <div class="strategy-metric-label">Win Rate</div>
+                                <div class="strategy-metric-value">${formatPct(strat.win_rate)}</div>
+                            </div>
+                            <div class="strategy-metric">
+                                <div class="strategy-metric-label">Trades</div>
+                                <div class="strategy-metric-value">${strat.trade_count || 0}</div>
+                            </div>
+                        </div>
+                    </div>`;
+                }
+
+                container.innerHTML = html;
+            }
+
+            // Render trade history table
+            function renderTradesTable(trades) {
+                const container = document.getElementById('trades-table-container');
+                document.getElementById('trade-count').textContent = trades.length;
+
+                if (trades.length === 0) {
+                    container.innerHTML = `<div class="empty-state"><div class="empty-state-icon">📜</div><p>No trade history yet</p></div>`;
+                    return;
+                }
+
+                // Pagination: Show only last 25 trades
+                const recentTrades = trades.slice(0, 25);
+
+                let html = `<table>
+                        <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>Symbol</th>
+                                <th>Side</th>
+                                <th>Entry</th>
+                                <th>Exit</th>
+                                <th>Size</th>
+                                <th>PnL</th>
+                                <th>PnL %</th>
+                                <th>Duration</th>
+                                <th>Exit Reason</th>
+                                <th>Strategy</th>
+                            </tr>
+                        </thead>
+                        <tbody>`;
+
+                for (const trade of recentTrades) {
+                    const sideClass = trade.side === 'long' ? 'side-long' : 'side-short';
+                    const pnlClass = getPnlClass(trade.realized_pnl);
+                    const exitTime = trade.exit_time ? formatTime(trade.exit_time) : '--';
+                    const exitReason = formatExitReason(trade.exit_reason);
+
+                    html += `
+                            <tr>
+                                <td class="text-muted">${exitTime}</td>
+                                <td class="symbol">${trade.symbol}</td>
+                                <td><span class="${sideClass}">${(trade.side || 'unknown').toUpperCase()}</span></td>
+                                <td>${formatPrice(trade.entry_price)}</td>
+                                <td>${formatPrice(trade.exit_price)}</td>
+                                <td>${formatSize(trade.size)}</td>
+                                <td class="${pnlClass}">${formatCurrency(trade.realized_pnl)}</td>
+                                <td class="${pnlClass}">${formatPct(trade.realized_pnl_pct)}</td>
+                                <td class="text-muted">${trade.holding_time || '--'}</td>
+                                <td><span class="exit-reason-tag ${getExitReasonClass(trade.exit_reason)}">${exitReason}</span></td>
+                                <td><span class="strategy-tag">${trade.strategy || 'unknown'}</span></td>
+                            </tr>`;
+                }
+
+                html += '</tbody></table>';
+                container.innerHTML = html;
+            }
+
+            // Format exit time
+            function formatTime(timeStr) {
+                if (!timeStr) return '--';
+                try {
+                    const date = new Date(timeStr);
+                    return date.toLocaleString('en-US', {
+                        month: 'short',
+                        day: 'numeric',
+                        hour: '2-digit',
+                        minute: '2-digit'
+                    });
+                } catch {
+                    return '--';
+                }
+            }
+
+            // Format date time
+            function formatDateTime(timeStr) {
+                if (!timeStr) return '--';
+                try {
+                    const date = new Date(timeStr);
+                    return date.toLocaleString('en-US', {
+                        month: 'short',
+                        day: 'numeric',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        second: '2-digit'
+                    });
+                } catch {
+                    return '--';
+                }
+            }
+
+            // Format exit reason
+            function formatExitReason(reason) {
+                if (!reason) return 'Unknown';
+                const reasonMap = {
+                    'take_profit': 'Take Profit',
+                    'stop_loss': 'Stop Loss',
+                    'trailing_stop': 'Trail Stop',
+                    'strategy_exit': 'Strategy',
+                    'position_limit': 'Pos. Limit',
+                    'manual': 'Manual',
+                    'timeout': 'Timeout',
+                    'unknown': 'Unknown'
+                };
+                return reasonMap[reason] || reason.replace(/_/g, ' ');
+            }
+
+            // Get exit reason class for styling
+            function getExitReasonClass(reason) {
+                if (!reason) return '';
+                if (reason === 'take_profit') return 'reason-profit';
+                if (reason === 'stop_loss' || reason === 'trailing_stop') return 'reason-loss';
+                return 'reason-neutral';
+            }
+
+            // Update summary
+            function updateSummary(summary, positionTotals) {
+                const account = summary.account || {};
+                const performance = summary.performance || {};
+                const botStatus = summary.bot_status || {};
+
+                document.getElementById('total-equity').textContent = formatCurrency(account.total_equity);
+
+                // Session/Timeframe logic
+                // No specific subtext update needed as dropdown indicates scope
+                // but we clean up potential old references
+
+
+                // Realized PnL
+                const realizedPnl = performance.total_realized_pnl || 0;
+                const realizedPnlEl = document.getElementById('realized-pnl');
+                realizedPnlEl.textContent = formatCurrency(realizedPnl);
+                realizedPnlEl.className = 'summary-value ' + getPnlClass(realizedPnl);
+
+                // Unrealized PnL
+                const unrealizedPnl = positionTotals.total_unrealized_pnl || 0;
+                const unrealizedPnlEl = document.getElementById('unrealized-pnl');
+                unrealizedPnlEl.textContent = formatCurrency(unrealizedPnl);
+                unrealizedPnlEl.className = 'summary-value ' + getPnlClass(unrealizedPnl);
+
+                document.getElementById('position-count').textContent = positionTotals.position_count || 0;
+                document.getElementById('total-notional').textContent = formatCurrency(positionTotals.total_notional);
+                document.getElementById('win-rate').textContent = formatPct(performance.win_rate);
+
+                // Trade statistics
+                const wins = performance.winning_trades || 0;
+                const losses = performance.losing_trades || 0;
+                const total = performance.total_trades || 0;
+
+                document.getElementById('trade-stats').textContent = `${wins} W / ${losses} L (${total} total)`;
+
+                document.getElementById('selected-pairs').textContent = botStatus.selected_pairs || 0;
+
+                // Update status
+                const statusDot = document.getElementById('status-dot');
+                const statusText = document.getElementById('status-text');
+
+                if (botStatus.is_running) {
+                    statusDot.className = 'status-dot connected';
+                    statusText.textContent = 'Active';
+                    statusText.style.color = 'var(--green)';
+                } else {
+                    statusDot.className = 'status-dot disconnected';
+                    statusText.textContent = 'Standby';
+                    statusText.style.color = 'var(--text-muted)';
+                }
+            }
+
+            // Pagination State
+            let currentTradePage = 1;
+            const tradesPerPage = 25;
+
+            // Fetch paginated trades
+            async function fetchTrades(page = 1) {
+                try {
+                    const response = await fetch(`/api/trades?page=${page}&limit=${tradesPerPage}`);
+                    const data = await response.json();
+
+                    if (data.success) {
+                        currentTradePage = data.pagination.page;
+                        renderTrades(data.data);
+                        renderPagination(data.pagination);
                     }
+                } catch (error) {
+                    console.error('Error fetching trades:', error);
                 }
-
-                if (strategies.success) {
-                    renderStrategies(strategies.data || []);
-                }
-
-            } catch (error) {
-                console.error('Failed to update dashboard:', error);
-                document.getElementById('status-dot').className = 'status-dot disconnected';
-                document.getElementById('status-text').textContent = 'Connection Error';
             }
 
-            // Auto-refresh trades only if on page 1 (to catch new trades)
-            if (currentTradePage === 1) {
-                fetchTrades(1);
+            function changePage(delta) {
+                fetchTrades(currentTradePage + delta);
             }
-        }
 
-        // Countdown timer
-        let countdown = 5;
-        function updateCountdown() {
-            countdown--;
-            document.getElementById('countdown').textContent = countdown;
-            if (countdown <= 0) {
-                countdown = 5;
+            function renderPagination(pagination) {
+                const container = document.getElementById('trades-pagination');
+                const prevBtn = document.getElementById('prev-page');
+                const nextBtn = document.getElementById('next-page');
+                const pageInfo = document.getElementById('current-page');
+                const totalPagesInfo = document.getElementById('total-pages');
+
+                if (pagination.total_trades > 0) {
+                    container.style.display = 'flex';
+                    prevBtn.disabled = !pagination.has_prev;
+                    nextBtn.disabled = !pagination.has_next;
+                    pageInfo.textContent = pagination.page;
+                    totalPagesInfo.textContent = pagination.total_pages;
+                } else {
+                    container.style.display = 'none';
+                }
+            }
+
+            function renderTrades(trades) {
+                const tbody = document.getElementById('trades-body');
+                document.getElementById('trade-count').textContent = trades.length;
+
+                if (trades.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="11" style="text-align: center; color: var(--text-muted);">No recent trades</td></tr>';
+                    return;
+                }
+
+                let html = '';
+                for (const trade of trades) {
+                    const sideClass = trade.side === 'long' ? 'side-long' : 'side-short';
+                    const pnlClass = getPnlClass(trade.realized_pnl);
+
+                    // Format dates
+                    let timeDisplay = '--';
+                    if (trade.exit_time) {
+                        const date = new Date(trade.exit_time);
+                        timeDisplay = date.toLocaleDateString() + ' at ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                    }
+
+                    html += `<tr>
+                        <td class="text-muted" style="font-size: 11px;">${timeDisplay}</td>
+                        <td><span class="symbol">${trade.symbol}</span></td>
+                        <td><span class="${sideClass}">${(trade.side || 'unknown').toUpperCase()}</span></td>
+                        <td>${formatPrice(trade.entry_price)}</td>
+                        <td>${formatPrice(trade.exit_price)}</td>
+                        <td>${formatSize(trade.size)}</td>
+                        <td class="${pnlClass}">${formatCurrency(trade.realized_pnl)}</td>
+                        <td class="${pnlClass}">${formatPct(trade.realized_pnl_pct)}</td>
+                        <td class="text-muted">${trade.holding_time || '--'}</td>
+                        <td><span class="exit-reason-tag reason-neutral">${formatExitReason(trade.exit_reason)}</span></td>
+                        <td><span class="strategy-tag">${trade.strategy}</span></td>
+                    </tr>`;
+                }
+                tbody.innerHTML = html;
+            }
+
+            // Main Dashboard Update
+            async function updateDashboard() {
+                try {
+                    const timeframe = document.getElementById('timeframe-select') ? document.getElementById('timeframe-select').value : '7d';
+                    const [positionsRes, summaryRes, strategiesRes] = await Promise.all([
+                        fetch('/api/positions'),
+                        fetch(`/api/summary?timeframe=${timeframe}`),
+                        fetch('/api/strategies')
+                    ]);
+
+                    const positions = await positionsRes.json();
+                    const summary = await summaryRes.json();
+                    const strategies = await strategiesRes.json();
+
+                    if (positions.success) {
+                        renderPositionsTable(positions.data.single_leg || []);
+                        renderMultiLegPositions(positions.data.multi_leg || []);
+                        if (summary.success) {
+                            updateSummary(summary.data, positions.data.totals || {});
+                        }
+                    }
+
+                    if (strategies.success) {
+                        renderStrategies(strategies.data || []);
+                    }
+
+                } catch (error) {
+                    console.error('Failed to update dashboard:', error);
+                    document.getElementById('status-dot').className = 'status-dot disconnected';
+                    document.getElementById('status-text').textContent = 'Connection Error';
+                }
+
+                // Auto-refresh trades only if on page 1 (to catch new trades)
+                if (currentTradePage === 1) {
+                    fetchTrades(1);
+                }
+            }
+
+            // Countdown timer
+            let countdown = 5;
+            function updateCountdown() {
+                countdown--;
+                document.getElementById('countdown').textContent = countdown;
+                if (countdown <= 0) {
+                    countdown = 5;
+                    updateDashboard();
+                }
+            }
+
+            // Initial fetch and start refresh
+            document.addEventListener('DOMContentLoaded', () => {
+                const tfSelect = document.getElementById('timeframe-select');
+                if (tfSelect) {
+                    tfSelect.addEventListener('change', () => {
+                        updateDashboard();
+                        countdown = 5; // Reset countdown
+                    });
+                }
                 updateDashboard();
-            }
-        }
-
-        // Initial fetch and start refresh
-        document.addEventListener('DOMContentLoaded', () => {
-            updateDashboard();
-            setInterval(updateCountdown, 1000);
-        });
-    </script>
+                setInterval(updateCountdown, 1000);
+            });
+        </script>
 </body>
 
 </html>

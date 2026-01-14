@@ -1714,6 +1714,12 @@ class HyperliquidAPI(MarketInterface):
         """Update rolling OHLCV cache from a live tick."""
         if ts is None:
             ts = time.time()
+            
+        # [BUG FIX] Detect if timestamp is in milliseconds (e.g. from WebSocket)
+        # 3e10 is approx Year 2920, safely distinguishing seconds from milliseconds (currently ~1.76e9 vs ~1.76e12)
+        if ts > 3e10:
+            ts = ts / 1000.0
+            
         self.ohlcv_cache.update_from_tick(symbol, price, volume, ts)
     
     
