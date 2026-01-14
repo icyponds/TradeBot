@@ -97,14 +97,9 @@ class StatisticalArbitrageStrategy(BaseStrategy):
             self.logger.warning("Stat Arb strategy missing dependencies (market_api or correlation_manager)")
             return None
             
-        # Get preferred timeframe data
-        tf_data = ohlcv.get(self.timeframe)
+        tf_data = self._get_timeframe_data(ohlcv)
         if tf_data is None:
-            # Fallback
-            if ohlcv:
-                tf_data = next(iter(ohlcv.values()))
-            else:
-                return None
+            return None
 
         # Logic migrated from generate_signal_with_symbol
         # Get correlated pair
@@ -288,9 +283,6 @@ class StatisticalArbitrageStrategy(BaseStrategy):
             'atomic': True,
             'metadata': {'symbol_a': symbol_a, 'symbol_b': symbol_b, 'entry_z_score': z_score, 'hedge_ratio': hedge_ratio},
         }
-
-    # Alias to match StrategyManager call signature
-    generate_signal_with_symbol = generate_signal
 
     def _get_hedge_ratio(self, symbol_a: str, symbol_b: str, 
                         prices_a: pd.Series, prices_b: pd.Series) -> float:

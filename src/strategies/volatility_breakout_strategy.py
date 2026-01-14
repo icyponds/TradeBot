@@ -49,10 +49,6 @@ class VolatilityBreakoutStrategy(BaseStrategy):
         self.atr_multiplier_sl = vb_config.get('atr_multiplier_sl', 2.0)   # Initial Stop Loss
         self.atr_multiplier_tp = vb_config.get('atr_multiplier_tp', 4.0)   # Take Profit (optional)
         
-        # State: Track if we are currently in or recently exited a squeeze
-        # Map symbol -> squeeze_active (bool)
-        self.squeeze_state: Dict[str, bool] = {}
-        
         self.logger.info(f"Initialized Volatility Breakout Strategy: "
                         f"BB({self.bb_length},{self.bb_std}), Squeeze<{self.squeeze_threshold}")
     
@@ -60,13 +56,9 @@ class VolatilityBreakoutStrategy(BaseStrategy):
         """
         Generate breakout signal.
         """
-        # Get preferred timeframe data
-        tf_data = ohlcv.get(self.timeframe)
+        tf_data = self._get_timeframe_data(ohlcv)
         if tf_data is None:
-            if ohlcv:
-                tf_data = next(iter(ohlcv.values()))
-            else:
-                return None
+            return None
         
         return self._generate_signal_internal(tf_data, symbol)
     

@@ -349,7 +349,7 @@ class TradeDatabase:
     
     def get_trades_in_range(self, start_time: datetime, 
                             end_time: datetime) -> List[Dict[str, Any]]:
-        """Get trades within a time range."""
+        """Get trades within a time range using exit_time."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(f"""

@@ -58,13 +58,9 @@ class AdaptiveGridStrategy(BaseStrategy):
         """
         Generate grid signal.
         """
-        # Get preferred timeframe data
-        tf_data = ohlcv.get(self.timeframe)
+        tf_data = self._get_timeframe_data(ohlcv)
         if tf_data is None:
-            if ohlcv:
-                tf_data = next(iter(ohlcv.values()))
-            else:
-                return None
+            return None
         
         return self._generate_signal_internal(tf_data, symbol)
     

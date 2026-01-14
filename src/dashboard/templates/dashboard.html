@@ -561,6 +561,11 @@
                 <div class="summary-value" id="total-equity">--</div>
             </div>
 
+            <div class="summary-card">
+                <div class="summary-label">Unrealized PnL</div>
+                <div class="summary-value" id="total-unrealized-pnl">--</div>
+            </div>
+
             <div class="summary-card" style="grid-column: span 2;">
                 <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 16px;">
                     <div class="summary-label">Performance</div>
@@ -1138,6 +1143,14 @@
 
                 document.getElementById('total-equity').textContent = formatCurrency(account.total_equity);
 
+                // Update Unrealized PnL
+                const unrealizedPnl = performance.total_unrealized_pnl || 0;
+                const unrealizedPnlEl = document.getElementById('total-unrealized-pnl');
+                if (unrealizedPnlEl) {
+                    unrealizedPnlEl.textContent = formatCurrency(unrealizedPnl);
+                    unrealizedPnlEl.className = 'summary-value ' + getPnlClass(unrealizedPnl);
+                }
+
                 // Session/Timeframe logic
                 // No specific subtext update needed as dropdown indicates scope
                 // but we clean up potential old references
@@ -1149,14 +1162,6 @@
                 realizedPnlEl.textContent = formatCurrency(realizedPnl);
                 realizedPnlEl.className = 'summary-value ' + getPnlClass(realizedPnl);
 
-                // Unrealized PnL
-                const unrealizedPnl = positionTotals.total_unrealized_pnl || 0;
-                const unrealizedPnlEl = document.getElementById('unrealized-pnl');
-                unrealizedPnlEl.textContent = formatCurrency(unrealizedPnl);
-                unrealizedPnlEl.className = 'summary-value ' + getPnlClass(unrealizedPnl);
-
-                document.getElementById('position-count').textContent = positionTotals.position_count || 0;
-                document.getElementById('total-notional').textContent = formatCurrency(positionTotals.total_notional);
                 document.getElementById('win-rate').textContent = formatPct(performance.win_rate);
 
                 // Trade statistics

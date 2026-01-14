@@ -36,10 +36,6 @@ class LiquidationHunterStrategy(BaseStrategy):
         # Outlier Detection settings
         self.bollinger_window = hunter_config.get('window', 20)
         self.std_dev_threshold = hunter_config.get('std_dev_threshold', 3.5) # Tuned from 3.0 to 3.5
-        self.stop_loss_pct = hunter_config.get('stop_loss_pct', 0.02)  # 3 Sigma = ~99.7% prob
-        
-        # Exit settings
-        self.mean_reversion_exit = True
         
         self.logger.info(f"Initialized Liquidation Hunter: "
                         f"Sigma={self.std_dev_threshold}, Window={self.bollinger_window}")
@@ -48,13 +44,9 @@ class LiquidationHunterStrategy(BaseStrategy):
         """
         Generate mean reversion signal on extremes.
         """
-        # Get preferred timeframe data
-        tf_data = ohlcv.get(self.timeframe)
+        tf_data = self._get_timeframe_data(ohlcv)
         if tf_data is None:
-            if ohlcv:
-                tf_data = next(iter(ohlcv.values()))
-            else:
-                return None
+            return None
         
         return self._generate_signal_internal(tf_data, symbol)
     

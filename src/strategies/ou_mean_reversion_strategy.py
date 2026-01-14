@@ -113,29 +113,11 @@ class OUMeanReversionStrategy(BaseStrategy):
         Returns:
             Signal dictionary or None
         """
-        # Get preferred timeframe data
-        tf_data = ohlcv.get(self.timeframe)
+        tf_data = self._get_timeframe_data(ohlcv)
         if tf_data is None:
-            # Fallback to first available if preferred not found
-            if ohlcv:
-                tf_data = next(iter(ohlcv.values()))
-            else:
-                return None
+            return None
 
         return self._generate_signal_internal(tf_data, symbol)
-    
-    def generate_signal_for_symbol(self, symbol: str, ohlcv: pd.DataFrame) -> Optional[Dict[str, Any]]:
-        """
-        Generate signal with symbol context for caching.
-        
-        Args:
-            symbol: Trading symbol
-            ohlcv: OHLCV data DataFrame
-            
-        Returns:
-            Signal dictionary or None
-        """
-        return self._generate_signal_internal(ohlcv, symbol)
     
     def _generate_signal_internal(self, ohlcv: pd.DataFrame, symbol: str) -> Optional[Dict[str, Any]]:
         """Internal signal generation with symbol context."""

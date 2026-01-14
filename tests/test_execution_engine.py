@@ -226,3 +226,67 @@ class TestExecutionEngine:
         assert len(execution_engine.multi_leg_positions) > 0
         # Check that execute_order was called (trade went through after scaling)
         assert mock_market_api.execute_order.called
+
+    def test_premature_displacement_blocked_by_risk(self, execution_engine, mock_market_api):
+        """
+        Verify that an existing trade is NOT displaced if the NEW trade fails risk checks.
+        
+        Bug Reproduction:
+        1. Existing trade 'victim' uses BTC.
+        2. New trade 'aggressor' uses BTC (conflict).
+        3. 'aggressor' fails risk check (e.g. after scaling).
+        4. Expected: 'victim' survives.
+        5. Actual (Bug): 'victim' is displaced before 'aggressor' is checked.
+        """
+        from unittest.mock import MagicMock
+        from src.models.trade import Position
+        
+        # 1. Setup VICTIM position (Single Leg BTC)
+        victim_symbol = "BTC"
+        victim_pos = Position(
+            symbol=victim_symbol, side='long', size=1.0, entry_price=50000, strategy='victim_strat',
+            entry_time=datetime.now()
+        )
+        execution_engine.positions[victim_symbol] = victim_pos
+        
+        # 2. Setup AGGRESSOR signal (Conflicting BTC leg)
+        # Note: We use a multi-leg signal format
+        signal = {
+            'action': 'enter',
+            'legs': [
+                {'symbol': 'BTC', 'market_type': 'perp', 'order_side': 'sell', 'side': 'short', 'hedge_ratio': 1.0},
+            ]
+        }
+        
+        # 3. Mock Risk Check Failure
+        # Logic: calculate_leveraged_position_size returns valid size...
+        execution_engine.leverage_manager.calculate_leveraged_position_size.return_value = (1.0, 1000.0, 1.0)
+        # ... BUT can_open_position returns FALSE (High Risk)
+        execution_engine.leverage_manager.can_open_position.return_value = False
+        
+        # Mock other dependencies to ensure we reach the risk check
+        execution_engine.portfolio_manager.calculate_available_capital_for_trading.return_value = 10000.0
+        mock_market_api.get_current_price.return_value = 50000.0
+        # CRITICAL: Mock execute_order so close_position succeeds during displacement
+        mock_market_api.execute_order.return_value = {
+            'filled_size': 1.0, 'avg_fill_price': 50000, 'order_id': 'close_123'
+        }
+        
+        # Mock Strategy Manager for conflict resolution
+        mock_strategy_manager = MagicMock()
+        mock_strategy_manager._should_displace_position.return_value = True
+        mock_strategy_manager._get_position_profitability_score.return_value = 0.0
+        mock_strategy_manager._get_multi_leg_profitability_score.return_value = 0.0
+        
+        # 4. Execute
+        execution_engine.execute_multi_leg_entry(
+            'BTC-Short', signal, 50000.0, 'aggressor_strat', {}, 0.9, strategy_manager=mock_strategy_manager
+        )
+        
+        # 5. Verify VICTIM SURVIVAL
+        # If bug exists: Victim is gone (displaced)
+        # If fixed: Victim remains
+        assert victim_symbol in execution_engine.positions, "Victim trade was prematurely displaced!"
+        
+        # Verify Aggressor did NOT execute
+        assert len(execution_engine.multi_leg_positions) == 0

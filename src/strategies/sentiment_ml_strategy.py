@@ -54,13 +54,9 @@ class SentimentMLStrategy(BaseStrategy):
         """
         Generate sentiment signal.
         """
-        # Get preferred timeframe data
-        tf_data = ohlcv.get(self.timeframe)
+        tf_data = self._get_timeframe_data(ohlcv)
         if tf_data is None:
-            if ohlcv:
-                tf_data = next(iter(ohlcv.values()))
-            else:
-                return None
+            return None
         
         return self._generate_signal_internal(tf_data, symbol)
     
@@ -154,16 +150,12 @@ class SentimentMLStrategy(BaseStrategy):
         # Calculate returns
         returns = closes.pct_change()
         
-        # Normalize volume (Relative Volume)
-        # vol_ma = volumes.rolling(window=24).mean()
-        # rvol = volumes / vol_ma
-        
         # Sentiment Proxy = Return * Volume
         # This gives very large positive numbers for high volume pumps
         # and very large negative numbers for high volume dumps.
         sentiment = returns * volumes
         
-        # Smooth slighty
+        # Smooth slightly
         sentiment = sentiment.rolling(window=3).mean()
         
         return sentiment

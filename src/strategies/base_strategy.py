@@ -47,6 +47,23 @@ class BaseStrategy(ABC):
         minutes = self.TIMEFRAME_MINUTES.get(self.timeframe, 15)
         return minutes * 60
     
+    def _get_timeframe_data(self, ohlcv: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+        """
+        Extract OHLCV data for this strategy's preferred timeframe.
+        
+        Falls back to first available timeframe if preferred is not found.
+        
+        Args:
+            ohlcv: Dictionary mapping timeframe to OHLCV DataFrame
+            
+        Returns:
+            DataFrame for preferred timeframe, or None if no data available
+        """
+        tf_data = ohlcv.get(self.timeframe)
+        if tf_data is None and ohlcv:
+            tf_data = next(iter(ohlcv.values()))
+        return tf_data
+    
     @abstractmethod
     def generate_signal(self, symbol: str, ohlcv: Dict[str, pd.DataFrame]) -> Optional[Dict[str, Any]]:
         """

@@ -485,17 +485,6 @@ class ExecutionEngine:
                 self.logger.info(f"Already have multi-leg position for {symbol}, skipping")
                 return
             
-            # =========================================================================
-            # LEG CONFLICT DETECTION: Check if any leg conflicts with existing positions
-            # =========================================================================
-            legs = signal.get('legs', [])
-            if legs and strategy_manager:
-                conflicts = self._detect_leg_conflicts(legs)
-                if conflicts:
-                    if not self._resolve_leg_conflicts(conflicts, signal_strength, strategy_manager):
-                        self.logger.info(f"Multi-leg entry for {symbol} blocked by leg conflicts")
-                        return
-            
             
             market_volatility = self.calculate_market_volatility(ohlcv)
             available_capital = self.portfolio_manager.calculate_available_capital_for_trading()
@@ -621,6 +610,18 @@ class ExecutionEngine:
                     self.logger.error(f"Cannot allocate ${spot_required:.2f} to spot account")
                     return
             
+            # =========================================================================
+            # LEG CONFLICT DETECTION: Check if any leg conflicts with existing positions
+            # MOVED HERE: Only displace if new trade is valid and fundable
+            # =========================================================================
+            # legs is already defined above
+            if legs and strategy_manager:
+                conflicts = self._detect_leg_conflicts(legs)
+                if conflicts:
+                    if not self._resolve_leg_conflicts(conflicts, signal_strength, strategy_manager):
+                        self.logger.info(f"Multi-leg entry for {symbol} blocked by leg conflicts")
+                        return
+
             self.logger.info("Fund allocation complete, executing legs...")
             
 
