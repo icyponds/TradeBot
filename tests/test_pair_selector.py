@@ -11,6 +11,7 @@ class TestDynamicPairSelector:
         mock_config['trading']['dynamic_pair_selection'] = True
         mock_config['trading']['min_open_interest'] = 1000000
         mock_config['trading']['scan_interval_minutes'] = 60
+        mock_config['trading']['max_pairs_to_trade'] = 50
         mock_config['trading']['excluded_assets'] = []
         mock_config['trading']['included_assets'] = []
         mock_config['hip3'] = {'enabled': False}

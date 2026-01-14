@@ -213,7 +213,7 @@ class DynamicPairSelector:
             return self.strategy_manager.get_max_pairs_to_trade()
         else:
             # Fallback to config if strategy manager is not available
-            return self.config['trading'].get('max_pairs_to_trade', 20)
+            return self.config['trading']['max_pairs_to_trade']
     
     # =========================================================================
     # SOPHISTICATED SCORING METHODS
