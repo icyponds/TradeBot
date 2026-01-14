@@ -2925,23 +2925,32 @@ class StrategyManager:
         total_capital_at_risk = 0.0
         position_details = {}
         
+        # Use Total Equity as the denominator for risk % calculation
+        # Risk should be % of Account Equity, NOT % of Free Margin
+        total_equity = self.portfolio_manager.total_equity
+        
         for symbol, position in self.positions.items():
             # Use the capital_at_risk from the position if available, otherwise calculate it
             if position.capital_at_risk is not None:
                 capital_at_risk = position.capital_at_risk
             else:
                 # Fallback calculation
-                position_value = position.size * position.entry_price
-                capital_at_risk = position_value
+                notional_value = position.size * position.entry_price
+                
+                # If leverage is known, approximate margin usage
+                if hasattr(position, 'leverage') and position.leverage > 0:
+                    capital_at_risk = notional_value / position.leverage
+                else:
+                    # Worst case fallback: assume full notional risk (no leverage or 1x)
+                    capital_at_risk = notional_value
             
             total_capital_at_risk += capital_at_risk
-            available_capital = self.portfolio_manager.calculate_available_capital_for_trading()
             
             # Handle division by zero
-            if available_capital <= 0:
+            if total_equity <= 0:
                 percentage = 0.0
             else:
-                percentage = (capital_at_risk / available_capital) * 100
+                percentage = (capital_at_risk / total_equity) * 100
             
             position_details[symbol] = {
                 'value': capital_at_risk,
@@ -2949,17 +2958,16 @@ class StrategyManager:
                 'notional_value': position.size * position.entry_price
             }
         
-        available_capital = self.portfolio_manager.calculate_available_capital_for_trading()
-        
         # Handle division by zero
-        if available_capital <= 0:
+        if total_equity <= 0:
             allocation_percentage = 0.0
         else:
-            allocation_percentage = (total_capital_at_risk / available_capital) * 100
+            allocation_percentage = (total_capital_at_risk / total_equity) * 100
         
         return {
             'total_capital_at_risk': total_capital_at_risk,
             'available_capital': self.portfolio_manager.calculate_available_capital_for_trading(),
+            'total_equity': total_equity,
             'allocation_percentage': allocation_percentage,
             'position_details': position_details,
             'max_allocation': self.max_positions_percentage
