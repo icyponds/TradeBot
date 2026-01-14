@@ -1360,14 +1360,8 @@ class StrategyManager:
             # Update regime and change-point gating from market proxy (once per cycle)
             self._maybe_update_regime_and_changepoint()
             
-            # Check for pair rotation/rescanning (Critical for initial load)
-            if hasattr(self.pair_selector, 'should_rescan') and self.pair_selector.should_rescan():
-                # Trigger scan to populate backfill_queue
-                self.logger.info("Triggering pair selection scan...")
-                if hasattr(self.pair_selector, '_trigger_background_scan'):
-                    self.pair_selector._trigger_background_scan()
-                else:
-                    self.pair_selector.scan_and_select_pairs()
+            # NOTE: Pair rotation is now handled by the continuous scouting loop
+            # in DynamicPairSelector._background_data_fetcher(). No rescan trigger needed.
             
             # Retry any pending symbol subscriptions from previous failures
             if hasattr(self.market_api, 'retry_pending_subscriptions'):

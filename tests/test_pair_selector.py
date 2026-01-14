@@ -98,10 +98,12 @@ class TestDynamicPairSelector:
             assert raw_vol == pytest.approx(0.10)
 
     def test_get_current_pairs_is_non_blocking(self, pair_selector):
-        """Verify get_current_pairs returns immediately and triggers background scan."""
+        """Verify get_current_pairs returns immediately without blocking."""
         import time
         
-        # First call should return empty (no pairs yet) and trigger background scan
+        # Add some pairs manually to simulate background fetcher having populated them
+        pair_selector.selected_pairs = ['BTC', 'ETH']
+        
         start = time.time()
         pairs = pair_selector.get_current_pairs()
         elapsed = time.time() - start
@@ -109,5 +111,5 @@ class TestDynamicPairSelector:
         # Should return in < 100ms (non-blocking)
         assert elapsed < 0.1, f"get_current_pairs blocked for {elapsed:.2f}s"
         
-        # Should have started background scan thread
-        assert pair_selector._scan_in_progress or pair_selector._scan_thread is not None
+        # Should return the pairs (continuous scouting loop handles population)
+        assert pairs == ['BTC', 'ETH']

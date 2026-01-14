@@ -179,21 +179,12 @@ class DynamicPairSelector:
         self.backfill_symbols_in_queue: set = set()
         self.last_backfill_time: Optional[datetime] = None
         
-        # Maintenance state (Periodic Integrity Checks)
-        self.maintenance_queue = [] # Queue for periodic re-validation of active pairs
-        self.last_maintenance_time = datetime.min
-        self.maintenance_interval_seconds = 300 # 5 minutes default
-        
         # Threading for independent data fetching
         self._backfill_thread: Optional[threading.Thread] = None
         self._backfill_running = False
         self._backfill_lock = threading.Lock()  # Protects backfill_queue access
         self._data_lock = threading.Lock()  # Protects price_history access
         self._pairs_lock = threading.Lock()  # Protects selected_pairs access (prevents race with background fetcher)
-        
-        # Background pair scanning
-        self._scan_thread: Optional[threading.Thread] = None
-        self._scan_in_progress = False
         
         self.logger.info(f"Initialized DynamicPairSelector (Mode: {self.selection_mode.value})")
         self.logger.info(f"  Weights: Liquidity={self.weight_liquidity:.0%}, Volatility={self.weight_volatility:.0%}, "
@@ -776,18 +767,24 @@ class DynamicPairSelector:
             selected_pairs, pairs_metadata = self._rank_and_select_pairs(eligible_pairs, btc_history)
             
             # Update state (thread-safe)
-            with self._pairs_lock:
-                self.selected_pairs = selected_pairs
-                self.selected_pairs_metadata = pairs_metadata
+            # IMPORTANT: In background mode, _rank_and_select_pairs returns ([], {})
+            # and the actual pair selection happens incrementally in the background fetcher.
+            # Only overwrite if we got actual results (synchronous mode, if ever used).
+            if selected_pairs:
+                with self._pairs_lock:
+                    self.selected_pairs = selected_pairs
+                    self.selected_pairs_metadata = pairs_metadata
+                self.logger.info(f"Selected {len(selected_pairs)} pairs for trading: {selected_pairs}")
+                
+                # Subscribe to WebSocket feeds for selected pairs (sync mode)
+                for symbol in selected_pairs:
+                    if hasattr(self.market_api, 'subscribe_symbol'):
+                        self.market_api.subscribe_symbol(symbol)
+                        time.sleep(0.1)
+            else:
+                self.logger.info("Pair selection queued for background processing")
+            
             self.last_scan_time = datetime.now()
-            
-            self.logger.info(f"Selected {len(selected_pairs)} pairs for trading: {selected_pairs}")
-            
-            # Subscribe to WebSocket feeds for selected pairs
-            for symbol in selected_pairs:
-                if hasattr(self.market_api, 'subscribe_symbol'):
-                    self.market_api.subscribe_symbol(symbol)
-                    time.sleep(0.1)  # Throttle subscription dispatching to prevent executor overload
             
             # Start background data fetcher if there are queued assets
             if self.backfill_queue and not self._backfill_running:
@@ -1109,14 +1106,12 @@ class DynamicPairSelector:
         
         self.logger.info(f"Ranking {len(eligible_assets)} eligible assets by volume")
         
-        # Stop background fetcher if running (we're doing a fresh scan)
+        # Stop background fetcher if running (we're starting fresh)
         if self._backfill_running:
             self.stop_background_fetcher()
         
-        # Clear caches for fresh calculation (thread-safe)
-        with self._data_lock:
-            self.price_history.clear()
-        self.asset_metrics.clear()
+        # Only clear queue to prepare for fresh population
+        # DO NOT clear price_history or asset_metrics - continuous loop updates incrementally
         with self._backfill_lock:
             self.backfill_queue.clear()
             self.backfill_symbols_in_queue.clear()
@@ -1288,39 +1283,17 @@ class DynamicPairSelector:
         
         return selected_pairs, pairs_metadata
     
-    def should_rescan(self) -> bool:
-        """
-        Check if it's time to rescan for new pairs.
-        
-        Returns:
-            True if should rescan, False otherwise
-        """
-        if not self.last_scan_time:
-            return True
-        
-        time_since_scan = datetime.now() - self.last_scan_time
-        scan_interval = timedelta(minutes=self.scan_interval_minutes)
-        
-        return time_since_scan >= scan_interval
-    
     def get_current_pairs(self, trigger_rescan: bool = True) -> List[str]:
         """
         Get currently selected trading pairs.
         
         Args:
-            trigger_rescan: Whether to trigger a rescan if the interval has passed.
-                          Set to False for read-only access (e.g. dashboard).
-        
-        Data fetching runs independently in a background thread.
-        This method returns immediately with whatever pairs are available.
+            trigger_rescan: Deprecated, kept for backwards compatibility.
+                           Continuous scouting loop handles rotation now.
         
         Returns:
             List of current trading pairs (copy, safe to iterate)
         """
-        if trigger_rescan and self.should_rescan():
-            # Trigger background scan instead of blocking
-            self._trigger_background_scan()
-        
         # Return a copy to prevent race condition with background thread
         with self._pairs_lock:
             return self.selected_pairs.copy()
@@ -1334,29 +1307,6 @@ class DynamicPairSelector:
             # Only return pairs that are both SELECTED and READY
             return [p for p in self.selected_pairs if p in self.ready_pairs]
 
-    def _trigger_background_scan(self):
-        """Start a background scan if not already running."""
-        if self._scan_in_progress:
-            self.logger.debug("Background scan already in progress, skipping")
-            return
-        
-        self._scan_in_progress = True
-        self._scan_thread = threading.Thread(
-            target=self._background_scan_worker,
-            name="pair_scan",
-            daemon=True
-        )
-        self._scan_thread.start()
-        self.logger.info("Started background pair selection scan")
-    
-    def _background_scan_worker(self):
-        """Background worker for pair scanning."""
-        try:
-            self.scan_and_select_pairs()
-        except Exception as e:
-            self.logger.error(f"Background scan failed: {e}")
-        finally:
-            self._scan_in_progress = False
     
     def start_background_fetcher(self):
         """Start the background data fetching thread."""
@@ -1383,219 +1333,192 @@ class DynamicPairSelector:
     
     def _background_data_fetcher(self):
         """
-        Background thread that continuously fetches data for queued assets.
+        Background thread that continuously cycles through all assets.
         
-        Runs independently of the strategy loop, respecting rate limits.
+        Each cycle:
+        1. SCOUTING: Process all assets in queue (fetch 1d, score, rotate)
+        2. MAINTENANCE: Refresh candles and run integrity for pool members
+        3. WAIT: If cycle < 15 min, wait until 15 min mark, then repopulate and repeat
         """
         RATE_LIMIT_DELAY = 1.5  # ~40 requests per minute
-        STARTUP_DELAY = 1  # Reduced from 30s since initial load is distinct now
+        MIN_CYCLE_INTERVAL_SECONDS = 900  # 15 minutes minimum between cycle starts
         
-        try:
-            self.logger.info(f"Background data fetcher started (waiting {STARTUP_DELAY}s for subscriptions to settle)")
-            # Wait for initial subscriptions to complete before starting scouting
-            # This prevents concurrent API calls from initial load + scouting
-            # Use interruptible sleep loop
-            for _ in range(STARTUP_DELAY):
-                if not self._backfill_running:
-                    return
-                time.sleep(1.0)
-                
-            self.logger.info("Background data fetcher now actively scouting")
-        except Exception as log_error:
-            print(f"[BackgroundFetcher] Log error: {log_error}")
-        
-        assets_loaded = 0
+        self.logger.info("Background data fetcher started (continuous scouting mode)")
         
         while self._backfill_running:
             try:
-                # Get next asset from queue (thread-safe)
-                asset = None
-                mode = "scouting"  # "scouting" or "maintenance"
+                cycle_start_time = datetime.now()
+                assets_scouted = 0
                 
-                with self._backfill_lock:
-                    # Priority 1: Scouting Queue (New candidates)
-                    if self.backfill_queue:
-                        asset = self.backfill_queue.pop(0)
-                        mode = "scouting"
-                    
-                    # Priority 2: Maintenance Queue (Integrity checks for active pool)
-                    # Only check if scouting queue is empty
-                    elif self.maintenance_queue:
-                        asset = self.maintenance_queue.pop(0)
-                        mode = "maintenance"
-                        
-                    # Priority 3: Populate Maintenance Queue if due
-                    elif (datetime.now() - self.last_maintenance_time).total_seconds() > self.maintenance_interval_seconds:
-                        self.logger.info("[BackgroundFetcher] Starting scheduled integrity maintenance for Core Pool...")
-                        
-                        # Snapshot current selected pairs
-                        current_pairs = []
-                        with self._pairs_lock:
-                             current_pairs = list(self.selected_pairs)
-                             
-                        if current_pairs:
-                            # Re-queue them for maintenance
-                            # We construct simple asset dicts since we only need symbol + market_type
-                            # We default to 'perp' but checking metadata would be better if we tracked it perfectly here.
-                            # For now, we assume selected_pairs are predominantly perps or we look them up.
-                            # Actually, we can just pass the symbol and let the fetcher handle it.
-                            
-                            for sym in current_pairs:
-                                # Look up metadata if possible, or default
-                                # We'll just queue the name and let the loop resolve details
-                                # To fit the existing 'asset' dict structure:
-                                m_type = 'perp' # Default to perp for now, or look up from pairs_metadata if available
-                                if self.selected_pairs_metadata and sym in self.selected_pairs_metadata:
-                                    m_type = self.selected_pairs_metadata[sym].get('market_type', 'perp')
-                                    
-                                self.maintenance_queue.append({'name': sym, 'market_type': m_type})
-                                
-                            self.last_maintenance_time = datetime.now()
-                            self.logger.info(f"[BackgroundFetcher] Queued {len(self.maintenance_queue)} assets for maintenance.")
-                            
-                            # Grab first one immediately
-                            if self.maintenance_queue:
-                                asset = self.maintenance_queue.pop(0)
-                                mode = "maintenance"
+                # ===== PHASE 1: SCOUTING - Process all assets in queue =====
+                self.logger.info(f"[Scouting] Starting cycle with {len(self.backfill_queue)} queued assets")
                 
-                if asset is None:
-                    # Queue empty, sleep and check again
-                    time.sleep(1.0)
-                    continue
-                
-                sym = asset.get('name', '')
-                market_type = asset.get('market_type', 'perp')
-                queue_key = f"{market_type}:{sym}"
-                
-                if mode == "maintenance":
-                    # Maintenance Mode Logic
-                    self.logger.debug(f"[BackgroundFetcher] [Maintenance] Checking integrity for {sym}...")
-                    try:
-                        # 1. Run Integrity Check (Repairer)
-                        if hasattr(self.market_api, 'repairer') and self.market_api.repairer:
-                            self.market_api.repairer.process_asset(sym)
-                        
-                        # 2. Refresh recent candles (Optional, but good for keeping cache warm)
-                         # Just fetching the last few candles helps ensure the WebSocket link is healthy
-                        self.market_api.get_ohlcv(sym, '1h', limit=5)
-                        
-                    except Exception as e:
-                        self.logger.warning(f"[BackgroundFetcher] [Maintenance] Failed for {sym}: {e}")
-                    
-                    # Sleep slightly longer for maintenance to be low impact
-                    time.sleep(RATE_LIMIT_DELAY * 2) 
-                    continue
-
-                # --- SCOUTING MODE (Original Logic) ---
-                
-                # Skip if already in queue (redundancy check)
-                if queue_key not in self.backfill_symbols_in_queue:
-                    # This might happen if we flushed queue but thread had local ref? Unlikely but safe.
-                   pass
-                
-                if not sym:
-                    continue
-                
-                # High-visibility logging to prove processing order (User Request)
-                self.logger.info(f"[BackgroundFetcher] Inspecting #{assets_loaded+1}: {sym} ({market_type}) - 1d scoring only")
-                
-                # Check if already ready
-                with self._pairs_lock:
-                    if sym in self.ready_pairs:
-                        with self._backfill_lock:
-                            self.backfill_symbols_in_queue.discard(queue_key)
-                        continue
-                
-                # Fetch data for this asset
-                try:
-                    assets_loaded += 1
-                    if assets_loaded <= 3 or assets_loaded % 10 == 0:
-                        self.logger.info(f"[BackgroundFetcher] Scouting {sym} ({market_type})... [{assets_loaded} scouted]")
-                    else:
-                        self.logger.debug(f"[BackgroundFetcher] Scouting {sym} ({market_type})...")
-                    
-                    # Fetch historical data (for scoring) - NO subscription yet
-                    # Subscription happens in _add_to_pool if the asset qualifies
-                    self._get_price_history(sym, market_type=market_type)
-                    
+                while self._backfill_running:
+                    # Get next asset from queue
                     with self._backfill_lock:
-                        self.backfill_symbols_in_queue.discard(queue_key)
+                        if not self.backfill_queue:
+                            break
+                        asset = self.backfill_queue.pop(0)
                     
-                    # Dynamically add to trading pairs using rotational scouting
-                    self._try_add_to_trading_pairs(asset)
+                    sym = asset.get('name', '')
+                    market_type = asset.get('market_type', 'perp')
+                    queue_key = f"{market_type}:{sym}"
                     
-                    # Check if asset was selected and pre-warm data
-                    with self._pairs_lock:
-                        perp_in_pool = sym in self.selected_pairs
+                    if not sym:
+                        continue
                     
-                    if perp_in_pool:
-                        self.logger.info(f"[BackgroundFetcher] ==> SELECTED {sym}! Pre-warming 5m/15m/1h/4h and running integrity check...")
+                    try:
+                        assets_scouted += 1
+                        if assets_scouted <= 3 or assets_scouted % 20 == 0:
+                            self.logger.info(f"[Scouting] #{assets_scouted}: {sym}")
                         
-                        # Run integrity check ONLY for assets in the Core Pool
-                        # This prevents wasting API calls on non-tradeable assets
-                        if hasattr(self.market_api, 'repairer') and self.market_api.repairer:
-                            self.logger.debug(f"[BackgroundFetcher] Running integrity check for {sym}")
-                            self.market_api.repairer.process_asset(sym)
+                        # Fetch 1d data for scoring
+                        self._get_price_history(sym, market_type=market_type)
                         
-                        # Pre-warm all required timeframes so strategies have data immediately
-                        # This replaces the initial load logic
-                        try:
-                            # 1h is usually covered by history fetch, but ensure all
-                            for tf in ['5m', '15m', '1h', '4h']:
-                                self.market_api.get_ohlcv(sym, tf, market_type=market_type)
-                            
-                            # Mark as ready for trading logic
-                            with self._pairs_lock:
-                                self.ready_pairs.add(sym)
-                            
-                            self.logger.info(f"  -> {sym} fully loaded and ready for trading")
-                        except Exception as e:
-                            self.logger.warning(f"  -> Failed to pre-warm {sym}: {e}")
-                    else:
-                        self.logger.debug(f"[BackgroundFetcher] {sym} not selected. Skipping full warm-up.")
-                    
-                    # Also load corresponding spot if this perp was ADDED to the pool
-                    # (Spot is only needed for stat arb if the perp is actively traded)
-                    
-                    if market_type == 'perp' and perp_in_pool:
-                        spot_token = self.market_api.get_spot_token_for_perp(sym) if hasattr(self.market_api, 'get_spot_token_for_perp') else None
-                        with self._data_lock:
-                            is_direct_match = (spot_token == sym) if spot_token else False
-                            spot_already_loaded = (not is_direct_match) and (spot_token in self.price_history) if spot_token else True
-                        
-                        if spot_token and not spot_already_loaded:
-                            time.sleep(RATE_LIMIT_DELAY)
-                            try:
-                                self._get_price_history(spot_token, market_type='spot')
-                                # Subscribe spot for real-time data since perp is in pool
-                                if hasattr(self.market_api, 'subscribe_symbol'):
-                                    self.market_api.subscribe_symbol(spot_token)
-                                self.logger.debug(f"[BackgroundFetcher] Loaded spot {spot_token}/USDC for {sym}")
-                            except Exception as e:
-                                self.logger.warning(f"[BackgroundFetcher] Failed spot {spot_token}: {e}")
-                    
-                    # Rate limit delay
-                    time.sleep(RATE_LIMIT_DELAY)
-                    
-                except Exception as e:
-                    msg = str(e)
-                    if "Circuit breaker is open" in msg or "429" in msg:
-                        self.logger.warning(f"[BackgroundFetcher] Rate limit at {sym}, waiting 10s...")
-                        # Put back at end of queue
-                        with self._backfill_lock:
-                            self.backfill_queue.append(asset)
-                        time.sleep(10.0)  # Wait longer on rate limit
-                    else:
-                        self.logger.warning(f"[BackgroundFetcher] Error for {sym}: {e}")
                         with self._backfill_lock:
                             self.backfill_symbols_in_queue.discard(queue_key)
+                        
+                        # Score and potentially rotate into pool (handles both new and existing)
+                        self._try_add_to_trading_pairs(asset)
+                        
+                        # If newly added to pool, pre-warm all timeframes
+                        with self._pairs_lock:
+                            is_in_pool = sym in self.selected_pairs
+                            needs_warmup = is_in_pool and sym not in self.ready_pairs
+                        
+                        if needs_warmup:
+                            self.logger.info(f"[Scouting] Pre-warming {sym} (5m/15m/1h/4h)...")
+                            try:
+                                # Run integrity check
+                                if hasattr(self.market_api, 'repairer') and self.market_api.repairer:
+                                    self.market_api.repairer.process_asset(sym)
+                                
+                                # Fetch all timeframes
+                                for tf in ['5m', '15m', '1h', '4h']:
+                                    self.market_api.get_ohlcv(sym, tf, market_type=market_type)
+                                
+                                # Mark as ready
+                                with self._pairs_lock:
+                                    self.ready_pairs.add(sym)
+                                
+                                self.logger.info(f"[Scouting] {sym} now ready for trading")
+                            except Exception as e:
+                                self.logger.warning(f"[Scouting] Pre-warm failed for {sym}: {e}")
+                        
+                        # Rate limit delay
                         time.sleep(RATE_LIMIT_DELAY)
                         
+                    except Exception as e:
+                        msg = str(e)
+                        if "Circuit breaker is open" in msg or "429" in msg:
+                            self.logger.warning(f"[Scouting] Rate limit at {sym}, waiting 10s...")
+                            with self._backfill_lock:
+                                self.backfill_queue.append(asset)
+                            time.sleep(10.0)
+                        else:
+                            self.logger.warning(f"[Scouting] Error for {sym}: {e}")
+                            with self._backfill_lock:
+                                self.backfill_symbols_in_queue.discard(queue_key)
+                            time.sleep(RATE_LIMIT_DELAY)
+                
+                if not self._backfill_running:
+                    break
+                
+                # ===== PHASE 2: MAINTENANCE - Refresh pool members =====
+                with self._pairs_lock:
+                    pool_members = list(self.selected_pairs)
+                
+                if pool_members:
+                    self.logger.info(f"[Maintenance] Refreshing {len(pool_members)} pool members")
+                
+                for sym in pool_members:
+                    if not self._backfill_running:
+                        break
+                    try:
+                        # Run integrity check
+                        if hasattr(self.market_api, 'repairer') and self.market_api.repairer:
+                            self.market_api.repairer.process_asset(sym)
+                        
+                        # Refresh all timeframes
+                        for tf in ['5m', '15m', '1h', '4h']:
+                            self.market_api.get_ohlcv(sym, tf, limit=10)
+                        
+                        # Ensure in ready_pairs
+                        with self._pairs_lock:
+                            if sym in self.selected_pairs and sym not in self.ready_pairs:
+                                self.ready_pairs.add(sym)
+                                self.logger.info(f"[Maintenance] Re-added {sym} to ready_pairs")
+                        
+                        time.sleep(RATE_LIMIT_DELAY)
+                        
+                    except Exception as e:
+                        self.logger.warning(f"[Maintenance] Error for {sym}: {e}")
+                
+                if not self._backfill_running:
+                    break
+                
+                # ===== PHASE 3: WAIT AND REPOPULATE =====
+                cycle_duration = (datetime.now() - cycle_start_time).total_seconds()
+                
+                if cycle_duration < MIN_CYCLE_INTERVAL_SECONDS:
+                    wait_time = MIN_CYCLE_INTERVAL_SECONDS - cycle_duration
+                    self.logger.info(f"[Scouting] Cycle complete ({assets_scouted} assets in {cycle_duration:.0f}s), waiting {wait_time:.0f}s")
+                    
+                    # Interruptible sleep
+                    for _ in range(int(wait_time)):
+                        if not self._backfill_running:
+                            break
+                        time.sleep(1.0)
+                else:
+                    self.logger.info(f"[Scouting] Cycle took {cycle_duration:.0f}s (>{MIN_CYCLE_INTERVAL_SECONDS}s), starting next immediately")
+                
+                # Repopulate queue for next cycle
+                if self._backfill_running:
+                    self._repopulate_scouting_queue()
+                
             except Exception as e:
                 self.logger.error(f"[BackgroundFetcher] Unexpected error: {e}")
+                import traceback
+                self.logger.error(traceback.format_exc())
                 time.sleep(5.0)
         
         self.logger.info("Background data fetcher stopped")
+    
+    def _repopulate_scouting_queue(self):
+        """Re-populate queue with all eligible assets for a new scouting cycle."""
+        try:
+            all_assets = []
+            all_assets.extend(self._get_native_perp_assets())
+            
+            if self.hip3_enabled and self.hip3_include_in_selection:
+                all_assets.extend(self._get_hip3_perp_assets())
+            
+            eligible_assets = self._filter_assets(all_assets)
+            
+            # Sort by volume (highest first for priority)
+            sorted_assets = sorted(
+                eligible_assets, 
+                key=lambda x: float(x.get('volume24h', 0)), 
+                reverse=True
+            )
+            
+            with self._backfill_lock:
+                self.backfill_queue.clear()
+                self.backfill_symbols_in_queue.clear()
+                
+                for asset in sorted_assets:
+                    sym = asset.get('name', '')
+                    market_type = asset.get('market_type', 'perp')
+                    queue_key = f"{market_type}:{sym}"
+                    
+                    if sym:
+                        self.backfill_queue.append(asset)
+                        self.backfill_symbols_in_queue.add(queue_key)
+            
+            self.logger.info(f"[Scouting] Queued {len(self.backfill_queue)} assets for next cycle")
+            
+        except Exception as e:
+            self.logger.error(f"[Scouting] Failed to repopulate queue: {e}")
     
     def get_backfill_status(self) -> Dict[str, Any]:
         """Get status of the background data fetcher."""
@@ -1613,13 +1536,10 @@ class DynamicPairSelector:
     
     def _try_add_to_trading_pairs(self, asset: Dict[str, Any]):
         """
-        Try to add a newly-loaded asset to the trading pairs pool using rotational scouting.
+        Rotational scouting with dynamic rescoring.
         
-        Called by background fetcher after loading an asset's data.
-        
-        Rotational Scouting Logic:
-        1. If pool has room (< max_pairs_to_trade): Add immediately.
-        2. If pool is full: Only add if score > lowest existing score (swap).
+        For NEW assets: Add if pool has room, or swap if score > lowest pool member
+        For EXISTING pool members: Rescore and update stored score in metadata
         
         Thread-safe: Uses _pairs_lock to prevent race conditions with main thread.
         """
@@ -1634,44 +1554,52 @@ class DynamicPairSelector:
             if market_type == 'spot':
                 return
             
-            # Calculate metrics for this asset BEFORE acquiring lock
+            # Calculate fresh metrics for this asset
             metrics = self._calculate_asset_metrics(asset)
             if not metrics or metrics.composite_score <= 0:
-                self.logger.debug(f"[DynamicPairs] Skipped {symbol}: insufficient metrics or score")
+                self.logger.debug(f"[Scouting] Skipped {symbol}: insufficient metrics or score")
                 return
             
-            # Thread-safe check and add
+            # Thread-safe check and update/add
             with self._pairs_lock:
-                # Already in selected pairs?
-                if symbol in self.selected_pairs:
-                    return
+                is_in_pool = symbol in self.selected_pairs
                 
-                # Apply diversification penalty based on current pairs
+                # Calculate final score (with diversification penalty if applicable)
                 final_score = self._calculate_composite_score(metrics, self.selected_pairs)
                 
-                current_count = len(self.selected_pairs)
-                max_pool_size = self._get_max_pairs_to_trade()
-                
-                # Rotational Scouting Logic
-                if current_count < max_pool_size:
-                    # Pool has room - add directly
-                    self._add_to_pool(symbol, asset, market_type, final_score)
-                    self.logger.info(f"[DynamicPairs] Promoted {symbol} into Core Pool (total: {current_count + 1}) | Score: {final_score:.3f}")
+                if is_in_pool:
+                    # UPDATE existing pool member's score
+                    if symbol in self.selected_pairs_metadata:
+                        old_score = self.selected_pairs_metadata[symbol].get('composite_score', 0)
+                        self.selected_pairs_metadata[symbol]['composite_score'] = final_score
+                        
+                        # Log significant changes
+                        if abs(final_score - old_score) > 0.05:
+                            self.logger.info(f"[Rescore] {symbol}: {old_score:.3f} → {final_score:.3f}")
                 else:
-                    # Pool is full - check if we should swap
-                    lowest_symbol, lowest_score = self._get_lowest_scorer()
+                    # NEW asset - apply rotation logic
+                    current_count = len(self.selected_pairs)
+                    max_pool_size = self._get_max_pairs_to_trade()
                     
-                    if lowest_symbol and final_score > lowest_score:
-                        # Swap: Evict lowest, add new
-                        self._remove_from_pool(lowest_symbol)
+                    if current_count < max_pool_size:
+                        # Pool has room - add directly
                         self._add_to_pool(symbol, asset, market_type, final_score)
-                        self.logger.info(f"[DynamicPairs] Swapped {symbol} (Score: {final_score:.3f}) into Core Pool. Evicted {lowest_symbol} (Score: {lowest_score:.3f})")
+                        self.logger.info(f"[Pool] Added {symbol} (Score: {final_score:.3f}, Total: {current_count + 1})")
                     else:
-                        # Asset data is in DB (scouted) but not in trading pool
-                        self.logger.debug(f"[DynamicPairs] Scouted {symbol} (Score: {final_score:.3f}) - below cutoff {lowest_score:.3f}")
+                        # Pool is full - check if we should swap
+                        lowest_symbol, lowest_score = self._get_lowest_scorer()
+                        
+                        if lowest_symbol and final_score > lowest_score:
+                            # Swap: Evict lowest, add new
+                            self._remove_from_pool(lowest_symbol)
+                            self._add_to_pool(symbol, asset, market_type, final_score)
+                            self.logger.info(f"[Pool] Swapped in {symbol} ({final_score:.3f}), evicted {lowest_symbol} ({lowest_score:.3f})")
+                        else:
+                            # Asset scouted but not qualified for pool
+                            self.logger.debug(f"[Scouting] {symbol} ({final_score:.3f}) below cutoff {lowest_score:.3f}")
                 
         except Exception as e:
-            self.logger.debug(f"[DynamicPairs] Error adding {asset.get('name', '?')}: {e}")
+            self.logger.debug(f"[Scouting] Error processing {asset.get('name', '?')}: {e}")
     
     def _add_to_pool(self, symbol: str, asset: Dict[str, Any], market_type: str, score: float):
         """Add a symbol to the trading pool. Must be called within _pairs_lock."""
