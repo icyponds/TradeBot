@@ -129,6 +129,12 @@ class StrategyManager:
         # Set strategy manager reference in pair selector
         self.pair_selector.strategy_manager = self
         
+        # Set strategy manager reference in execution engine (for stat_arb metadata injection)
+        self.execution_engine.strategy_manager = self
+        
+        # Restore stat_arb z-score state from persisted positions
+        self._restore_statarb_state()
+        
         # Real-time data subscription tracking
         self._subscribed_symbols = set()
         
@@ -164,6 +170,32 @@ class StrategyManager:
         import importlib
         self._sys = sys
         self._importlib = importlib
+
+    def _restore_statarb_state(self):
+        """Restore stat_arb z-score state from persisted multi-leg positions."""
+        try:
+            if not self.execution_engine.multi_leg_positions:
+                return
+            
+            # Build position data list from loaded positions
+            positions_data = []
+            for pos_id, pos in self.execution_engine.multi_leg_positions.items():
+                if not pos.strategy.startswith('stat_arb'):
+                    continue
+                
+                pos_dict = pos.to_dict() if hasattr(pos, 'to_dict') else {}
+                positions_data.append(pos_dict)
+            
+            if not positions_data:
+                return
+            
+            # Find stat_arb strategies and restore their state
+            for strat_name, strat in self.strategies.items():
+                if strat_name.startswith('stat_arb') and hasattr(strat, 'restore_active_spreads'):
+                    strat.restore_active_spreads(positions_data)
+                    
+        except Exception as e:
+            self.logger.warning(f"Failed to restore stat_arb state: {e}")
 
     def _check_startup_orphans(self):
         """Check for and close active positions belonging to disabled strategies on startup."""
@@ -420,8 +452,12 @@ class StrategyManager:
                 changes_made = True
                 self.logger.warning(f"Ghost positions detected: {ghost_symbols}")
             
+
+            
             # 4. Close ghost positions locally (Single-Leg)
             for symbol in ghost_symbols:
+
+
                 pos = self.execution_engine.positions.get(symbol)
                 if not pos:
                     continue
@@ -932,13 +968,28 @@ class StrategyManager:
         """Initialize the pair selector."""
         return DynamicPairSelector(self.config, self.market_api, self)
     
+    def get_required_timeframes(self) -> list:
+        """
+        Aggregate required timeframes from all active strategies.
+        
+        Returns:
+            List of unique timeframes needed by the bot (always includes '5m' for tick aggregation).
+        """
+        timeframes = {'5m'}  # Base timeframe for tick aggregation
+        for strategy in self.strategies.values():
+            if hasattr(strategy, 'timeframe') and strategy.timeframe:
+                timeframes.add(strategy.timeframe)
+        # Sort for consistent ordering (5m, 15m, 1h, 4h, 1d)
+        tf_order = ['1m', '5m', '15m', '30m', '1h', '4h', '1d']
+        return sorted(timeframes, key=lambda x: tf_order.index(x) if x in tf_order else 100)
+    
     def _is_data_ready_for_symbol(self, symbol: str) -> bool:
         """
         Check if all required data is available for trading.
         Returns False if ANY condition is not met.
         """
         import time
-        required_timeframes = ['5m', '15m', '1h', '4h']
+        required_timeframes = self.get_required_timeframes()
         
         # 1. Check historical data availability for all timeframes
         for tf in required_timeframes:

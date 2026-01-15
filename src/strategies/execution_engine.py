@@ -904,10 +904,39 @@ class ExecutionEngine:
             return self.market_api.get_spot_price(spot_token, 'USDC') if spot_token else None
         return None
 
+    def _normalize_symbol(self, symbol: str) -> str:
+        """
+        Normalize symbol for comparison by stripping suffixes.
+        This is PURELY for conflict checking; DB storage uses original symbols.
+        """
+        if not symbol:
+            return ""
+        # Strip common suffixes/prefixes if present
+        # e.g., 'BTC-PERP' -> 'BTC', 'BTC/USD' -> 'BTC'
+        s = symbol.upper()
+        for suffix in ['-PERP', '-SPOT', '/USD', '/USDT', '/USDC']:
+            if s.endswith(suffix):
+                s = s[:-len(suffix)]
+                break
+        return s
+
     def _get_multi_leg_position_for_symbol(self, symbol: str) -> Optional[MultiLegPosition]:
+        """
+        Find a multi-leg position that includes the given symbol as ANY leg.
+        Uses normalized comparison to match e.g. BTC against BTC-PERP.
+        """
+        norm_symbol = self._normalize_symbol(symbol)
+        
         for position in self.multi_leg_positions.values():
-            if position.primary_symbol == symbol:
+            # Check primary symbol
+            if self._normalize_symbol(position.primary_symbol) == norm_symbol:
                 return position
+                
+            # Check ALL legs (fixing the bug where secondary legs were ignored)
+            for leg in position.legs:
+                if self._normalize_symbol(leg.symbol) == norm_symbol:
+                    return position
+                    
         return None
 
     def get_multi_leg_position_by_leg_symbol(self, leg_symbol: str) -> Optional[MultiLegPosition]:
@@ -933,6 +962,45 @@ class ExecutionEngine:
             List of conflicts: [{'type': 'single_leg'|'multi_leg', 'symbol': ..., 'position': ...}]
         """
         conflicts = []
+        
+        for leg_spec in legs:
+            raw_leg_symbol = leg_spec.get('symbol', '')
+            norm_leg_symbol = self._normalize_symbol(raw_leg_symbol)
+            
+            # Check single-leg positions
+            for pos_symbol, position in self.positions.items():
+                if self._normalize_symbol(pos_symbol) == norm_leg_symbol:
+                    self.logger.warning(f"Conflict detected: New leg {raw_leg_symbol} matches existing single-leg {pos_symbol}")
+                    conflicts.append({
+                        'type': 'single_leg',
+                        'symbol': pos_symbol, # Reference existing symbol
+                        'position': position
+                    })
+            
+            # Check multi-leg positions
+            for pos_id, multi_pos in self.multi_leg_positions.items():
+                # Check legs of existing multi-leg position
+                for existing_leg in multi_pos.legs:
+                    if self._normalize_symbol(existing_leg.symbol) == norm_leg_symbol:
+                        
+                        # Avoid duplicate entries for the same position
+                        already_added = any(
+                            c.get('position') == multi_pos or 
+                            (hasattr(c.get('position'), 'position_id') and 
+                             c['position'].position_id == multi_pos.position_id)
+                            for c in conflicts
+                        )
+                        
+                        if not already_added:
+                            self.logger.warning(f"Conflict detected: New leg {raw_leg_symbol} matches existing multi-leg {pos_id} (leg {existing_leg.symbol})")
+                            conflicts.append({
+                                'type': 'multi_leg',
+                                'symbol': existing_leg.symbol,
+                                'position': multi_pos
+                            })
+                        break  # Found conflict in this position, move to next
+        
+        return conflicts
         
         for leg_spec in legs:
             leg_symbol = leg_spec.get('symbol', '')
@@ -1075,6 +1143,35 @@ class ExecutionEngine:
                 
         return 0.40  # Default to target vol if no data
 
+    def _inject_statarb_metadata(self, position: MultiLegPosition):
+        """
+        Inject z-score data from stat_arb strategy into position metadata before DB save.
+        This ensures z-score state survives bot restarts.
+        """
+        try:
+            # Find the pair key for this position
+            if len(position.legs) >= 2:
+                sym_a = position.legs[0].symbol.split('/')[0] if '/' in position.legs[0].symbol else position.legs[0].symbol
+                sym_b = position.legs[1].symbol.split('/')[0] if '/' in position.legs[1].symbol else position.legs[1].symbol
+                pair_key = f"{sym_a}/{sym_b}"
+                
+                # Try to get z-score data from strategy_manager's strategies
+                if hasattr(self, 'strategy_manager') and self.strategy_manager:
+                    for strat_name, strat in self.strategy_manager.strategies.items():
+                        if strat_name.startswith('stat_arb') and hasattr(strat, 'active_spreads'):
+                            spread_data = strat.active_spreads.get(pair_key)
+                            if spread_data:
+                                # Inject z-score fields into metadata
+                                position.metadata['entry_zscore'] = spread_data.get('entry_zscore')
+                                position.metadata['current_z'] = spread_data.get('current_z')
+                                position.metadata['max_adverse_z'] = spread_data.get('max_adverse_z')
+                                position.metadata['hedge_ratio'] = spread_data.get('hedge_ratio')
+                                position.metadata['pair_key'] = pair_key
+                                self.logger.debug(f"Injected z-score metadata for {pair_key}: entry_z={spread_data.get('entry_zscore')}")
+                                return
+        except Exception as e:
+            self.logger.warning(f"Failed to inject stat_arb metadata: {e}")
+
     def save_positions_to_db(self):
         """Save current positions to the database."""
         try:
@@ -1118,6 +1215,10 @@ class ExecutionEngine:
             # Multi-leg positions
             for position_id, position in self.multi_leg_positions.items():
                 if hasattr(position, 'to_dict'):
+                    # Inject stat_arb z-score data into metadata before saving
+                    if position.strategy.startswith('stat_arb'):
+                        self._inject_statarb_metadata(position)
+                    
                     position_data = position.to_dict()
                     # Ensure explicitly required fields map correctly if names differ
                     # DB expects 'metadata' which is usually present

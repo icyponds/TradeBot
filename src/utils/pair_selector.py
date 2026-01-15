@@ -1431,16 +1431,23 @@ class DynamicPairSelector:
                 if pool_members:
                     self.logger.info(f"[Maintenance] Refreshing {len(pool_members)} pool members")
                 
+                # Get required timeframes from StrategyManager (dynamic, based on active strategies)
+                required_timeframes = ['5m', '15m', '1h', '4h']  # Default fallback
+                if hasattr(self, 'strategy_manager') and self.strategy_manager:
+                    if hasattr(self.strategy_manager, 'get_required_timeframes'):
+                        required_timeframes = self.strategy_manager.get_required_timeframes()
+                        self.logger.debug(f"[Maintenance] Using dynamic timeframes: {required_timeframes}")
+                
                 for sym in pool_members:
                     if not self._backfill_running:
                         break
                     try:
-                        # Run integrity check
+                        # Run integrity check with dynamic timeframes
                         if hasattr(self.market_api, 'repairer') and self.market_api.repairer:
-                            self.market_api.repairer.process_asset(sym)
+                            self.market_api.repairer.process_asset(sym, timeframes=required_timeframes)
                         
-                        # Refresh all timeframes
-                        for tf in ['5m', '15m', '1h', '4h']:
+                        # Refresh all required timeframes
+                        for tf in required_timeframes:
                             self.market_api.get_ohlcv(sym, tf, limit=10)
                         
                         # Ensure in ready_pairs

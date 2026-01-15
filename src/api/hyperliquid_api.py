@@ -992,6 +992,16 @@ class HyperliquidAPI(MarketInterface):
             mids = data.get('data', {}).get('mids', {}) if 'data' in data else data.get('mids', {})
             timestamp = time.time()
             
+            # Diagnostic logging: Log tick count every 60 seconds to track WS health
+            if not hasattr(self, '_ws_diag_last_log'):
+                self._ws_diag_last_log = 0
+                self._ws_diag_tick_count = 0
+            self._ws_diag_tick_count += len(mids)
+            if timestamp - self._ws_diag_last_log >= 60:
+                self.logger.info(f"[WS DIAG] Processed {self._ws_diag_tick_count} price updates in last 60s ({len(mids)} symbols this tick)")
+                self._ws_diag_tick_count = 0
+                self._ws_diag_last_log = timestamp
+            
             with self._data_lock:
                 for symbol, price_str in mids.items():
                     try:
@@ -2027,26 +2037,48 @@ class HyperliquidAPI(MarketInterface):
             return cached
         
         def _fetch():
-            user_state = self.info.user_state(self.public_account_address)
+            all_positions = []
             
-            positions = []
-            for pos in user_state.get('assetPositions', []):
-                position_data = pos.get('position', {})
-                size = float(position_data.get('szi', 0))
+            # Determine lists of DEXs to query
+            dexs_to_query = [''] # Default to Native only
+            if self.hip3_enabled and self.perp_dexs:
+                dexs_to_query = self.perp_dexs
+
+            for dex_index in dexs_to_query:
+                try:
+                    # Fetch user state for specific DEX (native is '')
+                    user_state = self.info.user_state(self.public_account_address, dex=dex_index)
+                except Exception as e:
+                    self.logger.error(f"Error fetching state for dex '{dex_index}': {e}")
+                    continue
                 
-                if size != 0:
-                    positions.append({
-                        'symbol': position_data.get('coin'),
-                        'size': size,
-                        'side': 'long' if size > 0 else 'short',
-                        'entry_price': float(position_data.get('entryPx', 0)),
-                        'mark_price': float(position_data.get('positionValue', 0)) / abs(size) if size != 0 else 0,
-                        'unrealized_pnl': float(position_data.get('unrealizedPnl', 0)),
-                        'leverage': position_data.get('leverage', {}),
-                    })
+                for pos in user_state.get('assetPositions', []):
+                    position_data = pos.get('position', {})
+                    size = float(position_data.get('szi', 0))
+                    
+                    if size != 0:
+                        coin = position_data.get('coin')
+                        
+                        # Handle HIP-3 Symbol Prefixing (e.g. 'xyz:PLTR')
+                        # If dex_index is present, it's a HIP-3 asset
+                        # Check if coin already has prefix to avoid double-prefixing (e.g. 'xyz:xyz:PLTR')
+                        if dex_index and not coin.startswith(f"{dex_index}:"):
+                            symbol = f"{dex_index}:{coin}"
+                        else:
+                            symbol = coin
+                            
+                        all_positions.append({
+                            'symbol': symbol,
+                            'size': size,
+                            'side': 'long' if size > 0 else 'short',
+                            'entry_price': float(position_data.get('entryPx', 0)),
+                            'mark_price': float(position_data.get('positionValue', 0)) / abs(size) if size != 0 else 0,
+                            'unrealized_pnl': float(position_data.get('unrealizedPnl', 0)),
+                            'leverage': position_data.get('leverage', {}),
+                        })
             
-            self.cache.set(cache_key, positions, ttl=self.cache_ttl_positions)
-            return positions
+            self.cache.set(cache_key, all_positions, ttl=self.cache_ttl_positions)
+            return all_positions
         
         return self._rate_limited_call(_fetch)
     

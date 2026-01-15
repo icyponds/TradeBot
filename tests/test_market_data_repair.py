@@ -256,3 +256,130 @@ class TestChunkingThreshold:
         
         # Should be 1 cluster (not 2) since 400 < 500
         assert len(ingest_calls) == 1, f"Expected 1 cluster, got {len(ingest_calls)}"
+
+
+class TestDynamicTimeframes:
+    """Tests for dynamic timeframe aggregation from strategies."""
+    
+    def test_get_required_timeframes_aggregates_from_strategies(self):
+        """
+        Verify that get_required_timeframes collects unique timeframes from all strategies
+        and always includes '5m' as a base.
+        """
+        from unittest.mock import MagicMock, patch
+        
+        # Create mock strategies with different timeframes
+        mock_strategy_1 = MagicMock()
+        mock_strategy_1.timeframe = '15m'
+        
+        mock_strategy_2 = MagicMock()
+        mock_strategy_2.timeframe = '1h'
+        
+        mock_strategy_3 = MagicMock()
+        mock_strategy_3.timeframe = '15m'  # Duplicate
+        
+        mock_strategy_4 = MagicMock()
+        mock_strategy_4.timeframe = '4h'
+        
+        # Create a minimal mock of StrategyManager
+        mock_sm = MagicMock()
+        mock_sm.strategies = {
+            'csm_15m': mock_strategy_1,
+            'sentiment_1h': mock_strategy_2,
+            'grid_15m': mock_strategy_3,
+            'trend_4h': mock_strategy_4,
+        }
+        
+        # Import the actual method to test
+        from src.strategies.strategy_manager import StrategyManager
+        
+        # Bind the method to our mock object
+        result = StrategyManager.get_required_timeframes(mock_sm)
+        
+        # Should include 5m (base) plus unique strategy timeframes, sorted
+        assert result == ['5m', '15m', '1h', '4h'], f"Expected ['5m', '15m', '1h', '4h'], got {result}"
+    
+    def test_get_required_timeframes_empty_strategies(self):
+        """
+        Verify that get_required_timeframes returns ['5m'] when no strategies defined.
+        """
+        mock_sm = MagicMock()
+        mock_sm.strategies = {}
+        
+        from src.strategies.strategy_manager import StrategyManager
+        result = StrategyManager.get_required_timeframes(mock_sm)
+        
+        assert result == ['5m'], f"Expected ['5m'], got {result}"
+    
+    def test_get_required_timeframes_with_none_timeframes(self):
+        """
+        Verify that strategies with None timeframe are handled gracefully.
+        """
+        mock_strategy = MagicMock()
+        mock_strategy.timeframe = None
+        
+        mock_sm = MagicMock()
+        mock_sm.strategies = {'test': mock_strategy}
+        
+        from src.strategies.strategy_manager import StrategyManager
+        result = StrategyManager.get_required_timeframes(mock_sm)
+        
+        # Should just have base '5m'
+        assert result == ['5m'], f"Expected ['5m'], got {result}"
+
+
+class TestRepairerTimeframeParameter:
+    """Tests for process_asset timeframe parameter."""
+    
+    def test_process_asset_uses_provided_timeframes(self):
+        """
+        Verify that process_asset iterates over provided timeframes, not hardcoded defaults.
+        """
+        from src.utils.market_data_repair import MarketDataRepairer
+        
+        mock_api = MagicMock()
+        mock_db = MagicMock()
+        mock_db.db_path = 'test.db'
+        
+        repairer = MarketDataRepairer(mock_api, mock_db)
+        
+        # Track which timeframes were checked
+        checked_timeframes = []
+        original_verify = repairer.verify_and_repair
+        def mock_verify(symbol, tf, *args, **kwargs):
+            checked_timeframes.append(tf)
+            return 0
+        repairer.verify_and_repair = mock_verify
+        
+        # Call with custom timeframes
+        repairer.process_asset('BTC', timeframes=['5m', '1h', '4h'])
+        
+        # Verify the provided timeframes were used
+        assert checked_timeframes == ['5m', '1h', '4h'], \
+            f"Expected ['5m', '1h', '4h'], got {checked_timeframes}"
+    
+    def test_process_asset_default_timeframes(self):
+        """
+        Verify backward compatibility: when no timeframes provided, uses ['5m', '15m'].
+        """
+        from src.utils.market_data_repair import MarketDataRepairer
+        
+        mock_api = MagicMock()
+        mock_db = MagicMock()
+        mock_db.db_path = 'test.db'
+        
+        repairer = MarketDataRepairer(mock_api, mock_db)
+        
+        checked_timeframes = []
+        def mock_verify(symbol, tf, *args, **kwargs):
+            checked_timeframes.append(tf)
+            return 0
+        repairer.verify_and_repair = mock_verify
+        
+        # Call without timeframes parameter
+        repairer.process_asset('BTC')
+        
+        # Should use default ['5m', '15m']
+        assert checked_timeframes == ['5m', '15m'], \
+            f"Expected ['5m', '15m'], got {checked_timeframes}"
+

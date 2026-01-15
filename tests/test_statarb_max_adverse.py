@@ -150,3 +150,120 @@ class TestStatArbMaxAdverse:
         assert res['signal'] == 'sell' # Close Long
         assert "Regime Break" in res['reason']
         assert pair_key not in strategy.active_spreads
+
+
+class TestStatArbZScoreRestore:
+    """Test z-score restoration from persisted positions."""
+    
+    @pytest.fixture
+    def strategy(self):
+        config = {
+            'strategies': {
+                'ohlcv_limit': 100,
+                'stat_arb': {
+                    'z_score_threshold': 2.0,
+                    'max_adverse_z_delta': 1.5,
+                    'window_size': 20
+                },
+                'cointegration': {}
+            }
+        }
+        strat = StatisticalArbitrageStrategy(config)
+        return strat
+    
+    def test_restore_active_spreads_from_metadata(self, strategy):
+        """Test that z-score state is restored from position metadata."""
+        positions = [
+            {
+                'position_id': 'stat_arb_pos_1',
+                'strategy': 'stat_arb_4h',
+                'side': 'short',
+                'legs': [
+                    {'symbol': 'BTC', 'market_type': 'perp', 'side': 'short', 'size': 0.01, 'entry_price': 100000},
+                    {'symbol': 'ETH', 'market_type': 'perp', 'side': 'long', 'size': 0.1, 'entry_price': 3500},
+                ],
+                'metadata': {
+                    'pair_key': 'BTC/ETH',
+                    'entry_zscore': 2.5,
+                    'current_z': 1.8,
+                    'max_adverse_z': 2.7,
+                    'hedge_ratio': 1.0764,
+                }
+            }
+        ]
+        
+        strategy.restore_active_spreads(positions)
+        
+        assert 'BTC/ETH' in strategy.active_spreads
+        data = strategy.active_spreads['BTC/ETH']
+        assert data['entry_zscore'] == 2.5
+        assert data['current_z'] == 1.8
+        assert data['max_adverse_z'] == 2.7
+        assert data['hedge_ratio'] == 1.0764
+    
+    def test_restore_reconstructs_pair_key_from_legs(self, strategy):
+        """Test pair_key reconstruction when not in metadata."""
+        positions = [
+            {
+                'position_id': 'stat_arb_pos_2',
+                'strategy': 'stat_arb_15m',
+                'side': 'long',
+                'legs': [
+                    {'symbol': 'SOL', 'market_type': 'perp', 'side': 'long', 'size': 10, 'entry_price': 200},
+                    {'symbol': 'MATIC', 'market_type': 'perp', 'side': 'short', 'size': 1000, 'entry_price': 0.5},
+                ],
+                'metadata': {
+                    'entry_zscore': -2.3,
+                    'current_z': -1.5,
+                    'max_adverse_z': -2.8,
+                    'hedge_ratio': 0.95,
+                }
+            }
+        ]
+        
+        strategy.restore_active_spreads(positions)
+        
+        assert 'SOL/MATIC' in strategy.active_spreads
+        assert strategy.active_spreads['SOL/MATIC']['entry_zscore'] == -2.3
+    
+    def test_restore_ignores_non_statarb_positions(self, strategy):
+        """Test that non-stat_arb positions are ignored."""
+        positions = [
+            {
+                'position_id': 'funding_arb_pos_1',
+                'strategy': 'funding_arb',
+                'side': 'long',
+                'legs': [
+                    {'symbol': 'BTC', 'market_type': 'perp', 'side': 'short', 'size': 0.01, 'entry_price': 100000},
+                ],
+                'metadata': {
+                    'entry_zscore': 2.0,
+                }
+            }
+        ]
+        
+        strategy.restore_active_spreads(positions)
+        
+        assert len(strategy.active_spreads) == 0
+    
+    def test_restore_skips_positions_without_entry_zscore(self, strategy):
+        """Test that positions without entry_zscore are skipped."""
+        positions = [
+            {
+                'position_id': 'stat_arb_pos_3',
+                'strategy': 'stat_arb_4h',
+                'side': 'short',
+                'legs': [
+                    {'symbol': 'BTC', 'market_type': 'perp', 'side': 'short', 'size': 0.01, 'entry_price': 100000},
+                    {'symbol': 'ETH', 'market_type': 'perp', 'side': 'long', 'size': 0.1, 'entry_price': 3500},
+                ],
+                'metadata': {
+                    'pair_key': 'BTC/ETH',
+                    # Missing entry_zscore
+                }
+            }
+        ]
+        
+        strategy.restore_active_spreads(positions)
+        
+        assert 'BTC/ETH' not in strategy.active_spreads

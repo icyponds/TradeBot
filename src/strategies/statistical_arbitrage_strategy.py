@@ -80,6 +80,43 @@ class StatisticalArbitrageStrategy(BaseStrategy):
         """Set external dependencies."""
         self.market_api = market_api
         self.correlation_manager = correlation_manager
+    
+    def restore_active_spreads(self, positions: list):
+        """
+        Restore active_spreads state from persisted positions on startup.
+        
+        Args:
+            positions: List of position dicts loaded from DB with metadata containing z-score fields.
+        """
+        for pos_data in positions:
+            if not pos_data.get('strategy', '').startswith('stat_arb'):
+                continue
+            
+            metadata = pos_data.get('metadata', {}) or {}
+            pair_key = metadata.get('pair_key')
+            
+            if not pair_key:
+                # Try to reconstruct pair_key from legs
+                legs = pos_data.get('legs', [])
+                if len(legs) >= 2:
+                    sym_a = legs[0].get('symbol', '').split('/')[0]
+                    sym_b = legs[1].get('symbol', '').split('/')[0]
+                    pair_key = f"{sym_a}/{sym_b}"
+            
+            if not pair_key:
+                continue
+            
+            # Restore z-score state
+            entry_z = metadata.get('entry_zscore')
+            if entry_z is not None:
+                self.active_spreads[pair_key] = {
+                    'side': pos_data.get('side', 'short'),
+                    'entry_zscore': entry_z,
+                    'current_z': metadata.get('current_z', entry_z),
+                    'max_adverse_z': metadata.get('max_adverse_z', entry_z),
+                    'hedge_ratio': metadata.get('hedge_ratio', 1.0),
+                }
+                self.logger.info(f"Restored stat_arb spread {pair_key}: entry_z={entry_z:.2f}, current_z={metadata.get('current_z')}")
         
     def calculate_z_score(self, series: pd.Series) -> float:
         """Calculate Z-Score of the last element."""

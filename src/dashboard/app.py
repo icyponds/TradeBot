@@ -723,8 +723,13 @@ def _get_total_unrealized_pnl() -> float:
         
         # Multi-leg positions
         for pos_id, multi_pos in _strategy_manager.multi_leg_positions.items():
-            if multi_pos.metadata and multi_pos.metadata.get('unrealized_pnl'):
-                total += multi_pos.metadata['unrealized_pnl']
+            for leg in multi_pos.legs:
+                current_price = _get_leg_current_price(leg.symbol, leg.market_type)
+                if current_price:
+                    if leg.side == 'long':
+                        total += (current_price - leg.entry_price) * leg.size
+                    else:
+                        total += (leg.entry_price - current_price) * leg.size
     return total
 
 
