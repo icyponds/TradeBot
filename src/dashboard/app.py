@@ -191,8 +191,9 @@ def create_dashboard_app() -> Flask:
         try:
             page = int(request.args.get('page', 1))
             limit = int(request.args.get('limit', 25))
+            timeframe = request.args.get('timeframe', '7d')
             
-            result = _get_trades_data(page=page, limit=limit)
+            result = _get_trades_data(page=page, limit=limit, timeframe=timeframe)
             return jsonify({
                 'success': True,
                 'timestamp': datetime.now().isoformat(),
@@ -528,6 +529,7 @@ def _get_summary_data(timeframe: str = '7d') -> Dict[str, Any]:
             'bot_status': {
                 'is_running': _strategy_manager.is_running,
                 'selected_pairs': len(_strategy_manager.pair_selector.get_current_pairs(trigger_rescan=False)) if _strategy_manager.pair_selector else 0,
+                'ready_pairs': len(_strategy_manager.pair_selector.get_ready_pairs()) if _strategy_manager.pair_selector else 0,
                 'active_strategies': len([s for s in _strategy_manager.strategies.keys()]),
             }
         }
@@ -764,8 +766,8 @@ def _get_trade_stats(start_time: Optional[datetime] = None) -> Dict[str, Any]:
     return stats
 
 
-def _get_trades_data(page: int = 1, limit: int = 25) -> Dict[str, Any]:
-    """Get recent trade history with pagination."""
+def _get_trades_data(page: int = 1, limit: int = 25, timeframe: str = '7d') -> Dict[str, Any]:
+    """Get recent trade history with pagination, filtered by timeframe."""
     trades = []
     total_count = 0
     total_pages = 0
@@ -774,17 +776,22 @@ def _get_trades_data(page: int = 1, limit: int = 25) -> Dict[str, Any]:
         try:
             db = _strategy_manager.performance_tracker.db
             
-            # Get total count first
-            total_count = db.get_trade_count()
+            # Get start time for the timeframe filter
+            start_time = _get_start_time_for_frame(timeframe)
+            
+            # Get trades in range (or all trades if no start time)
+            if start_time:
+                raw_trades = db.get_trades_in_range(start_time, datetime.now())
+            else:
+                raw_trades = db.get_all_trades(limit=1000, offset=0)  # Fallback
+            
+            # Apply pagination to filtered results
+            total_count = len(raw_trades)
             total_pages = (total_count + limit - 1) // limit if limit > 0 else 1
-            
-            # Calculate offset
             offset = (page - 1) * limit
-            
-            # Fetch paginated trades
-            raw_trades = db.get_all_trades(limit=limit, offset=offset)
+            paginated_trades = raw_trades[offset:offset + limit]
 
-            for trade in raw_trades:
+            for trade in paginated_trades:
                 # Format trade data for display
                 exit_time = trade.get('exit_time') or trade.get('timestamp')
                 entry_time = trade.get('entry_time')

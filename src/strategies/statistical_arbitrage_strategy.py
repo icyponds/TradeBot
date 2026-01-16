@@ -43,9 +43,16 @@ class StatisticalArbitrageStrategy(BaseStrategy):
         stat_arb_config = config.get('strategies', {}).get('stat_arb', {})
         coint_config = config.get('strategies', {}).get('cointegration', {})
         
-        # Z-score thresholds
+        # Z-score thresholds (base values)
         self.z_score_entry = coint_config.get('zscore_entry', stat_arb_config.get('z_score_threshold', 2.0))
         self.z_score_exit = coint_config.get('zscore_exit', 0.5)
+        
+        # Regime-specific base thresholds (before volatility scaling)
+        self._regime_thresholds = {
+            'range': {'entry': 2.0, 'exit': 0.5},
+            'trend': {'entry': 2.5, 'exit': 0.6},
+            'high_vol': {'entry': 3.0, 'exit': 0.75},
+        }
         
         # Window sizes
         self.window_size = stat_arb_config.get('window_size', 100)
@@ -66,6 +73,9 @@ class StatisticalArbitrageStrategy(BaseStrategy):
         self.market_api = market_api
         self.correlation_manager = correlation_manager
         
+        # Reference to strategy manager (set during initialization)
+        self.strategy_manager = None
+        
         # Kalman filter states for each pair
         self.kalman_states: Dict[str, Any] = {}
         
@@ -75,6 +85,37 @@ class StatisticalArbitrageStrategy(BaseStrategy):
         self.logger.info(f"Initialized Cointegration Stat Arb Strategy: "
                         f"z_entry={self.z_score_entry}, z_exit={self.z_score_exit}, "
                         f"kalman={self.use_kalman_filter}")
+    
+    def get_regime_adjusted_params(self, symbol: str) -> Dict[str, float]:
+        """
+        Get regime-adjusted z-score thresholds for a symbol.
+        
+        Uses market-wide regime (from HMM) and per-asset volatility scaling.
+        
+        Args:
+            symbol: Trading symbol (primary leg of the pair)
+            
+        Returns:
+            Dict with 'z_entry' and 'z_exit' adjusted for regime and volatility
+        """
+        # Get current regime (default to 'range')
+        regime = 'range'
+        vol_ratio = 1.0
+        
+        if self.strategy_manager:
+            regime = self.strategy_manager.get_current_regime()
+            vol_ratio = self.strategy_manager.get_volatility_ratio(symbol)
+        
+        # Get base thresholds for this regime
+        base = self._regime_thresholds.get(regime, self._regime_thresholds['range'])
+        
+        # Apply volatility scaling
+        return {
+            'z_entry': base['entry'] * vol_ratio,
+            'z_exit': base['exit'] * vol_ratio,
+            'regime': regime,
+            'vol_ratio': vol_ratio,
+        }
     
     def set_dependencies(self, market_api, correlation_manager):
         """Set external dependencies."""
@@ -181,6 +222,11 @@ class StatisticalArbitrageStrategy(BaseStrategy):
         # Calculate spread: spread = price_A - hedge_ratio * price_B
         spread = prices_a - hedge_ratio * prices_b
         
+        # Get regime-adjusted thresholds
+        thresholds = self.get_regime_adjusted_params(symbol_a)
+        z_entry = thresholds['z_entry']
+        z_exit = thresholds['z_exit']
+        
         # Calculate Z-score of the spread
         z_score = self._calculate_spread_zscore(spread)
         
@@ -195,9 +241,9 @@ class StatisticalArbitrageStrategy(BaseStrategy):
             position_side = self.active_spreads[pair_key].get('side')
             # Exit if Z-score crosses zero or hits exit threshold
             if position_side == 'short':
-                if z_score < self.z_score_exit:
+                if z_score < z_exit:
                     signal = 'buy'
-                    reason = f'Stat Arb Exit: {pair_key} Z-Score {z_score:.2f} < {self.z_score_exit} (Close Short)'
+                    reason = f'Stat Arb Exit: {pair_key} Z-Score {z_score:.2f} < {z_exit:.2f} (Close Short)'
                     del self.active_spreads[pair_key]
                 # Stop Loss Handling
                 elif z_score > 4.0: # Hard Stop
@@ -213,9 +259,9 @@ class StatisticalArbitrageStrategy(BaseStrategy):
                         del self.active_spreads[pair_key]
 
             elif position_side == 'long':
-                if z_score > -self.z_score_exit:
+                if z_score > -z_exit:
                     signal = 'sell'
-                    reason = f'Stat Arb Exit: {pair_key} Z-Score {z_score:.2f} > -{self.z_score_exit} (Close Long)'
+                    reason = f'Stat Arb Exit: {pair_key} Z-Score {z_score:.2f} > -{z_exit:.2f} (Close Long)'
                     del self.active_spreads[pair_key]
                 # Stop Loss Handling
                 elif z_score < -4.0: # Hard Stop
@@ -251,9 +297,9 @@ class StatisticalArbitrageStrategy(BaseStrategy):
                 # Spread is random walk (0.5) or trending (>0.5) - NOT SAFE for mean reversion
                 return None
             
-            if z_score > self.z_score_entry:
+            if z_score > z_entry:
                 signal = 'sell'
-                reason = f'Stat Arb Entry: {pair_key} Z-Score {z_score:.2f} > {self.z_score_entry} (H={hurst:.2f}) (Short {symbol_a})'
+                reason = f'Stat Arb Entry: {pair_key} Z-Score {z_score:.2f} > {z_entry:.2f} (H={hurst:.2f}, regime={thresholds["regime"]}) (Short {symbol_a})'
                 self.active_spreads[pair_key] = {
                     'side': 'short',
                     'entry_zscore': z_score,
@@ -262,9 +308,9 @@ class StatisticalArbitrageStrategy(BaseStrategy):
                     'max_adverse_z': z_score,
                     'current_z': z_score
                 }
-            elif z_score < -self.z_score_entry:
+            elif z_score < -z_entry:
                 signal = 'buy'
-                reason = f'Stat Arb Entry: {pair_key} Z-Score {z_score:.2f} < -{self.z_score_entry} (H={hurst:.2f}) (Long {symbol_a})'
+                reason = f'Stat Arb Entry: {pair_key} Z-Score {z_score:.2f} < -{z_entry:.2f} (H={hurst:.2f}, regime={thresholds["regime"]}) (Long {symbol_a})'
                 self.active_spreads[pair_key] = {
                     'side': 'long',
                     'entry_zscore': z_score,

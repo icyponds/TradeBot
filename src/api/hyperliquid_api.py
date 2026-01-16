@@ -501,6 +501,11 @@ class ConnectionHealthMonitor:
         # REST latency tracking
         self.latency_history: deque = deque(maxlen=50)
         
+        # WebSocket reconnection tracking
+        self._ws_stale_since: Optional[float] = None  # When WS first became stale
+        self._reconnect_requested = False             # Flag to request reconnection
+        self.ws_reconnect_threshold = 60.0            # Seconds before triggering reconnect
+        
         # Threading
         self._running = False
         self._thread: Optional[threading.Thread] = None
@@ -584,6 +589,36 @@ class ConnectionHealthMonitor:
         
         # Fallback to global check
         return self.is_ws_connected()
+    
+    def check_and_request_reconnect(self) -> bool:
+        """
+        Check if WebSocket is stale long enough to warrant reconnection.
+        
+        Returns:
+            True if reconnection was requested, False otherwise.
+        """
+        with self._lock:
+            if not self.is_ws_connected():
+                if self._ws_stale_since is None:
+                    self._ws_stale_since = time.time()
+                    self.logger.debug("WebSocket became stale, starting timer")
+                else:
+                    stale_duration = time.time() - self._ws_stale_since
+                    if stale_duration > self.ws_reconnect_threshold:
+                        if not self._reconnect_requested:
+                            self._reconnect_requested = True
+                            self.logger.warning(
+                                f"WebSocket stale for {stale_duration:.0f}s (threshold: {self.ws_reconnect_threshold}s), "
+                                f"requesting reconnect"
+                            )
+                        return True
+            else:
+                # WebSocket is fresh - reset tracking
+                if self._ws_stale_since is not None:
+                    self.logger.info("WebSocket connection restored")
+                self._ws_stale_since = None
+                self._reconnect_requested = False
+            return False
     
     def get_avg_latency_ms(self) -> float:
         """Get average REST latency in milliseconds."""
@@ -910,10 +945,14 @@ class HyperliquidAPI(MarketInterface):
             self.logger.error(f"SDK initialization failed: {e}")
             raise
     
-    def _enable_websocket(self, timeout: float = 10.0):
-        """Enable WebSocket connection (called from start())."""
-        if self._ws_enabled:
+    def _enable_websocket(self, timeout: float = 10.0, force_reconnect: bool = False):
+        """Enable WebSocket connection (called from start() or for reconnection)."""
+        if self._ws_enabled and not force_reconnect:
             return
+        
+        if force_reconnect:
+            self.logger.info("Force reconnecting WebSocket...")
+            self._ws_enabled = False
         
         self.logger.info("Enabling WebSocket connection...")
         
@@ -950,6 +989,26 @@ class HyperliquidAPI(MarketInterface):
             self._ws_enabled = True
             self._setup_websocket_subscriptions()
             self.logger.info("WebSocket enabled successfully")
+    
+    def attempt_ws_reconnect(self) -> bool:
+        """
+        Attempt to reconnect WebSocket if stale for too long.
+        
+        Returns:
+            True if reconnection was attempted, False otherwise.
+        """
+        if self.health_monitor.check_and_request_reconnect():
+            self.logger.warning("Attempting WebSocket reconnection...")
+            try:
+                self._enable_websocket(timeout=10.0, force_reconnect=True)
+                # Reset health monitor staleness tracking
+                self.health_monitor._reconnect_requested = False
+                self.health_monitor._ws_stale_since = None
+                self.logger.info("WebSocket reconnection completed")
+                return True
+            except Exception as e:
+                self.logger.error(f"WebSocket reconnection failed: {e}")
+        return False
     
     def _discover_perp_dexs(self) -> List[str]:
         """Discover available perp dexes."""
@@ -2008,6 +2067,7 @@ class HyperliquidAPI(MarketInterface):
             return cached
         
         def _fetch():
+            # Query native DEX only for account balance (HIP-3 bridges are isolated margin)
             user_state = self.info.user_state(self.public_account_address)
             
             margin_summary = user_state.get('marginSummary', {})
@@ -2045,12 +2105,8 @@ class HyperliquidAPI(MarketInterface):
                 dexs_to_query = self.perp_dexs
 
             for dex_index in dexs_to_query:
-                try:
-                    # Fetch user state for specific DEX (native is '')
-                    user_state = self.info.user_state(self.public_account_address, dex=dex_index)
-                except Exception as e:
-                    self.logger.error(f"Error fetching state for dex '{dex_index}': {e}")
-                    continue
+                # Let exceptions bubble up to _rate_limited_call for proper retry
+                user_state = self.info.user_state(self.public_account_address, dex=dex_index)
                 
                 for pos in user_state.get('assetPositions', []):
                     position_data = pos.get('position', {})

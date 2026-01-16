@@ -21,6 +21,8 @@ from src.utils.correlation_manager import CorrelationManager
 from src.utils.performance_tracker import PerformanceTracker
 from src.utils.regime_hmm import RegimeAllocator
 from src.utils.change_point import PageHinkley
+from src.utils.volatility_gate import VolatilityGate
+from src.utils.volatility_scaler import VolatilityScaler
 from .strategy_selector import StrategySelector
 from .execution_engine import ExecutionEngine
 from src.models.trade import Trade, Position, MultiLegPosition, PositionLeg
@@ -149,6 +151,14 @@ class StrategyManager:
         self._regime_result: Optional[Dict[str, Any]] = None
         self._regime_last_update_ts: float = 0.0
 
+        # Per-asset volatility gating (replaces single PageHinkley)
+        self._volatility_gate: Optional[VolatilityGate] = None
+        
+        # Per-asset volatility scaling for z-score thresholds
+        self._volatility_scaler: Optional[VolatilityScaler] = None
+        self._volatility_scaler_last_update: float = 0.0
+        
+        # Legacy single proxy (kept for backward compatibility)
         self._change_point: Optional[PageHinkley] = None
         self._entry_block_until: Optional[datetime] = None
         self._entry_block_reason: Optional[str] = None
@@ -706,6 +716,31 @@ class StrategyManager:
     def winning_trades(self):
         return self.execution_engine.winning_trades
 
+    def get_current_regime(self) -> str:
+        """
+        Get the current market regime from the HMM allocator.
+        
+        Returns:
+            Current regime: 'range', 'trend', or 'high_vol'
+        """
+        if self._regime_result:
+            return str(self._regime_result.get("regime", "range"))
+        return "range"  # Default
+    
+    def get_volatility_ratio(self, symbol: str) -> float:
+        """
+        Get the volatility ratio for a symbol (used to scale z-score thresholds).
+        
+        Args:
+            symbol: Trading symbol
+            
+        Returns:
+            Volatility ratio (ATR / median ATR), clamped to [0.8, 1.5], default 1.0
+        """
+        if self._volatility_scaler:
+            return self._volatility_scaler.get_ratio(symbol)
+        return 1.0
+
     def _initialize_regime_and_changepoint(self) -> None:
         """Initialize optional regime allocator and change-point detector."""
         rm = self.config.get("risk_management", {})
@@ -730,28 +765,95 @@ class StrategyManager:
 
         cp = rm.get("change_point", {}) or {}
         if cp.get("enabled", False):
+            # Check for per-asset mode vs legacy single-proxy mode
+            per_asset_mode = cp.get("per_asset", True)  # Default to per-asset
+            
+            if per_asset_mode:
+                # New: Per-asset volatility gate with correlation blocking
+                try:
+                    apply_to = set(cp.get("apply_to_strategies", ["ou_mean_reversion", "stat_arb"]) or [])
+                    self._volatility_gate = VolatilityGate(
+                        correlation_manager=self.correlation_manager,
+                        entry_threshold=float(cp.get("threshold", 0.02)),
+                        exit_threshold=float(cp.get("exit_threshold", 0.01)),
+                        correlation_block_threshold=float(cp.get("correlation_threshold", 0.70)),
+                        delta=float(cp.get("delta", 0.0)),
+                        alpha=float(cp.get("alpha", 0.99)),
+                        apply_to_strategies=apply_to,
+                    )
+                    self._entry_block_strategies = apply_to
+                    self.logger.info(
+                        "Volatility gate enabled (per-asset Page-Hinkley): "
+                        f"entry_threshold={cp.get('threshold', 0.02)}, "
+                        f"exit_threshold={cp.get('exit_threshold', 0.01)}, "
+                        f"correlation_threshold={cp.get('correlation_threshold', 0.70)}, "
+                        f"strategies={sorted(apply_to)}"
+                    )
+                except Exception as e:
+                    self._volatility_gate = None
+                    self.logger.warning(f"Failed to initialize volatility gate; disabled. Error: {e}")
+            else:
+                # Legacy: single proxy mode (backward compatibility)
+                try:
+                    self._change_point = PageHinkley(
+                        delta=float(cp.get("delta", 0.0)),
+                        threshold=float(cp.get("threshold", 0.02)),
+                        alpha=float(cp.get("alpha", 0.99)),
+                    )
+                    self._entry_block_strategies = set(cp.get("apply_to_strategies", []) or [])
+                    self.logger.info(
+                        "Change-point gate enabled (legacy single-proxy): "
+                        f"proxy={cp.get('proxy_symbol','BTC')}/{cp.get('timeframe','15m')}, "
+                        f"cooldown={cp.get('cooldown_minutes',20)}m, "
+                        f"strategies={sorted(self._entry_block_strategies)}"
+                    )
+                except Exception as e:
+                    self._change_point = None
+                    self.logger.warning(f"Failed to initialize change-point detector; disabled. Error: {e}")
+        
+        # Initialize volatility scaler for regime-adaptive z-score thresholds
+        vs = rm.get("volatility_scaler", {}) or {}
+        if vs.get("enabled", True):  # Enabled by default when change_point is enabled
             try:
-                self._change_point = PageHinkley(
-                    delta=float(cp.get("delta", 0.0)),
-                    threshold=float(cp.get("threshold", 0.02)),
-                    alpha=float(cp.get("alpha", 0.99)),
+                self._volatility_scaler = VolatilityScaler(
+                    lookback=int(vs.get("lookback", 14)),
+                    min_multiplier=float(vs.get("min_multiplier", 0.8)),
+                    max_multiplier=float(vs.get("max_multiplier", 1.5)),
                 )
-                self._entry_block_strategies = set(cp.get("apply_to_strategies", []) or [])
                 self.logger.info(
-                    "Change-point gate enabled (Page-Hinkley): "
-                    f"proxy={cp.get('proxy_symbol','BTC')}/{cp.get('timeframe','15m')}, "
-                    f"cooldown={cp.get('cooldown_minutes',20)}m, "
-                    f"strategies={sorted(self._entry_block_strategies)}"
+                    "Volatility scaler enabled: "
+                    f"lookback={vs.get('lookback', 14)}, "
+                    f"range=[{vs.get('min_multiplier', 0.8)}, {vs.get('max_multiplier', 1.5)}]"
                 )
             except Exception as e:
-                self._change_point = None
-                self.logger.warning(f"Failed to initialize change-point detector; disabled. Error: {e}")
+                self._volatility_scaler = None
+                self.logger.warning(f"Failed to initialize volatility scaler; disabled. Error: {e}")
 
     def _is_entry_block_active(self) -> bool:
+        """Check if legacy time-based block is active."""
         return self._entry_block_until is not None and datetime.now() < self._entry_block_until
 
-    def _is_strategy_entry_blocked(self, strategy_name: str) -> bool:
-        return self._is_entry_block_active() and strategy_name in self._entry_block_strategies
+    def _is_strategy_entry_blocked(self, strategy_name: str, symbol: str = None) -> bool:
+        """
+        Check if a strategy is blocked from entering positions.
+        
+        Args:
+            strategy_name: Name of the strategy
+            symbol: Optional symbol to check (for per-asset blocking)
+            
+        Returns:
+            True if blocked, False otherwise
+        """
+        # Check per-asset volatility gate (new)
+        if self._volatility_gate and symbol:
+            if self._volatility_gate.is_strategy_blocked(strategy_name, symbol):
+                return True
+        
+        # Check legacy time-based block (backward compatibility)
+        if self._is_entry_block_active() and strategy_name in self._entry_block_strategies:
+            return True
+        
+        return False
 
     def _get_effective_strategy_weight(self, strategy_name: str) -> float:
         """Selector weight multiplied by regime multiplier (if enabled)."""
@@ -775,7 +877,7 @@ class StrategyManager:
         return max(min_cap, min(max_cap, base_weight))
 
     def _maybe_update_regime_and_changepoint(self) -> None:
-        """Update regime and change-point state from the configured proxy symbol."""
+        """Update regime and change-point state."""
         rm = self.config.get("risk_management", {})
         ra = rm.get("regime_allocator", {}) or {}
         cp = rm.get("change_point", {}) or {}
@@ -791,36 +893,75 @@ class StrategyManager:
         lookback = int(ra.get("lookback", 220))
 
         try:
-            df = self.market_api.get_ohlcv(proxy_symbol, timeframe, limit=max(lookback, 120))
-            if df is None or len(df) < 50:
-                return
-
-            # Update regime allocator
+            # Update regime allocator (always uses proxy)
             if self._regime_allocator and ra.get("enabled", False):
-                X = self._regime_allocator.build_features_from_ohlcv(df)
-                res = self._regime_allocator.update(X, now_ts)
-                self._regime_result = {"regime": res.regime, "probs": res.probs}
-                self.logger.debug(f"Regime={res.regime} probs={res.probs}")
+                df = self.market_api.get_ohlcv(proxy_symbol, timeframe, limit=max(lookback, 120))
+                if df is not None and len(df) >= 50:
+                    X = self._regime_allocator.build_features_from_ohlcv(df)
+                    res = self._regime_allocator.update(X, now_ts)
+                    self._regime_result = {"regime": res.regime, "probs": res.probs}
+                    self.logger.debug(f"Regime={res.regime} probs={res.probs}")
 
-            # Update change-point detector on abs return of last bar
-            if self._change_point and cp.get("enabled", False):
-                close = df["close"].astype(float).values
-                if len(close) >= 2 and close[-2] > 0:
-                    r = abs((close[-1] - close[-2]) / close[-2])
-                    triggered, score = self._change_point.update(float(r))
-                    if triggered:
-                        cooldown = int(cp.get("cooldown_minutes", 20))
-                        self._entry_block_until = datetime.now() + timedelta(minutes=cooldown)
-                        self._entry_block_reason = f"change_point(score={score:.4f})"
-                        self.logger.warning(
-                            f"⚠️ Change-point detected on {proxy_symbol} ({timeframe}): score={score:.4f}. "
-                            f"Blocking new entries for {sorted(self._entry_block_strategies)} until {self._entry_block_until}."
-                        )
-                        # Reset detector so we don't immediately retrigger in the cooldown window
-                        self._change_point.reset()
+            # Update per-asset volatility gate (new)
+            if self._volatility_gate and cp.get("enabled", False):
+                self._update_per_asset_volatility_gate(timeframe)
+            
+            # Update legacy single-proxy change-point detector (backward compatibility)
+            elif self._change_point and cp.get("enabled", False):
+                df = self.market_api.get_ohlcv(proxy_symbol, timeframe, limit=max(lookback, 120))
+                if df is not None and len(df) >= 50:
+                    close = df["close"].astype(float).values
+                    if len(close) >= 2 and close[-2] > 0:
+                        r = abs((close[-1] - close[-2]) / close[-2])
+                        triggered, score = self._change_point.update(float(r))
+                        if triggered:
+                            cooldown = int(cp.get("cooldown_minutes", 20))
+                            self._entry_block_until = datetime.now() + timedelta(minutes=cooldown)
+                            self._entry_block_reason = f"change_point(score={score:.4f})"
+                            self.logger.warning(
+                                f"⚠️ Change-point detected on {proxy_symbol} ({timeframe}): score={score:.4f}. "
+                                f"Blocking new entries for {sorted(self._entry_block_strategies)} until {self._entry_block_until}."
+                            )
+                            self._change_point.reset()
+            
+            # Update volatility scaler periodically (every 60 seconds)
+            if self._volatility_scaler and (now_ts - self._volatility_scaler_last_update) > 60:
+                self._update_volatility_scaler(timeframe)
+                self._volatility_scaler_last_update = now_ts
 
         except Exception as e:
             self.logger.debug(f"Regime/changepoint update failed: {e}")
+    
+    def _update_per_asset_volatility_gate(self, timeframe: str) -> None:
+        """Update volatility gate for all ready-to-trade pairs."""
+        try:
+            ready_pairs = self.pair_selector.pairs_ready_to_trade()
+            
+            for symbol in ready_pairs:
+                df = self.market_api.get_ohlcv(symbol, timeframe, limit=5)
+                if df is None or len(df) < 2:
+                    continue
+                
+                close = df["close"].astype(float).values
+                if len(close) >= 2 and close[-2] > 0:
+                    abs_return = abs((close[-1] - close[-2]) / close[-2])
+                    self._volatility_gate.update(symbol, abs_return)
+                    
+        except Exception as e:
+            self.logger.debug(f"Per-asset volatility gate update failed: {e}")
+    
+    def _update_volatility_scaler(self, timeframe: str) -> None:
+        """Update volatility scaler with ATR ratios for all symbols."""
+        try:
+            ready_pairs = self.pair_selector.pairs_ready_to_trade()
+            
+            def ohlcv_getter(symbol: str, tf: str, limit: int):
+                return self.market_api.get_ohlcv(symbol, tf, limit=limit)
+            
+            self._volatility_scaler.update(ready_pairs, ohlcv_getter, timeframe)
+            
+        except Exception as e:
+            self.logger.debug(f"Volatility scaler update failed: {e}")
     
     def _update_account_balance(self):
         """Update account balance and portfolio information."""
@@ -1021,7 +1162,25 @@ class StrategyManager:
         # Since 'allMids' updates all symbols simultaneously, verifying the
         # global connection is fresh ensures we aren't trading on stale data.
         if hasattr(self.market_api, 'health_monitor') and not self.market_api.health_monitor.is_ws_data_fresh():
-            self.logger.debug(f"[{symbol}] WebSocket global connection stale")
+            # Track consecutive stale checks for visibility
+            if not hasattr(self, '_ws_stale_warn_counter'):
+                self._ws_stale_warn_counter = 0
+            self._ws_stale_warn_counter += 1
+            
+            # Log WARNING after 10 consecutive stale checks (visible in logs)
+            if self._ws_stale_warn_counter >= 10:
+                self.logger.warning(
+                    f"[{symbol}] WebSocket stale for {self._ws_stale_warn_counter} consecutive checks - "
+                    f"no signals possible until WS recovers"
+                )
+                self._ws_stale_warn_counter = 0  # Reset to avoid log spam
+            else:
+                self.logger.debug(f"[{symbol}] WebSocket global connection stale")
+            
+            # Trigger reconnection attempt if API supports it
+            if hasattr(self.market_api, 'attempt_ws_reconnect'):
+                self.market_api.attempt_ws_reconnect()
+            
             return False
         
         # All checks passed - log first time a symbol becomes ready

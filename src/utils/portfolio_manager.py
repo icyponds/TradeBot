@@ -30,7 +30,7 @@ class PortfolioManager:
         self.free_margin = 0.0
         self.used_margin = 0.0
         self.last_update = None
-        self.update_interval = timedelta(minutes=5)  # Update every 5 minutes
+        self.update_interval = timedelta(seconds=30)  # Update every 30 seconds
         
         self.logger.info(f"Portfolio manager initialized with portfolio-based sizing: {self.use_portfolio_based_sizing}")
     

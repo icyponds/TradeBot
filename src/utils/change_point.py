@@ -67,4 +67,7 @@ class PageHinkley:
         triggered = score > self.threshold
         return triggered, score
 
+    def get_current_score(self) -> float:
+        """Return current cumulative deviation score without updating."""
+        return self._cum - self._min_cum
 

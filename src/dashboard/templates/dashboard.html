@@ -599,7 +599,7 @@
             <div class="summary-card">
                 <div class="summary-label">Bot Status</div>
                 <div class="summary-value" style="font-size: 18px;">
-                    Pairs: <span id="selected-pairs">0</span>
+                    Pairs: <span id="ready-pairs">0</span>/<span id="selected-pairs">0</span>
                 </div>
             </div>
         </div>
@@ -1171,6 +1171,7 @@
 
                 document.getElementById('trade-stats').textContent = `${wins} W / ${losses} L (${total} total)`;
 
+                document.getElementById('ready-pairs').textContent = botStatus.ready_pairs || 0;
                 document.getElementById('selected-pairs').textContent = botStatus.selected_pairs || 0;
 
                 // Update status
@@ -1195,7 +1196,8 @@
             // Fetch paginated trades
             async function fetchTrades(page = 1) {
                 try {
-                    const response = await fetch(`/api/trades?page=${page}&limit=${tradesPerPage}`);
+                    const timeframe = document.getElementById('timeframe-select')?.value || '7d';
+                    const response = await fetch(`/api/trades?page=${page}&limit=${tradesPerPage}&timeframe=${timeframe}`);
                     const data = await response.json();
 
                     if (data.success) {
@@ -1323,7 +1325,9 @@
                 if (tfSelect) {
                     tfSelect.addEventListener('change', () => {
                         updateDashboard();
-                        countdown = 5; // Reset countdown
+                        currentTradePage = 1; // Reset to first page
+                        fetchTrades(1);       // Refresh trades with new timeframe
+                        countdown = 5;        // Reset countdown
                     });
                 }
                 updateDashboard();

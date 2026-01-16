@@ -74,9 +74,16 @@ class OUMeanReversionStrategy(BaseStrategy):
         # Strategy parameters from config
         ou_config = config.get('strategies', {}).get('ou_mean_reversion', {})
         
-        # Entry/exit thresholds (in standard deviations)
+        # Entry/exit thresholds (in standard deviations) - base values
         self.zscore_entry = ou_config.get('zscore_entry', 2.0)
         self.zscore_exit = ou_config.get('zscore_exit', 0.5)
+        
+        # Regime-specific base thresholds (before volatility scaling)
+        self._regime_thresholds = {
+            'range': {'entry': 2.0, 'exit': 0.5},
+            'trend': {'entry': 2.5, 'exit': 0.6},
+            'high_vol': {'entry': 3.0, 'exit': 0.75},
+        }
         
         # Half-life constraints
         self.half_life_max_hours = ou_config.get('half_life_max_hours', 24)
@@ -98,9 +105,43 @@ class OUMeanReversionStrategy(BaseStrategy):
         # Active positions tracking
         self.active_positions: Dict[str, Dict[str, Any]] = {}
         
+        # Reference to strategy manager (set during initialization)
+        self.strategy_manager = None
+        
         self.logger.info(f"Initialized OU Mean Reversion Strategy: "
                         f"z_entry={self.zscore_entry}, z_exit={self.zscore_exit}, "
                         f"half_life_max={self.half_life_max_hours}h")
+    
+    def get_regime_adjusted_params(self, symbol: str) -> Dict[str, float]:
+        """
+        Get regime-adjusted z-score thresholds for a symbol.
+        
+        Uses market-wide regime (from HMM) and per-asset volatility scaling.
+        
+        Args:
+            symbol: Trading symbol
+            
+        Returns:
+            Dict with 'z_entry' and 'z_exit' adjusted for regime and volatility
+        """
+        # Get current regime (default to 'range')
+        regime = 'range'
+        vol_ratio = 1.0
+        
+        if self.strategy_manager:
+            regime = self.strategy_manager.get_current_regime()
+            vol_ratio = self.strategy_manager.get_volatility_ratio(symbol)
+        
+        # Get base thresholds for this regime
+        base = self._regime_thresholds.get(regime, self._regime_thresholds['range'])
+        
+        # Apply volatility scaling
+        return {
+            'z_entry': base['entry'] * vol_ratio,
+            'z_exit': base['exit'] * vol_ratio,
+            'regime': regime,
+            'vol_ratio': vol_ratio,
+        }
     
     def generate_signal(self, symbol: str, ohlcv: Dict[str, pd.DataFrame]) -> Optional[Dict[str, Any]]:
         """
@@ -140,6 +181,11 @@ class OUMeanReversionStrategy(BaseStrategy):
                             f"(half_life={ou_params.half_life:.1f}h, theta={ou_params.theta:.4f})")
             return None
         
+        # Get regime-adjusted thresholds
+        thresholds = self.get_regime_adjusted_params(symbol)
+        z_entry = thresholds['z_entry']
+        z_exit = thresholds['z_exit']
+        
         # Calculate Z-score in LOG space (since OU params are estimated on log prices)
         # log(current_price) - log(mu) = log(current_price / mu)
         log_current = np.log(current_price)
@@ -167,20 +213,20 @@ class OUMeanReversionStrategy(BaseStrategy):
             position_side = position.get('side')
             
             # Exit if price has reverted toward mean
-            if position_side == 'long' and zscore > -self.zscore_exit:
+            if position_side == 'long' and zscore > -z_exit:
                 signal = 'sell'
-                reason = f'OU Exit: {symbol} Z-score {zscore:.2f} > -{self.zscore_exit} (Close Long)'
+                reason = f'OU Exit: {symbol} Z-score {zscore:.2f} > -{z_exit:.2f} (Close Long)'
                 del self.active_positions[symbol]
-            elif position_side == 'short' and zscore < self.zscore_exit:
+            elif position_side == 'short' and zscore < z_exit:
                 signal = 'buy'
-                reason = f'OU Exit: {symbol} Z-score {zscore:.2f} < {self.zscore_exit} (Close Short)'
+                reason = f'OU Exit: {symbol} Z-score {zscore:.2f} < {z_exit:.2f} (Close Short)'
                 del self.active_positions[symbol]
         else:
             # Check for entry signal
             # Price significantly below mean -> buy (expect reversion up)
-            if zscore < -self.zscore_entry:
+            if zscore < -z_entry:
                 signal = 'buy'
-                reason = f'OU Entry: {symbol} Z-score {zscore:.2f} < -{self.zscore_entry} (Price below mean)'
+                reason = f'OU Entry: {symbol} Z-score {zscore:.2f} < -{z_entry:.2f} (Price below mean, regime={thresholds["regime"]})'
                 self.active_positions[symbol] = {
                     'side': 'long',
                     'entry_zscore': zscore,
@@ -188,9 +234,9 @@ class OUMeanReversionStrategy(BaseStrategy):
                     'mu': ou_params.mu,
                 }
             # Price significantly above mean -> sell (expect reversion down)
-            elif zscore > self.zscore_entry:
+            elif zscore > z_entry:
                 signal = 'sell'
-                reason = f'OU Entry: {symbol} Z-score {zscore:.2f} > {self.zscore_entry} (Price above mean)'
+                reason = f'OU Entry: {symbol} Z-score {zscore:.2f} > {z_entry:.2f} (Price above mean, regime={thresholds["regime"]})'
                 self.active_positions[symbol] = {
                     'side': 'short',
                     'entry_zscore': zscore,
