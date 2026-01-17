@@ -91,6 +91,8 @@ class TestSizingLogic:
         leverage_manager.portfolio_manager = MagicMock()
         leverage_manager.portfolio_manager.total_equity = equity
         leverage_manager.portfolio_manager.calculate_max_position_size = lambda x: 1000.0 # 10%
+        leverage_manager.portfolio_manager.calculate_available_capital_for_trading = MagicMock(return_value=equity)
+        leverage_manager.portfolio_manager.can_open_position = MagicMock(return_value=True)
         
         risk_pct = 0.01 # 1%
         risk_budget = equity * risk_pct # $100

@@ -501,6 +501,15 @@ def _get_summary_data(timeframe: str = '7d') -> Dict[str, Any]:
         total_realized_pnl = _get_total_realized_pnl(start_time)
         total_unrealized_pnl = _get_total_unrealized_pnl()
         
+        # Calculate live equity: Snapshot Equity - Snapshot Unrealized + Live Unrealized
+        # This ensures the equity updates tick-by-tick with price changes
+        snapshot_equity = summary.get('total_equity', 0)
+        snapshot_unrealized = summary.get('unrealized_pnl', 0)
+        
+        # If snapshot accounts for PnL (it does for Hyperliquid accountValue), replace it with live PnL
+        # Note: If no position is open, live PnL is 0, snapshot PnL is 0 -> Live Equity = Snapshot
+        live_equity = snapshot_equity - snapshot_unrealized + total_unrealized_pnl
+        
         # Get trade stats
         trade_stats = _get_trade_stats(start_time)
 
@@ -509,7 +518,7 @@ def _get_summary_data(timeframe: str = '7d') -> Dict[str, Any]:
         
         return {
             'account': {
-                'total_equity': summary.get('total_equity', 0),
+                'total_equity': live_equity,
                 'available_margin': summary.get('available_margin', 0),
                 'used_margin': summary.get('used_margin', 0),
                 'margin_usage_pct': summary.get('margin_usage_percentage', 0),

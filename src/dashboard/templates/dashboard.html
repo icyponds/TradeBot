@@ -226,7 +226,7 @@
             background: var(--bg-card);
             border: 1px solid var(--border);
             border-radius: 12px;
-            overflow: hidden;
+            overflow-x: auto;
         }
 
         table {
@@ -775,10 +775,19 @@
                     return;
                 }
 
+                let totalNotional = 0;
+                let totalPnl = 0;
+                let totalMargin = 0;
                 let html = '';
+
                 for (const pos of positions) {
                     const sideClass = pos.side === 'long' ? 'side-long' : 'side-short';
                     const pnlClass = getPnlClass(pos.unrealized_pnl);
+
+                    // Accumulate totals
+                    totalNotional += (pos.size * pos.current_price);
+                    totalPnl += pos.unrealized_pnl;
+                    totalMargin += pos.margin;
 
                     html += `<tr>
                     <td><span class="symbol">${pos.symbol}</span></td>
@@ -800,6 +809,21 @@
                     </td>
                 </tr>`;
                 }
+
+                // Add Total Row
+                const totalPnlClass = getPnlClass(totalPnl);
+                const totalPnlPct = totalMargin > 0 ? (totalPnl / totalMargin * 100) : 0.0;
+
+                html += `<tr style="font-weight: bold; background: var(--bg-secondary); border-top: 2px solid var(--border);">
+                    <td colspan="2">TOTAL</td>
+                    <td>${formatCurrency(totalNotional)}</td>
+                    <td colspan="5"></td>
+                    <td class="${totalPnlClass}">${formatCurrency(totalPnl)}</td>
+                    <td class="${totalPnlClass}">${formatPct(totalPnlPct)}</td>
+                    <td>${formatCurrency(totalMargin)}</td>
+                    <td colspan="4"></td>
+                </tr>`;
+
                 tbody.innerHTML = html;
             }
             function renderMultiLegPositions(positions) {

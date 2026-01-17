@@ -139,6 +139,14 @@ class LeverageManager:
             symbol, strategy_name, signal_strength, market_volatility, current_price, asset_max_leverage
         )
         
+        # Determine available capital (via PortfolioManager if possible)
+        if self.portfolio_manager:
+            available_capital = self.portfolio_manager.calculate_available_capital_for_trading()
+            equity = self.portfolio_manager.total_equity
+        else:
+            # Fallback if no PM attached (e.g. unit tests or standalone usage)
+            equity = available_capital
+        
         # CRITICAL: Prevent trading if insolvent
         if available_capital <= 0:
             self.logger.warning(f"Sizing {symbol}: REFUSED due to non-positive capital (${available_capital:.2f})")
@@ -146,39 +154,33 @@ class LeverageManager:
         
         # 2. Determine Risk Parameters
         lm_cfg = self.config.get("leverage_management", {}) or {}
-        # Default Risk Per Trade: 1.0% (Increased from 0.5% per plan)
+        # Default Risk Per Trade: 1.0%
         risk_per_trade_pct = float(lm_cfg.get("risk_per_trade_pct", 1.0)) / 100.0
         
-        # Use Portfolio Equity if available, else Fallback
-        equity = getattr(self.portfolio_manager, "total_equity", 0.0) if self.portfolio_manager else available_capital
-        
-        # 3. Calculate Risk Budget (Amount we are willing to lose)
-        # Risk Budget = Equity * Risk%
+        # 3. Calculate Risk Budget
         risk_budget = equity * risk_per_trade_pct
         
         # 4. Calculate Position Notional Size based on Risk
-        # Notional = RiskBudget / StopLossPct
-        # Example: $12 Risk / 0.05 SL = $240 Position
         if stop_loss_pct <= 0:
-            # If no strategy SL provided, imply one from leverage
-            # High leverage = tight stop = larger notional to maintain same risk budget
             safe_leverage = max(1.0, leverage)
             stop_loss_pct = self.fallback_stop_loss_pct / safe_leverage
             
         raw_position_notional = risk_budget / stop_loss_pct
         
         # 5. Apply Position Limits (Concentration Cap)
-        # User requested 10% Max Limit per position
-        max_pos_pct = float(self.config['trading'].get('max_position_size_percentage', 10.0)) / 100.0
-        max_allowed_notional = equity * max_pos_pct
+        # Use PortfolioManager to get the cap
+        if self.portfolio_manager:
+            max_allowed_notional = self.portfolio_manager.calculate_max_position_size(symbol)
+        else:
+            # Fallback manual calculation
+            max_pos_pct = float(self.config['trading'].get('max_position_size_percentage', 10.0)) / 100.0
+            max_allowed_notional = equity * max_pos_pct
         
         final_position_notional = min(raw_position_notional, max_allowed_notional)
         
         # 6. Apply Minimum Order Value
         MIN_ORDER_VALUE = 12.0
         if final_position_notional < MIN_ORDER_VALUE:
-            # If we can't meet min order, check if we can bump it without exceeding MAX risk too much
-            # (Allow small bump for functionality)
             if final_position_notional > 0:
                 final_position_notional = MIN_ORDER_VALUE
         
@@ -187,15 +189,23 @@ class LeverageManager:
         margin_required = final_position_notional / leverage
         
         # 8. Check Capital Availability
-        # Ensure we have enough free margin
-        if margin_required > available_capital * (1 - self.margin_buffer_percentage / 100):
-            # Scale down to fit
-            margin_required = available_capital * (1 - self.margin_buffer_percentage / 100)
-            final_position_notional = margin_required * leverage
-            position_size = final_position_notional / current_price
+        # Use PortfolioManager logic if available
+        if self.portfolio_manager:
+            if not self.portfolio_manager.can_open_position(margin_required):
+                # Scale down to fit available capital
+                available_cap = self.portfolio_manager.calculate_available_capital_for_trading()
+                margin_required = available_cap * (1 - self.margin_buffer_percentage / 100)
+                final_position_notional = margin_required * leverage
+                position_size = final_position_notional / current_price
+        else:
+            # Fallback manual check
+            if margin_required > available_capital * (1 - self.margin_buffer_percentage / 100):
+                margin_required = available_capital * (1 - self.margin_buffer_percentage / 100)
+                final_position_notional = margin_required * leverage
+                position_size = final_position_notional / current_price
             
         self.logger.info(
-            f"Sizing {symbol}: Risk=${risk_budget:.2f} (1%), SL={stop_loss_pct*100:.1f}%, "
+            f"Sizing {symbol}: Risk=${risk_budget:.2f}, SL={stop_loss_pct*100:.1f}%, "
             f"Notional=${final_position_notional:.2f}, Lev={leverage}x"
         )
         
@@ -331,15 +341,15 @@ class LeverageManager:
         Returns:
             True if position can be opened
         """
+        # Use PortfolioManager if available
+        if self.portfolio_manager:
+            return self.portfolio_manager.can_open_position(margin_required)
+            
+        # Fallback manual check
         # Check if we have enough capital
         if margin_required > available_capital * (1 - self.margin_buffer_percentage / 100):
             return False
-        
-        # Check if we're not over-leveraged
-        total_margin_after = self.total_margin_used + margin_required
-        if total_margin_after > available_capital * self.liquidation_risk_threshold:
-            return False
-        
+            
         return True
     
     def record_position(self, symbol: str, side: str, size: float, entry_price: float, leverage: float, margin_used: float):

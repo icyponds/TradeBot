@@ -29,6 +29,7 @@ class PortfolioManager:
         self.total_equity = 0.0
         self.free_margin = 0.0
         self.used_margin = 0.0
+        self.unrealized_pnl = 0.0
         self.last_update = None
         self.update_interval = timedelta(seconds=30)  # Update every 30 seconds
         
@@ -53,6 +54,7 @@ class PortfolioManager:
             self.total_equity = balance_info.get('total_equity', 0.0)
             self.free_margin = balance_info.get('free_margin', 0.0)
             self.used_margin = balance_info.get('used_margin', 0.0)
+            self.unrealized_pnl = balance_info.get('unrealized_pnl', 0.0)
             self.last_update = datetime.now()
             
             self.logger.info(f"Portfolio updated: ${self.total_equity:.2f} total equity, ${self.free_margin:.2f} free margin")
@@ -148,6 +150,7 @@ class PortfolioManager:
 
         return {
             'total_equity': self.total_equity,
+            'unrealized_pnl': self.unrealized_pnl,
             'free_margin': self.free_margin,
             'available_margin': self.free_margin, # Alias for dashboard compatibility
             'used_margin': self.used_margin,
