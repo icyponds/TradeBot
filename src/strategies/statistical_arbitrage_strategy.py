@@ -58,7 +58,7 @@ class StatisticalArbitrageStrategy(BaseStrategy):
         self.window_size = stat_arb_config.get('window_size', 100)
         self.zscore_lookback = coint_config.get('lookback_period', 20)
         self.max_holding_hours = stat_arb_config.get('max_holding_hours', 120) # Default 5 days
-        self.max_adverse_z_delta = stat_arb_config.get('max_adverse_z_delta', 1.5)  # Exit if z moves 1.5σ against entry
+        self.max_adverse_z_delta = stat_arb_config.get('max_adverse_z_delta', 1.0)  # Exit if z moves 1.0σ against entry (Tightened from 1.5)
         
         # Cointegration parameters
         self.adf_pvalue_threshold = coint_config.get('adf_pvalue_threshold', 0.05)
@@ -216,11 +216,15 @@ class StatisticalArbitrageStrategy(BaseStrategy):
         current_price_a = prices_a.iloc[-1]
         current_price_b = prices_b.iloc[-1]
         
-        # Get or calculate hedge ratio (Kalman)
-        hedge_ratio = self._get_hedge_ratio(symbol_a, symbol_b, prices_a, prices_b)
+        # Get hedge ratios: Unit (Math) and Dollar (Risk)
+        unit_beta, dollar_beta = self._get_hedge_ratio(symbol_a, symbol_b, prices_a, prices_b)
         
-        # Calculate spread: spread = price_A - hedge_ratio * price_B
-        spread = prices_a - hedge_ratio * prices_b
+        # Calculate spread using UNIT beta (Statistical Relationship)
+        # Spread = Price_A - Unit_Beta * Price_B
+        spread = prices_a - unit_beta * prices_b
+        
+        # Set hedge_ratio to DOLLAR BETA for Execution Engine (Risk Sizing)
+        hedge_ratio = dollar_beta
         
         # Get regime-adjusted thresholds
         thresholds = self.get_regime_adjusted_params(symbol_a)
@@ -246,9 +250,9 @@ class StatisticalArbitrageStrategy(BaseStrategy):
                     reason = f'Stat Arb Exit: {pair_key} Z-Score {z_score:.2f} < {z_exit:.2f} (Close Short)'
                     del self.active_spreads[pair_key]
                 # Stop Loss Handling
-                elif z_score > 4.0: # Hard Stop
+                elif z_score > 3.0: # Hard Stop (Tightened from 4.0)
                     signal = 'buy' 
-                    reason = f'Stat Arb Stop: {pair_key} Regime Break Z-Score {z_score:.2f} > 4.0'
+                    reason = f'Stat Arb Stop: {pair_key} Regime Break Z-Score {z_score:.2f} > 3.0'
                     del self.active_spreads[pair_key]
                 else:
                     # Max Adverse Stop (Check entry z-score)
@@ -264,9 +268,9 @@ class StatisticalArbitrageStrategy(BaseStrategy):
                     reason = f'Stat Arb Exit: {pair_key} Z-Score {z_score:.2f} > -{z_exit:.2f} (Close Long)'
                     del self.active_spreads[pair_key]
                 # Stop Loss Handling
-                elif z_score < -4.0: # Hard Stop
+                elif z_score < -3.0: # Hard Stop (Tightened from 4.0)
                     signal = 'sell'
-                    reason = f'Stat Arb Stop: {pair_key} Regime Break Z-Score {z_score:.2f} < -4.0'
+                    reason = f'Stat Arb Stop: {pair_key} Regime Break Z-Score {z_score:.2f} < -3.0'
                     del self.active_spreads[pair_key]
                 else:
                     # Max Adverse Stop (Check entry z-score)
@@ -368,7 +372,7 @@ class StatisticalArbitrageStrategy(BaseStrategy):
         }
 
     def _get_hedge_ratio(self, symbol_a: str, symbol_b: str, 
-                        prices_a: pd.Series, prices_b: pd.Series) -> float:
+                        prices_a: pd.Series, prices_b: pd.Series) -> Tuple[float, float]:
         """
         Get hedge ratio, using Kalman Filter if enabled.
         """
@@ -389,20 +393,38 @@ class StatisticalArbitrageStrategy(BaseStrategy):
             kf = self.kalman_states[pair_key]
             y = prices_a.iloc[-1]
             x = prices_b.iloc[-1]
-            _, _, dynamic_beta = kf.update(y, x)
+            _, _, unit_beta = kf.update(y, x)
             
-            # Cap hedge ratio to sane limits to prevent massive sizing
-            if dynamic_beta > 10.0:
-                self.logger.warning(f"StatArb: Capping Hedge Ratio {dynamic_beta:.2f} -> 10.0")
-                dynamic_beta = 10.0
-            elif dynamic_beta < 0.1 and dynamic_beta > -0.1: # Avoid near-zero/negative mess (though negative might be valid for inverse corr)
-                # If negative, we might be short-short, which is fine, but needs logic check.
-                # Assuming positive correlation for now.
-                pass
+            # CRITICAL FIX: Convert Unit Beta to Dollar Beta
+            # The Execution Engine treats 'hedge_ratio' as a dollar multiplier.
+            # Unit Beta = Price_A / Price_B (roughly) -> potentially huge (BTC/ETH ~ 33)
+            # Dollar Beta = Unit Beta * (Price_B / Price_A) -> Should be approx 1.0
             
-            return dynamic_beta
+            if y > 0:
+                dollar_beta = unit_beta * (x / y)
+            else:
+                dollar_beta = 1.0 # Safe fallback
+                
+            # Use Dollar Beta for Trading Limits (Cap at 3.0 implies 300% imbalance, which is a breakdown)
+            if dollar_beta > 3.0:
+                 self.logger.warning(f"StatArb: Dollar Hedge Ratio {dollar_beta:.2f} > 3.0. Capping.")
+                 dollar_beta = 3.0
+            elif dollar_beta < 0.1 and dollar_beta > -0.1:
+                 pass
+
+            # Return (Unit Beta, Dollar Beta)
+            return unit_beta, dollar_beta
         
-        return base_hedge_ratio
+        # OLS Fallback
+        # base_hedge_ratio is unit beta
+        unit_beta = base_hedge_ratio
+        price_a = prices_a.iloc[-1]
+        price_b = prices_b.iloc[-1]
+        dollar_beta = 1.0
+        if price_a > 0:
+             dollar_beta = unit_beta * (price_b / price_a)
+        
+        return unit_beta, dollar_beta
 
     def _estimate_hedge_ratio_ols(self, prices_a: pd.Series, prices_b: pd.Series) -> float:
         """Estimate hedge ratio using OLS regression."""
