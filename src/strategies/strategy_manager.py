@@ -1214,7 +1214,7 @@ class StrategyManager:
         Returns:
             List of unique timeframes needed by the bot (always includes '5m' for tick aggregation).
         """
-        timeframes = {'5m'}  # Base timeframe for tick aggregation
+        timeframes = set()  # Start empty, only add what strategies need
         for strategy in self.strategies.values():
             if hasattr(strategy, 'timeframe') and strategy.timeframe:
                 timeframes.add(strategy.timeframe)

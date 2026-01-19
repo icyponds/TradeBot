@@ -296,8 +296,8 @@ class TestDynamicTimeframes:
         # Bind the method to our mock object
         result = StrategyManager.get_required_timeframes(mock_sm)
         
-        # Should include 5m (base) plus unique strategy timeframes, sorted
-        assert result == ['5m', '15m', '1h', '4h'], f"Expected ['5m', '15m', '1h', '4h'], got {result}"
+        # Should include unique strategy timeframes, sorted (NO forced 5m)
+        assert result == ['15m', '1h', '4h'], f"Expected ['15m', '1h', '4h'], got {result}"
     
     def test_get_required_timeframes_empty_strategies(self):
         """
@@ -309,7 +309,7 @@ class TestDynamicTimeframes:
         from src.strategies.strategy_manager import StrategyManager
         result = StrategyManager.get_required_timeframes(mock_sm)
         
-        assert result == ['5m'], f"Expected ['5m'], got {result}"
+        assert result == [], f"Expected [], got {result}"
     
     def test_get_required_timeframes_with_none_timeframes(self):
         """
@@ -325,7 +325,7 @@ class TestDynamicTimeframes:
         result = StrategyManager.get_required_timeframes(mock_sm)
         
         # Should just have base '5m'
-        assert result == ['5m'], f"Expected ['5m'], got {result}"
+        assert result == [], f"Expected [], got {result}"
 
 
 class TestRepairerTimeframeParameter:
@@ -379,7 +379,7 @@ class TestRepairerTimeframeParameter:
         # Call without timeframes parameter
         repairer.process_asset('BTC')
         
-        # Should use default ['5m', '15m']
-        assert checked_timeframes == ['5m', '15m'], \
-            f"Expected ['5m', '15m'], got {checked_timeframes}"
+        # Should use default ['15m']
+        assert checked_timeframes == ['15m'], \
+            f"Expected ['15m'], got {checked_timeframes}"
 

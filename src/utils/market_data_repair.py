@@ -20,7 +20,7 @@ class MarketDataRepairer:
     def __init__(self, api: 'HyperliquidAPI', db: TradeDatabase):
         self.api = api
         self.db = db
-        self.timeframes = ['5m', '15m', '1h', '4h', '1d']
+        self.timeframes = ['15m', '1h', '4h', '1d']
     
     def get_interval_seconds(self, timeframe: str) -> int:
         mapping = {
@@ -248,7 +248,7 @@ class MarketDataRepairer:
         
         for symbol in symbols:
             # Compromise: check small timeframes mostly.
-            for tf in ['5m', '15m']: 
+            for tf in ['15m']: 
                 try:
                     count = self.verify_and_repair(symbol, tf, start_dt, end_dt, repair=True)
                     if count > 0:
@@ -273,7 +273,7 @@ class MarketDataRepairer:
         
         # Use provided timeframes or fall back to default
         if timeframes is None:
-            timeframes = ['5m', '15m']
+            timeframes = ['15m']
             
         try:
             end_dt = datetime.now(timezone.utc).replace(tzinfo=None)
