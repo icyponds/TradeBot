@@ -33,6 +33,10 @@ class PortfolioManager:
         self.last_update = None
         self.update_interval = timedelta(seconds=30)  # Update every 30 seconds
         
+        # Fallback cached values (used when API fails)
+        self._last_known_equity = 0.0
+        self._last_known_free_margin = 0.0
+        
         self.logger.info(f"Portfolio manager initialized with portfolio-based sizing: {self.use_portfolio_based_sizing}")
     
     def update_portfolio_info(self, market_api) -> bool:
@@ -56,6 +60,11 @@ class PortfolioManager:
             self.used_margin = balance_info.get('used_margin', 0.0)
             self.unrealized_pnl = balance_info.get('unrealized_pnl', 0.0)
             self.last_update = datetime.now()
+            
+            # Cache good values for fallback on API failure
+            if self.total_equity > 0:
+                self._last_known_equity = self.total_equity
+                self._last_known_free_margin = self.free_margin
             
             self.logger.info(f"Portfolio updated: ${self.total_equity:.2f} total equity, ${self.free_margin:.2f} free margin")
             self.logger.debug(f"Raw balance info: {balance_info}")
@@ -110,16 +119,26 @@ class PortfolioManager:
             Available capital in USD
         """
         if not self.use_portfolio_based_sizing:
-            return self.free_margin
+            return self.free_margin if self.free_margin > 0 else self._last_known_free_margin
+        
+        # Use current or fallback equity
+        equity = self.total_equity
+        free_margin = self.free_margin
+        
+        # Fallback to cached values if current values are 0 (API failure)
+        if equity <= 0 and self._last_known_equity > 0:
+            self.logger.warning("Using cached equity due to stale/zero API data")
+            equity = self._last_known_equity
+            free_margin = self._last_known_free_margin
         
         # Calculate maximum capital that can be used for positions
-        max_capital_for_positions = self.total_equity * (self.max_positions_percentage / 100)
+        max_capital_for_positions = equity * (self.max_positions_percentage / 100)
         
         # Available capital is the minimum of free margin and max capital for positions
-        available_capital = min(self.free_margin, max_capital_for_positions)
+        available_capital = min(free_margin, max_capital_for_positions)
         
         self.logger.debug(f"Available capital: ${available_capital:.2f} "
-                         f"(free margin: ${self.free_margin:.2f}, max positions: ${max_capital_for_positions:.2f})")
+                         f"(free margin: ${free_margin:.2f}, max positions: ${max_capital_for_positions:.2f})")
         
         return max(0.0, available_capital)
     

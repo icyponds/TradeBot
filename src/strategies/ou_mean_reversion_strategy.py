@@ -16,6 +16,7 @@ from datetime import datetime
 import pandas as pd
 import numpy as np
 from .base_strategy import BaseStrategy
+from src.utils.statistics import calculate_adx
 
 # Try to import scipy for MLE optimization
 try:
@@ -164,6 +165,15 @@ class OUMeanReversionStrategy(BaseStrategy):
         """Internal signal generation with symbol context."""
         
         if ohlcv is None or len(ohlcv) < self.min_data_points:
+            return None
+        
+        # Trend Filter: Check ADX
+        # Do not fade strong trends
+        adx = calculate_adx(ohlcv['high'], ohlcv['low'], ohlcv['close'])
+        current_adx = adx.iloc[-1]
+        
+        # If trend is strong (> 30), do not enter mean reversion trade
+        if current_adx > 30:
             return None
         
         prices = ohlcv['close']
@@ -541,6 +551,21 @@ class OUMeanReversionStrategy(BaseStrategy):
             return True, f"mean_reversion_overshot (z={z_score:.2f})"
         elif position_side == 'short' and z_score < -0.5:
             return True, f"mean_reversion_overshot (z={z_score:.2f})"
+            
+        # 3. Explicit Stop Loss
+        # If price moves further away from mean by 1.0 sigma from entry, cut it.
+        entry_z = current_data.get('entry_z_score')
+        # If current_data doesn't have it, try position metadata if available.
+        # But for now assuming StrategyManager passes entry_z_score.
+        
+        if entry_z:
+            stop_buffer = 1.0
+            # Long (Entry Z < -2.0): Stop if Z < Entry - 1.0 (e.g. -3.0)
+            if position_side == 'long' and z_score < (entry_z - stop_buffer):
+                 return True, f"ou_stop_loss (entry={entry_z:.2f}, current={z_score:.2f})"
+            # Short (Entry Z > 2.0): Stop if Z > Entry + 1.0 (e.g. 3.0)
+            elif position_side == 'short' and z_score > (entry_z + stop_buffer):
+                 return True, f"ou_stop_loss (entry={entry_z:.2f}, current={z_score:.2f})"
         
         return False, None
     

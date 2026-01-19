@@ -14,7 +14,9 @@ class TestStrategyManager:
             mock_config['strategies'] = {}
             
         # Add required strategy config keys if missing
-        mock_config['strategies']['enabled'] = ['cross_sectional_momentum']
+        mock_config['strategies']['instances'] = [
+            {'type': 'cross_sectional_momentum', 'name': 'csm_1h', 'timeframe': '1h'}
+        ]
         mock_config['strategies']['ohlcv_limit'] = 100
         mock_config['trading']['position_monitoring_interval'] = 10
         mock_config['trading']['enable_stale_order_cleanup'] = True

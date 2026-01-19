@@ -142,7 +142,7 @@
         /* Summary Cards */
         .summary-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
             gap: 16px;
             margin-bottom: 32px;
         }
@@ -155,6 +155,8 @@
             position: relative;
             overflow: hidden;
         }
+
+
 
         .summary-card::before {
             content: '';
@@ -232,6 +234,7 @@
         table {
             width: 100%;
             border-collapse: collapse;
+            /* min-width removed to allow responsive container */
         }
 
         th {
@@ -244,6 +247,8 @@
             text-transform: uppercase;
             letter-spacing: 0.5px;
             border-bottom: 1px solid var(--border);
+            white-space: nowrap;
+            /* Prevent column squeezing */
         }
 
         td {
@@ -251,6 +256,8 @@
             border-bottom: 1px solid var(--border);
             font-family: 'JetBrains Mono', monospace;
             font-size: 13px;
+            white-space: nowrap;
+            /* Prevent column squeezing */
         }
 
         tr:last-child td {
@@ -338,7 +345,7 @@
         /* Strategy Cards */
         .strategy-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
             gap: 16px;
         }
 
@@ -566,7 +573,7 @@
                 <div class="summary-value" id="total-unrealized-pnl">--</div>
             </div>
 
-            <div class="summary-card" style="grid-column: span 2;">
+            <div class="summary-card">
                 <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 16px;">
                     <div class="summary-label">Performance</div>
                     <select id="timeframe-select"
@@ -599,7 +606,7 @@
             <div class="summary-card">
                 <div class="summary-label">Bot Status</div>
                 <div class="summary-value" style="font-size: 18px;">
-                    Pairs: <span id="ready-pairs">0</span>/<span id="selected-pairs">0</span>
+                    Assets: <span id="ready-pairs">0</span>/<span id="selected-pairs">0</span>
                 </div>
             </div>
         </div>

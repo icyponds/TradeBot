@@ -31,7 +31,7 @@ class TestStatArbLegs:
         z_score = -3.0 # Triggers Buy (Long Spread)
         
         # Mock internal calculations
-        strategy._get_hedge_ratio = MagicMock(return_value=hedge_ratio)
+        strategy._get_hedge_ratio = MagicMock(return_value=(hedge_ratio, hedge_ratio))
         strategy._calculate_spread_zscore = MagicMock(return_value=z_score)
         
         # Patch external dependencies
@@ -69,7 +69,7 @@ class TestStatArbLegs:
         hedge_ratio = 0.8
         z_score = 3.0 # Triggers Sell (Short Spread)
         
-        strategy._get_hedge_ratio = MagicMock(return_value=hedge_ratio)
+        strategy._get_hedge_ratio = MagicMock(return_value=(hedge_ratio, hedge_ratio))
         strategy._calculate_spread_zscore = MagicMock(return_value=z_score)
         
         with patch('src.strategies.statistical_arbitrage_strategy.hurst_exponent', return_value=0.4):
@@ -111,7 +111,7 @@ class TestStatArbLegs:
             }
         }
         
-        strategy._get_hedge_ratio = MagicMock(return_value=hedge_ratio)
+        strategy._get_hedge_ratio = MagicMock(return_value=(hedge_ratio, hedge_ratio))
         strategy._calculate_spread_zscore = MagicMock(return_value=z_score)
         
         # Hurst check not done on exit, so no patch needed? 

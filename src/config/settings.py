@@ -272,9 +272,8 @@ def load_config() -> Dict[str, Any]:
         
         # Strategy Configuration
         "strategies": {
-            "enabled": os.getenv("ENABLED_STRATEGIES", "stat_arb,funding_rate_arbitrage,ou_mean_reversion").split(","),
             # Dynamic Timeframe Architecture: Define specific strategy instances
-            # If 'instances' is defined, it overrides 'enabled' list for instantiation
+            # 'instances' is the SINGLE Source of Truth for enabled strategies.
             "instances": [
                 # Parallel Strategy Execution:
                 # We run multiple instances of the same strategy on different timeframes.

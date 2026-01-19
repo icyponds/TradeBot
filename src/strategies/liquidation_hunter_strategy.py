@@ -188,4 +188,10 @@ class LiquidationHunterStrategy(BaseStrategy):
         if z_score >= z_max:
             return 1.0
             
+        # Boost for extreme events (scaling into the wick)
+        # This signals StrategyManager to potentially size up
+        if z_score > 4.5:
+             base_strength = 0.5 + 0.5 * (z_score - self.std_dev_threshold) / (z_max - self.std_dev_threshold)
+             return min(1.0, base_strength * 1.5) # 50% boost for extreme outliers
+            
         return 0.5 + 0.5 * (z_score - self.std_dev_threshold) / (z_max - self.std_dev_threshold)

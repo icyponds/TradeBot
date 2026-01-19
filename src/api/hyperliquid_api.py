@@ -885,6 +885,11 @@ class HyperliquidAPI(MarketInterface):
         self._integrity_thread = None
         self._stop_integrity_event = threading.Event()
         
+        # User state cache (to reduce redundant API calls for margin info)
+        self._user_state_cache: Optional[Dict[str, Any]] = None
+        self._user_state_cache_time: float = 0.0
+        self._user_state_cache_ttl: float = 2.0  # 2 second TTL
+        
         # Initialize SDK clients
         self._init_sdk_clients()
         
@@ -2067,8 +2072,11 @@ class HyperliquidAPI(MarketInterface):
             return cached
         
         def _fetch():
-            # Query native DEX only for account balance (HIP-3 bridges are isolated margin)
-            user_state = self.info.user_state(self.public_account_address)
+            # Use cached user_state to reduce API calls and enable fallback
+            user_state = self._get_cached_user_state()
+            if not user_state:
+                self.logger.warning("Failed to get user_state for account balance")
+                return None
             
             margin_summary = user_state.get('marginSummary', {})
             
@@ -2086,7 +2094,8 @@ class HyperliquidAPI(MarketInterface):
             self.cache.set(cache_key, result, ttl=self.cache_ttl_positions)
             return result
         
-        return self._rate_limited_call(_fetch)
+        # No need for _rate_limited_call here since _get_cached_user_state handles retries
+        return _fetch()
     
     # @with_retry removed: Avoid double retry logic
     def get_positions(self) -> List[Dict[str, Any]]:
@@ -2309,6 +2318,38 @@ class HyperliquidAPI(MarketInterface):
             self.logger.error(f"Error updating margin for {symbol}: {e}")
             return False
     
+    def _get_cached_user_state(self) -> Optional[Dict[str, Any]]:
+        """
+        Get user state with caching to reduce redundant API calls.
+        Uses retry logic before falling back to stale cache.
+        
+        Returns:
+            User state dict or None if API call fails
+        """
+        now = time.time()
+        
+        # Return cached value if still valid
+        if self._user_state_cache is not None:
+            if now - self._user_state_cache_time < self._user_state_cache_ttl:
+                return self._user_state_cache
+        
+        # Fetch fresh data with retry logic
+        try:
+            user_state = self._rate_limited_call(
+                self.info.user_state,
+                self.public_account_address
+            )
+            self._user_state_cache = user_state
+            self._user_state_cache_time = time.time()
+            return user_state
+        except Exception as e:
+            self.logger.warning(f"Failed to fetch user_state after retries: {e}")
+            # Return stale cache if available (defensive fallback)
+            if self._user_state_cache is not None:
+                self.logger.warning("Using stale user_state cache due to API failure")
+                return self._user_state_cache
+            return None
+    
     def get_position_margin_info(self, symbol: str) -> Optional[Dict[str, Any]]:
         """
         Get detailed margin information for a specific position.
@@ -2316,7 +2357,9 @@ class HyperliquidAPI(MarketInterface):
         Returns liquidation price, margin ratio, etc.
         """
         try:
-            user_state = self.info.user_state(self.public_account_address)
+            user_state = self._get_cached_user_state()
+            if not user_state:
+                return None
             
             for pos in user_state.get('assetPositions', []):
                 position_data = pos.get('position', {})

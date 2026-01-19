@@ -21,8 +21,10 @@ from src.utils.correlation_manager import CorrelationManager
 from src.utils.performance_tracker import PerformanceTracker
 from src.utils.regime_hmm import RegimeAllocator
 from src.utils.change_point import PageHinkley
+from src.utils.change_point import PageHinkley
 from src.utils.volatility_gate import VolatilityGate
 from src.utils.volatility_scaler import VolatilityScaler
+from src.utils.statistics import hurst_exponent
 from .strategy_selector import StrategySelector
 from .execution_engine import ExecutionEngine
 from src.models.trade import Trade, Position, MultiLegPosition, PositionLeg
@@ -1038,24 +1040,15 @@ class StrategyManager:
         import importlib
         
         # Support for Phase 6 Multi-Instance Architecture
+        # 'instances' is now the SINGLE Source of Truth.
         instances_config = self.config['strategies'].get('instances')
         
-        if instances_config:
-            # New path: Instantiate specific instances
-            strategy_definitions = instances_config
-        else:
-            # Legacy path: Instantiate from enabled list (backward compatibility)
-            # Create a "default instance" for each enabled strategy type
-            enabled_strategies = self.config['strategies']['enabled']
-            strategy_definitions = []
-            for strategy_type in enabled_strategies:
-                strategy_type = strategy_type.strip()
-                if strategy_type:
-                    strategy_definitions.append({
-                        "type": strategy_type, 
-                        "name": strategy_type, # Use type as name for legacy behavior
-                        "timeframe": None      # Use default preferred timeframe
-                    })
+        if not instances_config:
+            self.logger.warning("No strategy instances configured in 'strategies.instances'. Bot will run without active strategies.")
+            return {}
+
+        strategy_definitions = instances_config
+
 
         strategies = {}
         
@@ -1920,6 +1913,40 @@ class StrategyManager:
                 signal = strategy.generate_signal(symbol, ohlcv)
             
             if signal:
+                # Dynamic Efficiency Filter (Hurst Exponent)
+                # If market is trending/efficient (Hurst > 0.6), Mean Reversion is dangerous.
+                # Require stricter 3.0 sigma threshold (instead of 2.0) for entry.
+                if signal.get("action") == "open":
+                    is_mean_reversion = strategy_name.startswith('ou_mean_reversion') or strategy_name.startswith('stat_arb')
+                    
+                    if is_mean_reversion:
+                        z = signal.get("zscore")
+                        if z is None:
+                            z = signal.get("z_score")
+                        
+                        if z is not None:
+                            # Calculate Hurst for the symbol to gauge efficiency
+                            # Use sufficient lookback (e.g., 100 periods)
+                            try:
+                                ohlcv_df = ohlcv.get('15m')
+                                if ohlcv_df is None:
+                                    ohlcv_df = ohlcv.get('1h')
+                                if ohlcv_df is None and len(ohlcv) > 0:
+                                    ohlcv_df = list(ohlcv.values())[0]
+                                    
+                                if ohlcv_df is not None and len(ohlcv_df) > 50:
+                                    # Quick Hurst calculation on recent 100 candles
+                                    h_value = hurst_exponent(ohlcv_df['close'].iloc[-100:])
+                                    
+                                    # Threshold: 0.6 indicates persistent trend / efficiency
+                                    if h_value > 0.6:
+                                        if abs(z) < 3.0:
+                                            self.logger.info(f"Rejected signal for {strategy_name}/{symbol}: Efficiency Filter (H={h_value:.2f}), Z-Score {z:.2f} < 3.0")
+                                            return None
+                            except Exception as e:
+                                # Don't block on calculation error, fall through
+                                pass
+
                 # Phase-1: Strategy-Specific Entry Hurdle
                 # Only valid if the strategy explicitly configures 'zscore_hurdle_buffer'.
                 # Strict check: No global fallback.
@@ -2298,9 +2325,32 @@ class StrategyManager:
     def _handle_multi_leg_signal(self, symbol: str, signal: Dict[str, Any], current_price: float, 
                                 strategy_name: str, ohlcv: Dict[str, pd.DataFrame], timestamp: datetime = None):
         """Handle multi-leg trade signal."""
+        # For exit signals, calculate_signal_strength is not used, so we can provide a fallback
+        # This handles cases where strategy_name is an instance name (e.g. "stat_arb_15m") 
+        # that may not exist as a key in self.strategies
+        action = signal.get('action', '')
+        
+        if action in ('exit', 'close'):
+            # Exit signals don't need signal strength calculation
+            signal_strength_fn = lambda *args, **kwargs: 0.5  # Dummy value, not used for exits
+        else:
+            # Entry signals need actual strategy lookup
+            # Try direct lookup first, then try base strategy name
+            strategy = self.strategies.get(strategy_name)
+            if not strategy:
+                # Try extracting base name (e.g., "stat_arb_15m" -> "stat_arb")
+                base_name = strategy_name.rsplit('_', 1)[0] if '_' in strategy_name else strategy_name
+                strategy = self.strategies.get(base_name)
+            
+            if not strategy:
+                self.logger.error(f"Strategy '{strategy_name}' not found for multi-leg entry")
+                return
+                
+            signal_strength_fn = strategy.calculate_signal_strength
+        
         self.execution_engine.handle_multi_leg_signal(
             symbol, signal, current_price, strategy_name, ohlcv, 
-            self.strategies[strategy_name].calculate_signal_strength,
+            signal_strength_fn,
             self.strategies,
             timestamp=timestamp,
             strategy_manager=self
