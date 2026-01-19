@@ -223,6 +223,12 @@ class LeverageManager:
         Returns:
             Stop loss price
         """
+        # Validate side parameter - must be position side, not trade action
+        if side not in ('long', 'short'):
+            self.logger.error(f"Invalid side '{side}' for SL calculation. Expected 'long' or 'short'.")
+            # Default to long behavior to avoid crashes, but log error
+            side = 'long'
+        
         # Calculate stop loss percentage based on leverage
         # Higher leverage = tighter stop loss
         base_stop_loss_pct = self.fallback_stop_loss_pct
@@ -238,6 +244,12 @@ class LeverageManager:
             stop_loss = entry_price * (1 - leverage_adjusted_pct)
         else:
             stop_loss = entry_price * (1 + leverage_adjusted_pct)
+        
+        # Sanity check: SL should be on correct side of entry
+        if side == 'long' and stop_loss >= entry_price:
+            self.logger.error(f"BUG: Long SL {stop_loss:.4f} >= entry {entry_price:.4f}")
+        elif side == 'short' and stop_loss <= entry_price:
+            self.logger.error(f"BUG: Short SL {stop_loss:.4f} <= entry {entry_price:.4f}")
         
         return stop_loss
     

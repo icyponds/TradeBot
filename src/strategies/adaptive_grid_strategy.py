@@ -187,7 +187,7 @@ class AdaptiveGridStrategy(BaseStrategy):
         except Exception:
             pass
             
-        if side == 'buy':
+        if side == 'long':
             return entry_price + tp_dist
         else:
             return entry_price - tp_dist
@@ -239,7 +239,7 @@ class AdaptiveGridStrategy(BaseStrategy):
         Calculate wider Stop Loss for Grid resilience (4%).
         """
         sl_pct = 0.04
-        if side == 'buy' or side == 'long':
+        if side == 'long':
             return current_price * (1.0 - sl_pct)
         else:
             return current_price * (1.0 + sl_pct)

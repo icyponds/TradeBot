@@ -148,7 +148,7 @@ class BaseStrategy(ABC):
         
         Args:
             entry_price: Entry price
-            side: 'buy' or 'sell'
+            side: Position side ('long' or 'short')
             ohlcv: OHLCV data for strategy-specific calculations
             signal_strength: Signal strength (0.0 to 1.0)
             market_volatility: Market volatility factor
@@ -162,7 +162,7 @@ class BaseStrategy(ABC):
         # Adjust based on signal strength and volatility
         adjusted_percentage = base_take_profit_percentage * signal_strength * market_volatility
         
-        if side == 'buy':
+        if side == 'long':
             return entry_price * (1 + adjusted_percentage)
         else:
             return entry_price * (1 - adjusted_percentage)

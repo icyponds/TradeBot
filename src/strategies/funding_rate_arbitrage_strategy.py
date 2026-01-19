@@ -402,7 +402,7 @@ class FundingRateArbitrageStrategy(BaseStrategy):
         Returns a very wide take profit as placeholder.
         """
         # Very wide TP since we exit based on funding rate, not price
-        if side == 'buy':
+        if side == 'long':
             return entry_price * 1.5  # 50% - effectively no TP
         else:
             return entry_price * 0.5  # -50% - effectively no TP

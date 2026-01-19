@@ -446,17 +446,52 @@ class StrategyManager:
     def sync_positions_with_exchange(self):
         """
         Sync local positions with exchange reality.
-        Detects and closes "ghost" positions (in DB but not on exchange).
+        
+        Protocols:
+        1. Ghost Positions (Local but not Exchange): Delete from DB.
+        2. Unrecorded Positions (Exchange but not Local): Immediate Close (Nuclear).
+        3. Size Mismatch (Both exist, size differs): Smart Adoption.
+           - If Exchange < Local: Record 'phantom' trade for difference -> Update DB.
+           - If Exchange > Local: Adopt Exchange Size & Price -> Recalc Risk -> Update DB.
         """
         try:
             # 1. Get real positions from exchange
             exchange_positions = self.market_api.get_positions()
-            exchange_symbols = {p['symbol'] for p in exchange_positions if p.get('size', 0) != 0}
+            # Map symbol -> position dict for easy lookup
+            exchange_map = {p['symbol']: p for p in exchange_positions if p.get('size', 0) != 0}
+            exchange_symbols = set(exchange_map.keys())
             
             # 2. Get local positions
             local_positions = list(self.execution_engine.positions.keys())
             
-            # 3. Find ghosts (in local but not on exchange)
+            # 3. Handling Unrecorded Positions (Exchange but not Local)
+            # ---------------------------------------------------------
+            for symbol in exchange_symbols:
+                if symbol not in local_positions and symbol not in self.multi_leg_positions: # Crude check for ML
+                    # Double check it's not a part of a multi-leg strategy not indexed by symbol directly?
+                    # For now, strict nuclear option on unknown single-leg symbols.
+                    
+                    exch_pos = exchange_map[symbol]
+                    size = float(exch_pos.get('size', 0))
+                    side = exch_pos.get('side', 'neutral').lower()
+                    
+                    if size > 0:
+                        self.logger.warning(f"🚨 UNRECORDED position detected: {symbol} {side} {size}. Initiating immediate closure.")
+                        
+                        # Execute reduce-only market order to close
+                        # Opposite side
+                        close_side = 'sell' if side == 'long' else 'buy'
+                        
+                        self.execution_engine.market_api.execute_order(
+                            symbol=symbol,
+                            side=close_side,
+                            size=size,
+                            reduce_only=True,
+                            urgency='high'
+                        )
+
+            # 4. Handling Ghost Positions (Local but not Exchange)
+            # ----------------------------------------------------
             ghost_symbols = [s for s in local_positions if s not in exchange_symbols]
             changes_made = False
             
@@ -464,15 +499,9 @@ class StrategyManager:
                 changes_made = True
                 self.logger.warning(f"Ghost positions detected: {ghost_symbols}")
             
-
-            
-            # 4. Close ghost positions locally (Single-Leg)
             for symbol in ghost_symbols:
-
-
                 pos = self.execution_engine.positions.get(symbol)
-                if not pos:
-                    continue
+                if not pos: continue
                     
                 # Try to find the closing fill from recent fills
                 exit_price, exit_time, reason, fee = self._find_closing_fill(symbol, pos.side, pos.entry_time)
@@ -505,15 +534,83 @@ class StrategyManager:
                 # Remove from DB
                 try:
                     if hasattr(self.execution_engine, 'delete_position_from_db'):
-                        # Using delete_position cleans up completely
                         pos_id = f"pos_{pos.strategy}_{symbol}"
                         self.execution_engine.delete_position_from_db(pos_id)
                     else:
-                        self.save_positions_to_db() 
+                        self.execution_engine.save_positions_to_db() 
                 except Exception as e:
                     self.logger.error(f"Error removing ghost position from DB: {e}")
+
+            # 5. Handling Size Mismatches (Smart Adoption)
+            # --------------------------------------------
+            common_symbols = [s for s in local_positions if s in exchange_symbols]
+            for symbol in common_symbols:
+                local_pos = self.execution_engine.positions[symbol]
+                exch_pos = exchange_map[symbol]
+                
+                local_size = float(local_pos.size)
+                exch_size = float(exch_pos.get('size', 0))
+                
+                # Tolerance for float comparison
+                if abs(local_size - exch_size) > 0.0001:
+                    changes_made = True
+                    self.logger.warning(f"State Drift Detected for {symbol}: DB={local_size} vs Exch={exch_size}")
                     
-            # 5. Multi-Leg Ghost Detection
+                    if exch_size < local_size:
+                        # CASE A: External Partial Close (Reduced)
+                        diff = local_size - exch_size
+                        self.logger.info(f"Adopting external reduction check for {symbol}: -{diff:.4f}")
+                        
+                        # 1. Record Phantom Trade for the difference
+                        # We don't know exact exit price unless we search fills, but using current Price/Entry is safe estimate
+                        # Ideally search fills (TODO), for now use entry_price to be PnL neutral or current price?
+                        # Use entry_price to avoid fake PnL spikes if unknown.
+                        # Actually, better to check current price to reflect mark-to-market reality?
+                        # Let's stick to safe defaults: try to find fill, else fallback.
+                        exit_price, exit_time, reason, fee = self._find_closing_fill(symbol, local_pos.side, local_pos.entry_time)
+                        if exit_price == 0.0:
+                            exit_price = local_pos.entry_price
+                            reason = "External Partial Close"
+                        
+                        # Proportion of Fees?
+                        # If we found a fill, 'fee' might be total fee. We should probably just log it.
+                        
+                        self.performance_tracker.record_trade_from_position(
+                            symbol=symbol,
+                            strategy=local_pos.strategy,
+                            side=local_pos.side,
+                            entry_price=local_pos.entry_price,
+                            exit_price=exit_price,
+                            size=diff, # Only the closed amount
+                            entry_time=local_pos.entry_time,
+                            exit_time=datetime.now(),
+                            capital_at_risk=0, # Already counted in main pos
+                            exit_reason=reason,
+                            fees=0.0 # Hard to attribute
+                        )
+                        
+                        # 2. Update DB Size
+                        local_pos.size = exch_size
+                        
+                    else:
+                        # CASE B: External Add (Increased)
+                        diff = exch_size - local_size
+                        self.logger.info(f"Adopting external increase for {symbol}: +{diff:.4f}")
+                        
+                        # 1. Update DB Size
+                        local_pos.size = exch_size
+                        
+                        # 2. Update Entry Price (Weighted Avg changed)
+                        new_entry = float(exch_pos.get('entry_price', local_pos.entry_price))
+                        local_pos.entry_price = new_entry
+                        
+                        # 3. Recalculate Risk
+                        # New Risk = (New Size * New Entry) / Leverage
+                        lev = local_pos.leverage or 1.0
+                        new_risk = (exch_size * new_entry) / lev
+                        local_pos.capital_at_risk = new_risk
+
+            # 6. Multi-Leg Ghost Detection
             ml_ghosts = []
             
             for pos_id, pos in self.multi_leg_positions.items():

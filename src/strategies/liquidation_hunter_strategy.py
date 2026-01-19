@@ -143,7 +143,7 @@ class LiquidationHunterStrategy(BaseStrategy):
         
         tp_pct = 0.02 # 2% capture of wick
         
-        if side == 'buy':
+        if side == 'long':
             return entry_price * (1 + tp_pct)
         else:
             return entry_price * (1 - tp_pct)

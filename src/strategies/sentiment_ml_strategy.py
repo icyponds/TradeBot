@@ -168,7 +168,7 @@ class SentimentMLStrategy(BaseStrategy):
         """
         tp_dist = entry_price * 0.05  # 5% pump
         
-        if side == 'buy':
+        if side == 'long':
             return entry_price + tp_dist
         else:
             return entry_price - tp_dist

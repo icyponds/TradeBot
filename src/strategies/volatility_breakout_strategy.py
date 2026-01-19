@@ -145,7 +145,7 @@ class VolatilityBreakoutStrategy(BaseStrategy):
         # If we have logic for risk:reward, we can use it here
         # But this strategy relies heavily on trailing stops
         
-        if side == 'buy':
+        if side == 'long':
             return entry_price + tp_dist
         else:
             return entry_price - tp_dist

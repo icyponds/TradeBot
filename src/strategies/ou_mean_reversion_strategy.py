@@ -490,18 +490,20 @@ class OUMeanReversionStrategy(BaseStrategy):
         Calculate take profit for OU mean reversion.
         
         Target is the estimated mean (mu) for mean reversion.
+        R:R ratio should be at least 1:1 with stop loss (fallback ~5%).
         """
         # For mean reversion, target is approximately the mean
-        # We use a percentage based on expected reversion
-        base_tp_pct = 0.03  # 3% base target
+        # Base TP should be >= SL fallback (5%) for minimum 1:1 R:R
+        base_tp_pct = 0.05  # 5% base target (matches fallback SL)
         
         # Adjust for signal strength (higher Z-score = more deviation = larger target)
         adjusted_tp = base_tp_pct * signal_strength
         
-        # Clamp to reasonable range
-        adjusted_tp = max(0.02, min(0.08, adjusted_tp))
+        # Clamp to reasonable range (5% to 10% for 1:1 to 2:1 R:R)
+        adjusted_tp = max(0.05, min(0.10, adjusted_tp))
         
-        if side == 'buy':
+        # Note: 'side' is now 'long'/'short' (position side)
+        if side == 'long':
             return entry_price * (1 + adjusted_tp)
         else:
             return entry_price * (1 - adjusted_tp)

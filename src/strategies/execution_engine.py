@@ -139,7 +139,7 @@ class ExecutionEngine:
             stop_loss_pct_for_sizing = 0.0
             
             if hasattr(strategy, 'calculate_stop_loss') and callable(getattr(strategy, 'calculate_stop_loss')):
-                strategy_stop_loss = strategy.calculate_stop_loss(current_price, side, signal_context)
+                strategy_stop_loss = strategy.calculate_stop_loss(current_price, position_side, signal_context)
                 
                 if strategy_stop_loss is not None and current_price > 0:
                      # Calculate implied percentage
@@ -237,7 +237,7 @@ class ExecutionEngine:
             
             # === TAKE PROFIT CALCULATION ===
             strategy_take_profit = strategy.calculate_take_profit(
-                current_price, side, ohlcv, signal_strength, market_volatility
+                current_price, position_side, ohlcv, signal_strength, market_volatility
             )
             
             take_profit = self.leverage_manager.calculate_take_profit_with_leverage(
@@ -255,6 +255,17 @@ class ExecutionEngine:
                 take_profit = min(take_profit, take_profit_capital_based)
             else:
                 take_profit = max(take_profit, take_profit_capital_based)
+            
+            # R:R Validation: Ensure TP distance >= SL distance (minimum 1:1 R:R)
+            tp_distance = abs(take_profit - current_price)
+            sl_distance = abs(stop_loss - current_price)
+            
+            if tp_distance < sl_distance and sl_distance > 0:
+                self.logger.warning(f"{symbol}: TP distance {tp_distance:.4f} < SL distance {sl_distance:.4f}, expanding TP for 1:1 R:R")
+                if position_side == 'long':
+                    take_profit = current_price + sl_distance
+                else:
+                    take_profit = current_price - sl_distance
             
             # Determine market type from symbol
             market_type = 'spot' if symbol.endswith('_SPOT') else 'perp'
@@ -290,6 +301,17 @@ class ExecutionEngine:
                 # Get trailing stop config
                 trailing_config = strategy.get_trailing_stop_config()
                 
+                # RE-CALCULATE CAPITAL AT RISK based on ACTUAL execution
+                # Original margin_required was based on intended size.
+                # We must scale it to match the actual filled size to ensure PnL consistency.
+                actual_notional = fill_size * fill_price
+                # Calculate effective capital at risk for the filled portion
+                # Use max(1, leverage) to avoid division by zero
+                safe_leverage = leverage if leverage > 0 else 1.0
+                capital_at_risk_actual = actual_notional / safe_leverage
+                
+                self.logger.info(f"Position recorded: Size={fill_size} @ {fill_price}, Risk=${capital_at_risk_actual:.2f} (Intended Risk=${margin_required:.2f})")
+                
                 # Create position record
                 position = Position(
                     symbol=symbol,
@@ -300,7 +322,7 @@ class ExecutionEngine:
                     strategy=strategy_name,
                     stop_loss=stop_loss,
                     take_profit=take_profit,
-                    capital_at_risk=margin_required,
+                    capital_at_risk=capital_at_risk_actual,
                     leverage=leverage,
                     order_id=order_id,  # Exchange OID for traceability
                     trailing_stop_enabled=trailing_config.get('enabled', False),
