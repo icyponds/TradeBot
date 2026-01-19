@@ -344,9 +344,8 @@ class ExecutionEngine:
                 
                 self.logger.info(f"✅ Executed {side} trade for {symbol}: {fill_size} @ {fill_price:.6f}")
                 
-                # Save positions
-                # Save positions
-                self.save_positions_to_db()
+                # Persist position atomically to database
+                self._persist_position(position)
                 
             else:
                 self.logger.error(f"Failed to fill order for {symbol}")
@@ -715,8 +714,8 @@ class ExecutionEngine:
             # Record composite position for margin checks
             self.leverage_manager.record_position(symbol, 'multi_leg', position_size, avg_entry_price, leverage, margin_required)
             
-            # Persist to database
-            self.save_positions_to_db()
+            # Persist multi-leg position atomically to database
+            self._persist_multi_leg_position(multi_leg_position)
             
             self.logger.info(f"✅ Multi-leg position opened: {position_id} (Composite Price: {avg_entry_price:.6f})")
             
@@ -837,9 +836,7 @@ class ExecutionEngine:
             if pnl_to_record > 0:
                 self.winning_trades += 1
             
-            # Save positions
-            # Save positions
-            self.save_positions_to_db()
+            # Note: Position already deleted from DB atomically at line 826
             
             self.logger.info(f"✅ Multi-leg position closed: {position.position_id}")
             self.logger.info(f"   P&L: ${pnl_to_record:.2f}")
@@ -1194,64 +1191,78 @@ class ExecutionEngine:
         except Exception as e:
             self.logger.warning(f"Failed to inject stat_arb metadata: {e}")
 
-    def save_positions_to_db(self):
-        """Save current positions to the database."""
+    def _persist_position(self, position) -> bool:
+        """
+        Atomically save a single position to the database.
+        
+        Args:
+            position: The Position object to persist.
+            
+        Returns:
+            True if saved successfully, False otherwise.
+        """
+        try:
+            db = self.performance_tracker.db
+            position_id = f"pos_{position.strategy}_{position.symbol}"
+            
+            metadata = {
+                'capital_at_risk': position.capital_at_risk,
+                'trailing_stop_enabled': position.trailing_stop_enabled,
+                'trailing_stop_pct': getattr(position, 'trailing_stop_pct', 0.0),
+                'trailing_stop_activation_pct': getattr(position, 'trailing_stop_activation_pct', 0.0),
+                'highest_price': getattr(position, 'highest_price', None),
+                'lowest_price': getattr(position, 'lowest_price', None),
+                'trailing_stop_active': getattr(position, 'trailing_stop_active', False),
+                'leverage': position.leverage
+            }
+            
+            position_data = {
+                'position_id': position_id,
+                'strategy': position.strategy,
+                'symbol': position.symbol,
+                'side': position.side,
+                'size': position.size,
+                'leverage': position.leverage,
+                'entry_price': position.entry_price,
+                'entry_time': position.entry_time.isoformat(),
+                'stop_loss': position.stop_loss,
+                'take_profit': position.take_profit,
+                'order_id': getattr(position, 'order_id', None),
+                'metadata': metadata,
+                'legs': []
+            }
+            
+            db.save_position(position_data)
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Failed to persist position {position.symbol} to DB: {e}")
+            return False
+
+    def _persist_multi_leg_position(self, position) -> bool:
+        """
+        Atomically save a multi-leg position to the database.
+        
+        Args:
+            position: The MultiLegPosition object to persist.
+            
+        Returns:
+            True if saved successfully, False otherwise.
+        """
         try:
             db = self.performance_tracker.db
             
-            # Single-leg positions
-            for symbol, position in self.positions.items():
-                # Generate a stable ID for single-leg positions
-                # Using strategy and symbol ensures uniqueness
-                position_id = f"pos_{position.strategy}_{symbol}"
-                
-                metadata = {
-                    'capital_at_risk': position.capital_at_risk,
-                    'trailing_stop_enabled': position.trailing_stop_enabled,
-                    'trailing_stop_pct': getattr(position, 'trailing_stop_pct', 0.0),
-                    'trailing_stop_activation_pct': getattr(position, 'trailing_stop_activation_pct', 0.0),
-                    'highest_price': getattr(position, 'highest_price', None),
-                    'lowest_price': getattr(position, 'lowest_price', None),
-                    'trailing_stop_active': getattr(position, 'trailing_stop_active', False),
-                    'leverage': position.leverage
-                }
-                
-                position_data = {
-                    'position_id': position_id,
-                    'strategy': position.strategy,
-                    'symbol': position.symbol,
-                    'side': position.side,
-                    'size': position.size,
-                    'leverage': position.leverage,
-                    'entry_price': position.entry_price,
-                    'entry_time': position.entry_time.isoformat(),
-                    'stop_loss': position.stop_loss,
-                    'take_profit': position.take_profit,
-                    'order_id': getattr(position, 'order_id', None),  # Exchange OID
-                    'metadata': metadata,
-                    'legs': [] # Single leg has no sub-legs
-                }
-                
-                db.save_position(position_data)
-        
-            # Multi-leg positions
-            for position_id, position in self.multi_leg_positions.items():
-                if hasattr(position, 'to_dict'):
-                    # Inject stat_arb z-score data into metadata before saving
-                    if position.strategy.startswith('stat_arb'):
-                        self._inject_statarb_metadata(position)
-                    
-                    position_data = position.to_dict()
-                    # Ensure explicitly required fields map correctly if names differ
-                    # DB expects 'metadata' which is usually present
-                    db.save_position(position_data)
-                else:
-                    self.logger.error(f"MultiLegPosition {position_id} missing to_dict method")
-
-            # self.logger.debug("Saved positions to database")
+            if position.strategy.startswith('stat_arb'):
+                self._inject_statarb_metadata(position)
+            
+            position_data = position.to_dict()
+            db.save_position(position_data)
+            return True
             
         except Exception as e:
-            self.logger.error(f"Failed to save positions to DB: {e}")
+            self.logger.error(f"Failed to persist ML position {position.position_id} to DB: {e}")
+            return False
+
 
     def delete_position_from_db(self, position_id: str):
         """Delete a position from the database."""
@@ -1261,21 +1272,10 @@ class ExecutionEngine:
             self.logger.error(f"Failed to delete position {position_id} from DB: {e}")
 
     def load_positions_from_db(self):
-        """
-        Load positions from database.
-        Includes backward compatibility migration from positions.json.
-        """
+        """Load positions from database."""
         try:
             db = self.performance_tracker.db
             active_positions = db.get_all_active_positions()
-            
-            if not active_positions and os.path.exists('positions.json'):
-                self.logger.info("Found positions.json but DB is empty. Migrating...")
-                self._load_positions_from_json_legacy()
-                self.save_positions_to_db()
-                os.rename('positions.json', 'positions.json.bak')
-                self.logger.info("Migration complete. positions.json renamed to .bak")
-                return
 
             entry_time_now = datetime.now()
 
@@ -1353,79 +1353,6 @@ class ExecutionEngine:
         except Exception as e:
             self.logger.error(f"Failed to load positions from DB: {e}")
 
-    def _load_positions_from_json_legacy(self):
-        """Legacy loader for migration purposes only."""
-        try:
-            with open('positions.json', 'r') as f:
-                content = f.read().strip()
-                if not content: return
-                all_data = json.loads(content)
-            
-            if 'single_leg' in all_data:
-                positions_data = all_data['single_leg']
-                multi_leg_data = all_data.get('multi_leg', {})
-            else:
-                positions_data = all_data
-                multi_leg_data = {}
-            
-            # Load single-leg
-            for symbol, pos_data in positions_data.items():
-                # (Simplified loading logic just for migration state population)
-                try:
-                    entry_time = datetime.now()
-                    if pos_data.get('entry_time'):
-                        entry_time = datetime.fromisoformat(pos_data['entry_time'])
-                        
-                    position = Position(
-                        symbol=symbol,
-                        side=pos_data['side'],
-                        size=pos_data['size'],
-                        entry_price=pos_data['entry_price'],
-                        entry_time=entry_time,
-                        strategy=pos_data['strategy'],
-                        stop_loss=pos_data.get('stop_loss'),
-                        take_profit=pos_data.get('take_profit'),
-                        capital_at_risk=pos_data.get('capital_at_risk', 0.0),
-                        trailing_stop_enabled=pos_data.get('trailing_stop_enabled', False),
-                        trailing_stop_pct=pos_data.get('trailing_stop_pct', 0.0),
-                        trailing_stop_activation_pct=pos_data.get('trailing_stop_activation_pct', 0.0),
-                        highest_price=pos_data.get('highest_price'),
-                        lowest_price=pos_data.get('lowest_price'),
-                        trailing_stop_active=pos_data.get('trailing_stop_active', False),
-                        leverage=pos_data.get('leverage') 
-                    )
-                    self.positions[symbol] = position
-                except: pass
-
-            # Load multi-leg
-            for pid, pdata in multi_leg_data.items():
-                try:
-                    legs = []
-                    for ld in pdata.get('legs', []):
-                        legs.append(PositionLeg(
-                            symbol=ld['symbol'],
-                            market_type=ld['market_type'],
-                            side=ld['side'],
-                            size=ld['size'],
-                            entry_price=ld['entry_price'],
-                            order_id=ld.get('order_id')
-                        ))
-                    
-                    entry_time = datetime.now()
-                    if pdata.get('entry_time'):
-                        entry_time = datetime.fromisoformat(pdata['entry_time'])
-
-                    ml_pos = MultiLegPosition(
-                        position_id=pdata.get('position_id', pid),
-                        strategy=pdata.get('strategy', 'unknown'),
-                        entry_time=entry_time,
-                        legs=legs,
-                        capital_at_risk=pdata.get('capital_at_risk'),
-                        metadata=pdata.get('metadata', {})
-                    )
-                    self.multi_leg_positions[pid] = ml_pos
-                except: pass
-        except Exception: pass
 
     def get_leg_price(self, symbol: str, market_type: str) -> Optional[float]:
         """Get current price for a leg based on market type."""
@@ -1647,4 +1574,5 @@ class ExecutionEngine:
                 if self.market_api.transfer_usd_to_perp(transfer_amount):
                     self.market_api.add_position_margin(symbol, transfer_amount)
                 
-                self.save_positions_to_db()
+                # Persist updated position atomically to database
+                self._persist_multi_leg_position(position)

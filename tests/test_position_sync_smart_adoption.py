@@ -62,6 +62,11 @@ class TestPositionSyncSmartAdoption(unittest.TestCase):
         self.manager.execution_engine.positions = {'BTC': local_pos}
         self.manager.execution_engine.save_positions_to_db = MagicMock()
         
+        # Mock DB to return BTC so sync finds it
+        mock_db = MagicMock()
+        mock_db.get_all_live_position_symbols.return_value = ['BTC']
+        self.manager.performance_tracker.db = mock_db
+        
         # Act
         self.manager.sync_positions_with_exchange()
         
@@ -79,8 +84,8 @@ class TestPositionSyncSmartAdoption(unittest.TestCase):
         self.assertEqual(call_kwargs['exit_reason'], 'External Partial Close')
         self.assertEqual(call_kwargs['side'], 'long')
         
-        # 3. DB Saved
-        self.manager.execution_engine.save_positions_to_db.assert_called()
+        # 3. Position persisted atomically via _persist_position
+        self.manager.execution_engine._persist_position.assert_called()
 
     def test_mismatch_external_add_smart_adoption(self):
         """Protocol 2B: Exchange > DB -> Adopt Exchange Size & Price, Recalc Risk."""
@@ -98,6 +103,11 @@ class TestPositionSyncSmartAdoption(unittest.TestCase):
         self.manager.execution_engine.positions = {'BTC': local_pos}
         self.manager.execution_engine.save_positions_to_db = MagicMock()
         
+        # Mock DB to return BTC so sync finds it
+        mock_db = MagicMock()
+        mock_db.get_all_live_position_symbols.return_value = ['BTC']
+        self.manager.performance_tracker.db = mock_db
+        
         # Act
         self.manager.sync_positions_with_exchange()
         
@@ -114,8 +124,8 @@ class TestPositionSyncSmartAdoption(unittest.TestCase):
         expected_risk = (1.5 * 52000.0) / 10
         self.assertEqual(local_pos.capital_at_risk, expected_risk)
         
-        # 4. DB Saved
-        self.manager.execution_engine.save_positions_to_db.assert_called()
+        # 4. Position persisted atomically via _persist_position
+        self.manager.execution_engine._persist_position.assert_called()
 
 if __name__ == '__main__':
     unittest.main()

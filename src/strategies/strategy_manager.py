@@ -461,13 +461,19 @@ class StrategyManager:
             exchange_map = {p['symbol']: p for p in exchange_positions if p.get('size', 0) != 0}
             exchange_symbols = set(exchange_map.keys())
             
-            # 2. Get local positions
-            local_positions = list(self.execution_engine.positions.keys())
+            # 2. Get local positions from DB (source of truth)
+            local_positions = self.performance_tracker.db.get_all_live_position_symbols()
             
             # 3. Handling Unrecorded Positions (Exchange but not Local)
             # ---------------------------------------------------------
+            # Gather all symbols used in Multi-Leg positions
+            multi_leg_symbols = set()
+            for pos in self.multi_leg_positions.values():
+                for leg in pos.legs:
+                    multi_leg_symbols.add(leg.symbol)
+
             for symbol in exchange_symbols:
-                if symbol not in local_positions and symbol not in self.multi_leg_positions: # Crude check for ML
+                if symbol not in local_positions and symbol not in multi_leg_symbols:
                     # Double check it's not a part of a multi-leg strategy not indexed by symbol directly?
                     # For now, strict nuclear option on unknown single-leg symbols.
                     
@@ -533,11 +539,8 @@ class StrategyManager:
                 
                 # Remove from DB
                 try:
-                    if hasattr(self.execution_engine, 'delete_position_from_db'):
-                        pos_id = f"pos_{pos.strategy}_{symbol}"
-                        self.execution_engine.delete_position_from_db(pos_id)
-                    else:
-                        self.execution_engine.save_positions_to_db() 
+                    pos_id = f"pos_{pos.strategy}_{symbol}"
+                    self.performance_tracker.db.delete_position(pos_id)
                 except Exception as e:
                     self.logger.error(f"Error removing ghost position from DB: {e}")
 
@@ -592,6 +595,9 @@ class StrategyManager:
                         # 2. Update DB Size
                         local_pos.size = exch_size
                         
+                        # 3. Persist updated position atomically
+                        self.execution_engine._persist_position(local_pos)
+                        
                     else:
                         # CASE B: External Add (Increased)
                         diff = exch_size - local_size
@@ -609,6 +615,9 @@ class StrategyManager:
                         lev = local_pos.leverage or 1.0
                         new_risk = (exch_size * new_entry) / lev
                         local_pos.capital_at_risk = new_risk
+                        
+                        # 4. Persist updated position atomically
+                        self.execution_engine._persist_position(local_pos)
 
             # 6. Multi-Leg Ghost Detection
             ml_ghosts = []
@@ -692,9 +701,8 @@ class StrategyManager:
                     del self.execution_engine.multi_leg_positions[pos_id]
                     self.consecutive_errors = 0 # Reset error counter on successful cleanup
                     
-            # Persist updated state
-            if changes_made:
-                    self.execution_engine.save_positions_to_db()
+            # Note: All position changes are now persisted atomically during their handling.
+            # No bulk save needed here.
             
         except Exception as e:
             self.logger.error(f"Error syncing positions with exchange: {e}")
@@ -1852,8 +1860,11 @@ class StrategyManager:
                 # Position was closed
                 if symbol in self.positions:
                     self.logger.info(f"Real-time position update: {symbol} position closed (size: {position_size})")
+                    pos = self.positions[symbol]
                     del self.positions[symbol]
-                    self.save_positions_to_db()
+                    # Delete from DB atomically
+                    pos_id = f"pos_{pos.strategy}_{symbol}"
+                    self.performance_tracker.db.delete_position(pos_id)
             else:
                 # Position was opened or modified
                 if symbol not in self.positions:
@@ -1869,7 +1880,8 @@ class StrategyManager:
                         current_price=float(position_data.get('mark_price', 0))
                     )
                     self.positions[symbol] = position
-                    self.save_positions_to_db()
+                    # Persist new position atomically
+                    self.execution_engine._persist_position(position)
                 else:
                     # Existing position updated
                     local_position = self.positions[symbol]
@@ -1877,7 +1889,8 @@ class StrategyManager:
                     if abs(position_size - old_size) > 0.001:  # Significant size change
                         self.logger.info(f"Real-time position update: {symbol} size changed {old_size} → {position_size}")
                         local_position.size = position_size
-                        self.save_positions_to_db()
+                        # Persist updated position atomically
+                        self.execution_engine._persist_position(local_position)
             
         except Exception as e:
             self.logger.error(f"Error handling position update: {e}")
@@ -3390,11 +3403,6 @@ class StrategyManager:
         self.logger.warning(f"Position limit reached ({len(self.positions)} positions), skipping trade for {symbol}")
         return False 
 
-    def save_positions_to_db(self):
-        """Save current positions to the database."""
-        # Delegate to execution engine which now uses DB
-        return self.execution_engine.save_positions_to_db()
-    
     def load_positions_from_db(self):
         """Load positions from database."""
         return self.execution_engine.load_positions_from_db()

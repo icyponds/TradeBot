@@ -99,7 +99,7 @@ class TestGhostPnLIntegration:
             entry_time=datetime.now()
         )
         sm1.execution_engine.positions[symbol] = pos
-        sm1.execution_engine.save_positions_to_db()
+        sm1.execution_engine._persist_position(pos)
         
         # Also ensure MockAPI has this position so checking balances doesn't freak out
         market_api.positions[symbol] = {

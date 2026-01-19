@@ -4,10 +4,7 @@ Trading Bot Dashboard
 A real-time web dashboard for monitoring positions, strategies, and performance.
 
 Usage:
-    # Standalone (reads from positions.json and exchange):
-    python -m src.dashboard.app
-    
-    # Or integrated with the bot (shares live data):
+    # Integrated with the bot (shares live data):
     from src.dashboard import run_dashboard
     run_dashboard(strategy_manager, port=5050)
 """
@@ -238,28 +235,10 @@ def _get_positions_data() -> Dict[str, Any]:
             multi_data = _format_multi_leg_position(multi_pos)
             multi_leg.append(multi_data)
     else:
-        # Read from positions.json file
-        positions_file = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-            'positions.json'
-        )
-        if os.path.exists(positions_file):
-            with open(positions_file, 'r') as f:
-                data = json.load(f)
-                
-            # Get current prices if API available
-            prices = _get_current_prices([p['symbol'] for p in data.get('single_leg', [])])
-            
-            for pos in data.get('single_leg', []):
-                pos['current_price'] = prices.get(pos['symbol'], pos.get('current_price'))
-                pos['unrealized_pnl'] = _calculate_pnl(pos)
-                pos['unrealized_pnl_pct'] = _calculate_pnl_pct(pos)
-                pos['holding_time'] = _calculate_holding_time(pos.get('entry_time'))
-                single_leg.append(pos)
-            
-            for pos in data.get('multi_leg', []):
-                pos['holding_time'] = _calculate_holding_time(pos.get('entry_time'))
-                multi_leg.append(pos)
+        # Standalone mode: No strategy manager connected
+        # In production, the dashboard always runs alongside the bot.
+        # Return empty positions rather than reading from deprecated JSON file.
+        pass
     
     # Calculate totals
     total_pnl = sum(p.get('unrealized_pnl', 0) or 0 for p in single_leg)

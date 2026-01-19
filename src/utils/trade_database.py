@@ -979,6 +979,18 @@ class TradeDatabase:
         
         return list(positions.values())
 
+    def get_all_live_position_symbols(self) -> List[str]:
+        """
+        Get symbols of all active single-leg positions.
+        
+        Used by sync_positions_with_exchange to compare DB state against Exchange.
+        Returns symbols only (not full position data) for efficiency.
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"SELECT symbol FROM {self.table_prefix}live_positions")
+            return [row[0] for row in cursor.fetchall()]
+
     def delete_position(self, position_id: str):
         """Delete a position and its legs."""
         with self._get_connection() as conn:

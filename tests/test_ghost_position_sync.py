@@ -80,8 +80,9 @@ class TestGhostPositionSync(unittest.TestCase):
         positions_dict = {'BTC': ghost_position}
         self.mock_execution_engine.positions = positions_dict
         
-        # Mock the DB delete
+        # Mock the DB - now sync reads from DB via get_all_live_position_symbols
         mock_db = MagicMock()
+        mock_db.get_all_live_position_symbols.return_value = ['BTC']  # DB says BTC exists
         self.mock_performance_tracker.db = mock_db
         
         # Execute
@@ -96,9 +97,8 @@ class TestGhostPositionSync(unittest.TestCase):
         # Verify: Position removed from local state
         self.assertNotIn('BTC', positions_dict)
         
-        # Verify: DB delete called
-        # Verify: ExecutionEngine delete called (which handles DB)
-        self.mock_execution_engine.delete_position_from_db.assert_called_once_with('pos_csm_4h_BTC')
+        # Verify: DB delete called directly
+        mock_db.delete_position.assert_called_once_with('pos_csm_4h_BTC')
 
     def test_ghost_position_with_fills_gets_correct_exit_price(self):
         """Test that exit price is extracted from fills when available."""
@@ -129,6 +129,7 @@ class TestGhostPositionSync(unittest.TestCase):
         self.mock_execution_engine.positions = positions_dict
         
         mock_db = MagicMock()
+        mock_db.get_all_live_position_symbols.return_value = ['BTC']  # DB says BTC exists
         self.mock_performance_tracker.db = mock_db
         
         # Execute
@@ -164,6 +165,7 @@ class TestGhostPositionSync(unittest.TestCase):
         self.mock_execution_engine.positions = positions_dict
         
         mock_db = MagicMock()
+        mock_db.get_all_live_position_symbols.return_value = ['BTC']  # DB says BTC exists
         self.mock_performance_tracker.db = mock_db
         
         # Execute

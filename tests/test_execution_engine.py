@@ -146,7 +146,7 @@ class TestExecutionEngine:
         assert pos.stop_loss == 96.0
 
     def test_multi_leg_entry_persists_to_db(self, execution_engine, mock_market_api):
-        """Verify execute_multi_leg_entry calls save_positions_to_db."""
+        """Verify execute_multi_leg_entry persists position atomically to DB."""
         from unittest.mock import MagicMock
         
         # Mock API order response
@@ -168,9 +168,6 @@ class TestExecutionEngine:
         mock_market_api.ensure_perp_funds.return_value = True
         mock_market_api.ensure_spot_funds.return_value = True
         
-        # Track save_positions_to_db calls
-        execution_engine.save_positions_to_db = MagicMock()
-        
         signal = {
             'action': 'enter',
             'atomic': True,
@@ -182,8 +179,8 @@ class TestExecutionEngine:
         
         execution_engine.execute_multi_leg_entry('BTC-ETH', signal, 100.0, 'test_strat', {}, 0.8)
         
-        # Verify position was persisted
-        execution_engine.save_positions_to_db.assert_called()
+        # Verify position was persisted atomically via db.save_position (not bulk save)
+        execution_engine.performance_tracker.db.save_position.assert_called()
         # Verify position exists in memory
         assert len(execution_engine.multi_leg_positions) > 0
 
