@@ -1387,14 +1387,20 @@ class DynamicPairSelector:
                             needs_warmup = is_in_pool and sym not in self.ready_pairs
                         
                         if needs_warmup:
-                            self.logger.info(f"[Scouting] Pre-warming {sym} (5m/15m/1h/4h)...")
+                            # Use dynamic timeframes or safe default
+                            required_timeframes = ['15m', '1h']
+                            if hasattr(self, 'strategy_manager') and self.strategy_manager:
+                                if hasattr(self.strategy_manager, 'get_required_timeframes'):
+                                    required_timeframes = self.strategy_manager.get_required_timeframes()
+                            
+                            self.logger.info(f"[Scouting] Pre-warming {sym} ({'/'.join(required_timeframes)})...")
                             try:
                                 # Run integrity check
                                 if hasattr(self.market_api, 'repairer') and self.market_api.repairer:
-                                    self.market_api.repairer.process_asset(sym)
+                                    self.market_api.repairer.process_asset(sym, timeframes=required_timeframes)
                                 
                                 # Fetch all timeframes
-                                for tf in ['5m', '15m', '1h', '4h']:
+                                for tf in required_timeframes:
                                     self.market_api.get_ohlcv(sym, tf, market_type=market_type)
                                 
                                 # Mark as ready
@@ -1432,7 +1438,7 @@ class DynamicPairSelector:
                     self.logger.info(f"[Maintenance] Refreshing {len(pool_members)} pool members")
                 
                 # Get required timeframes from StrategyManager (dynamic, based on active strategies)
-                required_timeframes = ['5m', '15m', '1h', '4h']  # Default fallback
+                required_timeframes = ['15m', '1h']  # Default fallback
                 if hasattr(self, 'strategy_manager') and self.strategy_manager:
                     if hasattr(self.strategy_manager, 'get_required_timeframes'):
                         required_timeframes = self.strategy_manager.get_required_timeframes()
