@@ -76,16 +76,78 @@ class TestOhlcvCache:
         bars = [{'time': 0, 'open': 100, 'high': 110, 'low': 90, 'close': 105, 'volume': 1000}]
         cache.seed('BTC', '1m', bars)
         
-        # Update with tick that triggers new bar
+        # Update with tick that triggers new bar at T=60 (completing T=0)
+        # Sinc T=0 was seeded, its callback should be SUPPRESSED.
         cache.update_from_tick('BTC', 115, 60, 90)  # ts=90 -> bar_key=60
+        assert len(callback_calls) == 0
         
-        # Callback should have been called with the COMPLETED bar (time=0)
+        # Now update with tick that triggers ANOTHER new bar at T=120 (completing T=60)
+        # T=60 was live-created (not seeded), so callback SHOULD fire.
+        cache.update_from_tick('BTC', 120, 60, 150) # ts=150 -> bar_key=120
+        
+        # Callback should have been called with the COMPLETED bar (time=60)
         assert len(callback_calls) == 1
         assert callback_calls[0]['symbol'] == 'BTC'
         assert callback_calls[0]['timeframe'] == '1m'
-        assert callback_calls[0]['bar']['time'] == 0  # The completed bar, not the new one
+        assert callback_calls[0]['bar']['time'] == 60
     
+
+    def test_reseeding_does_not_suppress_live_bar(self, cache):
+        """
+        Regression test for Phase 15:
+        Verify that re-seeding the cache (e.g. by Repairer or PairSelector)
+        does NOT update the 'last_seeded_keys' suppression timestamp if it was already set.
+        This prevents background fetches from blocking live callbacks.
+        """
+        callback_calls = []
+        def on_bar(symbol, timeframe, bar):
+            callback_calls.append({'symbol': symbol, 'timeframe': timeframe, 'bar': bar})
+        
+        cache.on_bar_complete_callback = on_bar
+        
+        # 1. First Seed (Startup) -> Supression Timestamp Set
+        # Seed T=0..60. last_seeded_key SHOULD be 60.
+        bars_1 = [
+            {'time': 0, 'open': 100, 'high': 100, 'low': 100, 'close': 100, 'volume': 10},
+            {'time': 60, 'open': 100, 'high': 100, 'low': 100, 'close': 100, 'volume': 10}
+        ]
+        cache.seed('BTC', '1m', bars_1)
+        assert cache.last_seeded_keys['BTC']['1m'] == 60
+        
+        # 2. Tick T=70 implies T=60 completed? 
+        # Wait, if T=60 is last in deque, key=60.
+        # Tick T=70 -> key=60. No change.
+        # Tick T=120 -> key=120. Boundary cross 60.
+        # Completed Bar T=60. Matches seed key 60. SUPPRESSED.
+        
+        # 3. Simulate Repairer fetching T=0..120 and calling seed() AGAIN
+        # This happens before T=120 completes live.
+        bars_2 = [
+            {'time': 0, 'open': 100, 'high': 100, 'low': 100, 'close': 100, 'volume': 10},
+            {'time': 60, 'open': 100, 'high': 100, 'low': 100, 'close': 100, 'volume': 10},
+            {'time': 120, 'open': 101, 'high': 101, 'low': 101, 'close': 101, 'volume': 10}
+        ]
+        cache.seed('BTC', '1m', bars_2)
+        
+        # CRITICAL ASSERTION: The bug was that this updated seed key to 120.
+        # The fix should keep it as 60.
+        assert cache.last_seeded_keys['BTC']['1m'] == 60
+        
+        # 4. Now process live ticks to complete T=120
+        # Tick T=180 -> key=180. Boundary cross 120.
+        # Completed bar T=120.
+        # Should compare 120 vs seed_key (60).
+        # 120 != 60. Callback SHOULD FIRE.
+        
+        # Note: update_from_tick expects creation_time.
+        # If we send tick at T=180, it completes T=120.
+        cache.update_from_tick('BTC', 102, 10, 180)
+        
+        assert len(callback_calls) == 1
+        assert callback_calls[0]['bar']['time'] == 120
+
     def test_callback_exception_does_not_break_tick_processing(self, cache):
+
         """Test that callback exceptions don't break tick processing."""
         def bad_callback(symbol, timeframe, bar):
             raise Exception("Callback error!")

@@ -269,10 +269,15 @@ class OhlcvCache:
         self.maxlen[symbol][timeframe] = maxlen
         
         # Record the timestamp of the last seeded bar
+        # CRITICAL: Only set this on the FIRST seed (startup/initialization).
+        # Subsequent seeds (e.g. from PairSelector or Repairer) should NOT suppress callbacks
+        # for new bars, otherwise we lose live persistence.
         if bars:
             last_bar = bars[-1]
             if isinstance(last_bar, dict) and 'time' in last_bar:
-                self.last_seeded_keys[symbol][timeframe] = last_bar['time']
+                current_seed = self.last_seeded_keys[symbol][timeframe]
+                if current_seed is None:
+                    self.last_seeded_keys[symbol][timeframe] = last_bar['time']
     
     def get(self, symbol: str, timeframe: str):
         if timeframe not in self.cache.get(symbol, {}):
@@ -1739,7 +1744,13 @@ class HyperliquidAPI(MarketInterface):
                     }
                     candles = self.info.post("/info", {"type": "candleSnapshot", "req": req})
                 except Exception as e_raw:
-                     self.logger.warning(f"Failed raw candle fetch for {api_symbol}: {e_raw}")
+                     # Phase 12: Enhanced logging to debug HIP-3 failures
+                     error_details = str(e_raw)
+                     # Attempt to extract response text if it's a requests-like error
+                     if hasattr(e_raw, 'response') and hasattr(e_raw.response, 'text'):
+                         error_details += f" | Response: {e_raw.response.text}"
+                     
+                     self.logger.warning(f"Failed raw candle fetch for {api_symbol}: {error_details}")
                      raise # Re-raise for retry
             except Exception as e:
                 self.logger.error(f"Error fetching candles for {api_symbol}: {e}")
@@ -3719,6 +3730,19 @@ class HyperliquidAPI(MarketInterface):
         # Optimization: Manual lookup for common cases or inverted dict
         # Create inverted dict only once if possible, but for now linear scan is fine or manual check
         
+        # Check if symbol is a known API token name that maps to a SPOT internal name
+        # (e.g. input "UBTC" -> should become "BTC_SPOT")
+        # Phase 13: Prioritize known Perps to avoid collision (e.g. HYPE perp vs HYPE_SPOT)
+        # Check active universe from cache if available
+        # Cache stores (universe, asset_contexts) under "bulk_market_data"
+        cached_bulk = self.cache.get("bulk_market_data")
+        if cached_bulk and len(cached_bulk) > 0:
+             universe = cached_bulk[0]
+             # Fast check: If symbol is in the Perp universe, return as is.
+             for asset in universe:
+                 if asset['name'] == symbol:
+                     return symbol
+
         # Check if symbol is a known API token name that maps to a SPOT internal name
         # (e.g. input "UBTC" -> should become "BTC_SPOT")
         for internal, api_name in self.SPOT_INTERNAL_TO_API.items():

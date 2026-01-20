@@ -1168,13 +1168,16 @@ class DynamicPairSelector:
                             
                             # Validates that the spot asset itself passed _filter_assets (volume, price, etc.)
                             # We check if spot_internal is in the list of eligible assets
-                            is_eligible_spot = any(a.get('name') == spot_internal for a in eligible_assets)
                             
-                            if is_eligible_spot and spot_key not in self.backfill_symbols_in_queue:
-                                self.logger.info(f"  -> Queueing spot pair: {spot_internal}")
+                            # Phase 14: Linked spot assets are ALWAYS eligible if their Perp is subscribed.
+                            # We bypass strict eligibility (volume/price) because the user explicitly wants this data for the Perp strategy.
+                            # Check if already queued to avoid duplicates
+                            if spot_key not in self.backfill_symbols_in_queue:
+                                self.logger.info(f"  -> Queueing linked spot pair: {spot_internal} (Bypassing eligibility)")
                                 spot_asset = {'name': spot_internal, 'market_type': 'spot'}
                                 self.backfill_queue.append(spot_asset)
                                 self.backfill_symbols_in_queue.add(spot_key)
+
 
         self.logger.info(f"Queued total {len(self.backfill_queue)} assets (Perp/HIP-3 + Spot) for background fetching")
         
