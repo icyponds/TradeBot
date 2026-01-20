@@ -254,6 +254,8 @@ class OhlcvCache:
             "1d": 86400,
         }
         self.maxlen = defaultdict(lambda: defaultdict(lambda: 300))
+        # Track last seeded message time to prevent duplicate callbacks on startup
+        self.last_seeded_keys = defaultdict(lambda: defaultdict(lambda: None))
         # Callback for when a bar is complete (boundary crossed)
         self.on_bar_complete_callback: Optional[Callable] = None
     
@@ -265,6 +267,12 @@ class OhlcvCache:
             dq.append(bar)
         self.cache[symbol][timeframe] = dq
         self.maxlen[symbol][timeframe] = maxlen
+        
+        # Record the timestamp of the last seeded bar
+        if bars:
+            last_bar = bars[-1]
+            if isinstance(last_bar, dict) and 'time' in last_bar:
+                self.last_seeded_keys[symbol][timeframe] = last_bar['time']
     
     def get(self, symbol: str, timeframe: str):
         if timeframe not in self.cache.get(symbol, {}):
@@ -308,10 +316,16 @@ class OhlcvCache:
             # BOUNDARY CROSSED: Previous bar is complete
             if dq and self.on_bar_complete_callback:
                 completed_bar = dq[-1]
-                try:
-                    self.on_bar_complete_callback(symbol, timeframe, completed_bar)
-                except Exception as e:
-                    logging.getLogger(__name__).error(f"Callback error in cache: {e}")
+                
+                # Check if this bar was just seeded (prevent optimistic write loop)
+                seed_key = self.last_seeded_keys[symbol][timeframe]
+                should_skip = (seed_key is not None and completed_bar.get("time") == seed_key)
+                
+                if not should_skip:
+                    try:
+                        self.on_bar_complete_callback(symbol, timeframe, completed_bar)
+                    except Exception as e:
+                        logging.getLogger(__name__).error(f"Callback error in cache: {e}")
             
             # Create new bar
             bar = {"time": key, "open": price, "high": price, "low": price, "close": price, "volume": 0.0}
