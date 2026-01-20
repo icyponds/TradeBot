@@ -1820,7 +1820,8 @@ class StrategyManager:
         # Use market_api's _subscribed_symbols to avoid duplicate subscriptions
         # pair_selector may have already subscribed during initialization
         if symbol not in self.market_api._subscribed_symbols:
-            self.market_api.subscribe_symbol(symbol)
+            req_timeframes = self.get_required_timeframes()
+            self.market_api.subscribe_symbol(symbol, required_timeframes=req_timeframes)
             self.logger.info(f"Subscribed to real-time data for {symbol}")
     
     def _on_price_update(self, symbol: str, price: float, timestamp: float):

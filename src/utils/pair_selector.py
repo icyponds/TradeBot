@@ -777,9 +777,16 @@ class DynamicPairSelector:
                 self.logger.info(f"Selected {len(selected_pairs)} pairs for trading: {selected_pairs}")
                 
                 # Subscribe to WebSocket feeds for selected pairs (sync mode)
+                
+                # Fetch required timeframes
+                req_timeframes = ['15m', '1h'] # Safe default
+                if hasattr(self, 'strategy_manager') and self.strategy_manager:
+                    if hasattr(self.strategy_manager, 'get_required_timeframes'):
+                        req_timeframes = self.strategy_manager.get_required_timeframes()
+                
                 for symbol in selected_pairs:
                     if hasattr(self.market_api, 'subscribe_symbol'):
-                        self.market_api.subscribe_symbol(symbol)
+                        self.market_api.subscribe_symbol(symbol, required_timeframes=req_timeframes)
                         time.sleep(0.1)
             else:
                 self.logger.info("Pair selection queued for background processing")
@@ -1627,8 +1634,18 @@ class DynamicPairSelector:
             'composite_score': score,
         }
         # Subscribe to WebSocket for real-time data
+        # Subscribe to WebSocket for real-time data
         if hasattr(self.market_api, 'subscribe_symbol'):
-            self.market_api.subscribe_symbol(symbol)
+            # Fetch required timeframes
+            req_timeframes = ['15m', '1h'] # Safe default
+            if hasattr(self, 'strategy_manager') and self.strategy_manager:
+                if hasattr(self.strategy_manager, 'get_required_timeframes'):
+                    req_timeframes = self.strategy_manager.get_required_timeframes()
+            
+            # Pass to subscription to limit cache initialization
+            # Check if method supports required_timeframes (to match changed signature)
+            # Python methods handle new args fine if updated, but safe to just pass if we know it's our API
+            self.market_api.subscribe_symbol(symbol, required_timeframes=req_timeframes)
     
     def _remove_from_pool(self, symbol: str):
         """Remove a symbol from the trading pool. Must be called within _pairs_lock."""

@@ -62,26 +62,21 @@ class TestBackgroundPersistence:
         # Mock candles snapshot to return empty list (for _initialize_live_data)
         mock_api.info.candles_snapshot.return_value = []
         
-        # Subscribe
+        # Subscribe with NO explicit timeframes -> should default to empty
         mock_api.subscribe_symbol(symbol)
         
         # SIMULATE ASYNC WORKER:
-        # subscribe_symbol submits _async_init_worker to the mocked executor.
-        # We must manually run it to trigger the side effects (cache initialization).
         mock_api._persistence_executor.submit.assert_called()
         args, _ = mock_api._persistence_executor.submit.call_args
         worker_func = args[0]
         worker_args = args[1:]
         
-        # Run the worker synchronously
+        # Run synchronous
         worker_func(*worker_args)
         
-        # Should have initialized 5m, 15m, 1h, 4h, 1d
-        expected_tfs = ['5m', '15m', '1h', '4h', '1d']
+        # Should have initialized NOTHING (strictly opt-in)
         cache = mock_api.ohlcv_cache.cache[symbol]
-        
-        for tf in expected_tfs:
-            assert tf in cache, f"Timeframe {tf} was not initialized upon subscription"
+        assert len(cache) == 0, f"Should verify no persistence by default. Got: {list(cache.keys())}"
             
     def test_tick_updates_background_timeframes(self, mock_api):
         """
@@ -92,8 +87,9 @@ class TestBackgroundPersistence:
         # Mock candles snapshot
         mock_api.info.candles_snapshot.return_value = []
         
-        # Subscribe and run worker
-        mock_api.subscribe_symbol(symbol)
+        # Subscribe with explicit timeframe
+        explicit_tfs = ['15m']
+        mock_api.subscribe_symbol(symbol, required_timeframes=explicit_tfs)
         args, _ = mock_api._persistence_executor.submit.call_args
         args[0](*args[1:]) # Run worker
         
@@ -101,8 +97,8 @@ class TestBackgroundPersistence:
         price = 2000.0
         mock_api.update_ohlcv_from_tick(symbol, price=price, volume=1.0, ts=time.time())
         
-        # Check 5m cache
-        cache_5m = mock_api.ohlcv_cache.get(symbol, '5m')
-        assert cache_5m is not None, "5m cache should exist"
-        assert len(cache_5m) > 0, "5m cache should have received the tick data"
-        assert cache_5m[-1]['close'] == price
+        # Check explicit cache exists
+        cache_15m = mock_api.ohlcv_cache.get(symbol, '15m')
+        assert cache_15m is not None, "15m cache should exist"
+        assert len(cache_15m) > 0, "15m cache should have received the tick data"
+        assert cache_15m[-1]['close'] == price

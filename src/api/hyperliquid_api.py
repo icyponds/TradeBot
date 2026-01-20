@@ -1888,7 +1888,7 @@ class HyperliquidAPI(MarketInterface):
         except Exception as e:
             self.logger.warning(f"Failed to append current candle for {symbol}/{timeframe}: {e}")
     
-    def _initialize_live_data(self, symbol: str, api_symbol: str, max_retries: int = 2) -> bool:
+    def _initialize_live_data(self, symbol: str, api_symbol: str, required_timeframes: List[str] = None, max_retries: int = 2) -> bool:
         """
         Fetch in-progress candles for all timeframes and subscribe to WebSocket.
         If fails after retries, adds to pending queue for later retry.
@@ -1900,7 +1900,7 @@ class HyperliquidAPI(MarketInterface):
             # We just enable the WebSocket subscription here
             
             # Step 2: Finalize subscription (caches, active set)
-            self._finalize_subscription(symbol)
+            self._finalize_subscription(symbol, required_timeframes)
             
             # Step 3: Verify subscription is active
             if symbol in self._subscribed_symbols:
@@ -1917,11 +1917,11 @@ class HyperliquidAPI(MarketInterface):
         self.logger.warning(f"Deferred {symbol} initialization to retry queue")
         return False
     
-    def _async_init_worker(self, symbol: str, api_symbol: str):
+    def _async_init_worker(self, symbol: str, api_symbol: str, required_timeframes: List[str] = None):
         """Background worker for initializing live data."""
         try:
             self._initializing_symbols.add(symbol)
-            success = self._initialize_live_data(symbol, api_symbol)
+            success = self._initialize_live_data(symbol, api_symbol, required_timeframes)
             if not success:
                self.logger.debug(f"Async init failed for {symbol}, kept in pending.")
         except Exception as e:
@@ -3828,7 +3828,7 @@ class HyperliquidAPI(MarketInterface):
     # CALLBACKS & SUBSCRIPTIONS
     # =========================================================================
     
-    def subscribe_symbol(self, symbol: str):
+    def subscribe_symbol(self, symbol: str, required_timeframes: List[str] = None):
         """Subscribe to real-time data for a symbol (Non-Blocking)."""
         if symbol in self._subscribed_symbols or symbol in self._initializing_symbols:
              return
@@ -3862,15 +3862,17 @@ class HyperliquidAPI(MarketInterface):
                     self._pending_init_symbols.discard(symbol)
                     return
 
-        self._persistence_executor.submit(self._async_init_worker, symbol, api_symbol)
+        self._persistence_executor.submit(self._async_init_worker, symbol, api_symbol, required_timeframes)
 
-    def _finalize_subscription(self, symbol: str):
+    def _finalize_subscription(self, symbol: str, required_timeframes: List[str] = None):
         """Internal: Finalize subscription after data is ready."""
         self._subscribed_symbols.add(symbol)
         
-        # Initialize tracking for standard timeframes
-        standard_timeframes = ['5m', '15m', '1h', '4h', '1d']
-        for tf in standard_timeframes:
+        # Initialize tracking for required timeframes
+        # User requested NO fallback defaults. Strictly opt-in.
+        target_timeframes = required_timeframes if required_timeframes else []
+        
+        for tf in target_timeframes:
             self.ohlcv_cache.ensure_timeframe(symbol, tf, maxlen=1000)
             # Note: Explicit backfill removed here as it is handled by _initialize_live_data -> _append_current_candle
             # AND the persistence verification logic.

@@ -56,7 +56,7 @@ def mock_market_api():
     api.unsubscribe_symbol = MagicMock()
     api._subscribed_symbols = set()
     
-    def subscribe_side_effect(symbol):
+    def subscribe_side_effect(symbol, required_timeframes=None):
         api._subscribed_symbols.add(symbol)
     
     def unsubscribe_side_effect(symbol):
@@ -215,7 +215,7 @@ class TestSubscriptionState:
                 mock_score.return_value = 0.7
                 pair_selector._try_add_to_trading_pairs(asset)
         
-        mock_market_api.subscribe_symbol.assert_called_with('NEWASSET')
+        mock_market_api.subscribe_symbol.assert_called_with('NEWASSET', required_timeframes=['15m', '1h'])
         assert 'NEWASSET' in mock_market_api._subscribed_symbols
     
     def test_unsubscribe_called_on_evict(self, pair_selector, mock_market_api):
@@ -245,5 +245,5 @@ class TestSubscriptionState:
         assert 'OLD1' not in mock_market_api._subscribed_symbols
         
         # BETTER should be subscribed
-        mock_market_api.subscribe_symbol.assert_called_with('BETTER')
+        mock_market_api.subscribe_symbol.assert_called_with('BETTER', required_timeframes=['15m', '1h'])
         assert 'BETTER' in mock_market_api._subscribed_symbols

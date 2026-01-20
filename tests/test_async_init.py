@@ -75,8 +75,8 @@ class TestAsyncInit:
         api_client._async_init_worker(symbol, api_symbol)
         
         # Assert
-        # 1. Should call init
-        api_client._initialize_live_data.assert_called_with(symbol, api_symbol)
+        # Verify _initialize_live_data called
+        api_client._initialize_live_data.assert_called_with(symbol, api_symbol, None)
         
         # 2. Should NOT be in initializing set (cleaned up in finally)
         assert symbol not in api_client._initializing_symbols

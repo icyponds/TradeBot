@@ -515,13 +515,13 @@ class MockMarketAPI(MarketInterface):
 
         return {'universe': universe, 'meta': {'universe': universe}}
         
-    def subscribe_symbol(self, symbol):
+    def subscribe_symbol(self, symbol, required_timeframes=None):
         """Mock subscription."""
         self._subscribed_symbols.add(symbol)
         
-        # Parity with HyperliquidAPI: Initialize standard timeframes
-        standard_timeframes = ['5m', '15m', '1h', '4h', '1d']
-        for tf in standard_timeframes:
+        # Parity with HyperliquidAPI: Initialize required timeframes (defaults to empty/safe if None)
+        target_timeframes = required_timeframes if required_timeframes else ['15m', '1h', '1d']
+        for tf in target_timeframes:
             self.ohlcv_cache.ensure_timeframe(symbol, tf, maxlen=1000)
         
     def unsubscribe_symbol(self, symbol):
