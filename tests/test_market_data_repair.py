@@ -327,6 +327,26 @@ class TestDynamicTimeframes:
         # Should just have base '5m'
         assert result == [], f"Expected [], got {result}"
 
+    def test_get_required_timeframes_excludes_5m_when_unused(self):
+        """
+        Regression test for Phase 16:
+        Verify that 5m is NOT included when no 5m strategy is active.
+        """
+        mock_strategy_15m = MagicMock()
+        mock_strategy_15m.timeframe = '15m'
+        
+        mock_strategy_1h = MagicMock()
+        mock_strategy_1h.timeframe = '1h'
+        
+        mock_sm = MagicMock()
+        mock_sm.strategies = {'stat_arb_15m': mock_strategy_15m, 'stat_arb_1h': mock_strategy_1h}
+        
+        from src.strategies.strategy_manager import StrategyManager
+        result = StrategyManager.get_required_timeframes(mock_sm)
+        
+        # 5m should NOT be in the list since no 5m strategy is active
+        assert '5m' not in result, f"5m should not be in {result}"
+        assert result == ['15m', '1h'], f"Expected ['15m', '1h'], got {result}"
 
 class TestRepairerTimeframeParameter:
     """Tests for process_asset timeframe parameter."""

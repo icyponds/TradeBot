@@ -1212,7 +1212,7 @@ class StrategyManager:
         Aggregate required timeframes from all active strategies.
         
         Returns:
-            List of unique timeframes needed by the bot (always includes '5m' for tick aggregation).
+            List of unique timeframes needed by the bot (only those used by active strategies).
         """
         timeframes = set()  # Start empty, only add what strategies need
         for strategy in self.strategies.values():
@@ -1922,10 +1922,10 @@ class StrategyManager:
             
             current_price = market_data['current_price']
             
-            # Fetch data for all timeframes
+            # Fetch data for all timeframes required by active strategies
             ohlcv_dict = {}
-            # Standard set of timeframes to fetch
-            target_timeframes = ['5m', '15m', '1h', '4h', '1d']
+            # Use dynamic timeframes instead of hardcoded list
+            target_timeframes = self.get_required_timeframes()
             
             has_sufficient_data = False
             for tf in target_timeframes:
