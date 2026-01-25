@@ -369,14 +369,35 @@ class ExecutionEngine:
             # Determine market type from symbol
             market_type = 'spot' if symbol.endswith('_SPOT') else 'perp'
             
-            order_result = self.market_api.execute_order(
-                symbol=symbol,
-                side=close_side,
-                size=position.size,
-                reduce_only=True,
-                urgency=urgency,
-                market_type=market_type
-            )
+            # CRITICAL: Retry loop for close orders - never give up easily
+            max_attempts = 5
+            order_result = None
+            
+            for attempt in range(max_attempts):
+                try:
+                    order_result = self.market_api.execute_order(
+                        symbol=symbol,
+                        side=close_side,
+                        size=position.size,
+                        reduce_only=True,
+                        urgency=urgency,
+                        market_type=market_type
+                    )
+                    
+                    if order_result and order_result.get('filled_size', 0) > 0:
+                        break  # Success
+                        
+                except Exception as e:
+                    self.logger.warning(f"Close attempt {attempt+1}/{max_attempts} for {symbol}: {e}")
+                
+                if attempt < max_attempts - 1:
+                    wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s, 8s
+                    self.logger.info(f"Retrying close for {symbol} in {wait_time}s...")
+                    time.sleep(wait_time)
+            
+            if not order_result or order_result.get('filled_size', 0) == 0:
+                self.logger.error(f"🚨 FAILED to close {symbol} after {max_attempts} attempts!")
+                return False
             
             if order_result and order_result.get('filled_size', 0) > 0:
                 exit_price = order_result['avg_fill_price']

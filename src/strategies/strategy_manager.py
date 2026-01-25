@@ -1685,6 +1685,16 @@ class StrategyManager:
             # Check liquidation risks for multi-leg positions
             self._check_liquidation_risks()
             
+            # CRITICAL: Ensure ALL open position symbols are subscribed for price updates
+            # This prevents positions from being silently skipped due to missing price data
+            for symbol in list(self.positions.keys()):
+                if symbol not in self.market_api._subscribed_symbols:
+                    self.logger.info(f"🔌 Force-subscribing open position: {symbol}")
+                    try:
+                        self.market_api.subscribe_symbol(symbol)
+                    except Exception as e:
+                        self.logger.warning(f"Failed to subscribe {symbol}: {e}")
+            
             # Update position prices immediately to ensure latest data for monitoring
             self.update_position_prices()
 
@@ -3631,7 +3641,14 @@ class StrategyManager:
             
             for symbol, position in self.positions.items():
                 if not position.current_price:
-                    continue
+                    # CRITICAL: Never silently skip - force fetch price with retry
+                    self.logger.warning(f"⚠️ No price for open position {symbol}, forcing fetch...")
+                    price = self._force_fetch_price_with_retry(symbol)
+                    if price:
+                        position.current_price = price
+                    else:
+                        self.logger.error(f"🚨 CRITICAL: Cannot price position {symbol} after retries!")
+                        continue
                 
                 close_reason = self._should_close_position(position)
                 if close_reason:
@@ -3663,6 +3680,31 @@ class StrategyManager:
                     
         except Exception as e:
             self.logger.error(f"Error in position monitoring: {e}")
+    
+    def _force_fetch_price_with_retry(self, symbol: str, max_retries: int = 3) -> Optional[float]:
+        """
+        Force fetch price with exponential backoff retries.
+        
+        Args:
+            symbol: Trading symbol
+            max_retries: Maximum retry attempts
+            
+        Returns:
+            Price if successful, None otherwise
+        """
+        for attempt in range(max_retries):
+            try:
+                price = self.market_api.get_current_price(symbol)
+                if price and price > 0:
+                    return price
+            except Exception as e:
+                self.logger.warning(f"Price fetch attempt {attempt+1}/{max_retries} for {symbol}: {e}")
+            
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)  # Exponential backoff: 1s, 2s, 4s
+        
+        return None
+    
     
     def _should_close_position(self, position: Position) -> Optional[str]:
         """

@@ -68,6 +68,7 @@ def create_dashboard_app() -> Flask:
         """Get account and performance summary."""
         try:
             timeframe = request.args.get('timeframe', '7d')
+            logger.info(f"DASHBOARD: Summary request for timeframe='{timeframe}'")
             summary = _get_summary_data(timeframe)
             return jsonify({
                 'success': True,
@@ -473,11 +474,15 @@ def _get_summary_data(timeframe: str = '7d') -> Dict[str, Any]:
         start_time = None
         if timeframe == 'session':
             start_time = getattr(_strategy_manager, "session_start_time", None)
+            logger.info(f"DASHBOARD: Session start time resolved to: {start_time}")
         else:
             start_time = _get_start_time_for_frame(timeframe)
+            logger.info(f"DASHBOARD: Timeframe '{timeframe}' resolved to start_time: {start_time}")
 
         # Get realized and unrealized PnL
         total_realized_pnl = _get_total_realized_pnl(start_time)
+        logger.info(f"DASHBOARD: Realized PnL calculated: {total_realized_pnl}")
+
         total_unrealized_pnl = _get_total_unrealized_pnl()
         
         # Use API equity value directly (matches exchange UI "Total Balance")
@@ -688,10 +693,12 @@ def _get_total_realized_pnl(start_time: Optional[datetime] = None) -> float:
             
             if not start_time:
                  # Last resort fallback
+                 logger.warning("DASHBOARD: No start_time available for PnL, falling back to 7d recent trades")
                  trades = _strategy_manager.performance_tracker.db.get_recent_trades(7)
                  return sum(t.get('pnl', 0) or 0 for t in trades)
 
             trades = _strategy_manager.performance_tracker.db.get_trades_in_range(start_time, datetime.now())
+            logger.info(f"DASHBOARD: Found {len(trades)} trades since {start_time}")
             return sum(t.get('pnl', 0) or 0 for t in trades)
         except Exception as e:
             logger.debug(f"Error getting total realized PnL: {e}")
@@ -735,8 +742,10 @@ def _get_trade_stats(start_time: Optional[datetime] = None) -> Dict[str, Any]:
             
             if not start_time:
                 trades = _strategy_manager.performance_tracker.db.get_recent_trades(7)
+                logger.info(f"DASHBOARD: WinRate Fallback to 7d (No start_time): {len(trades)} trades")
             else:
                 trades = _strategy_manager.performance_tracker.db.get_trades_in_range(start_time, datetime.now())
+                logger.info(f"DASHBOARD: WinRate Trades since {start_time}: {len(trades)} trades")
                 
             if trades:
                 stats['total_trades'] = len(trades)
