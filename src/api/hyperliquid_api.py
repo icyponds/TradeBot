@@ -342,51 +342,6 @@ class OhlcvCache:
 
 
 # =============================================================================
-# RETRY DECORATOR
-# =============================================================================
-
-def with_retry(
-    max_attempts: int = 3,
-    base_delay: float = 0.5,
-    max_delay: float = 10.0,
-    exponential_base: float = 2.0,
-    retryable_exceptions: tuple = (Exception,)
-):
-    """
-    Decorator for automatic retry with exponential backoff.
-    
-    Args:
-        max_attempts: Maximum number of attempts
-        base_delay: Initial delay between retries
-        max_delay: Maximum delay between retries
-        exponential_base: Base for exponential backoff
-        retryable_exceptions: Exceptions that trigger retry
-    """
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            last_exception = None
-            
-            for attempt in range(max_attempts):
-                try:
-                    return func(*args, **kwargs)
-                except retryable_exceptions as e:
-                    last_exception = e
-                    
-                    if attempt < max_attempts - 1:
-                        delay = min(base_delay * (exponential_base ** attempt), max_delay)
-                        logging.getLogger(__name__).warning(
-                            f"Retry {attempt + 1}/{max_attempts} for {func.__name__}: {e}. "
-                            f"Waiting {delay:.2f}s"
-                        )
-                        time.sleep(delay)
-            
-            raise last_exception
-        return wrapper
-    return decorator
-
-
-# =============================================================================
 # ORDER TRACKER
 # =============================================================================
 
@@ -1322,7 +1277,6 @@ class HyperliquidAPI(MarketInterface):
         # Last resort: REST call
         return self._get_price_from_rest(symbol)
 
-    # @with_retry removed: Avoid double retry logic (outer decorator * inner _rate_limited_call)
     def _get_bulk_market_data(self) -> Optional[Tuple[List[Any], List[Any]]]:
         """
         Get market data for all assets, cached for short duration.
@@ -1368,7 +1322,6 @@ class HyperliquidAPI(MarketInterface):
         
         return None
     
-    # @with_retry removed: Avoid double retry logic
     def get_market_data(self, symbol: str, timeframe: str = "1m") -> Optional[Dict[str, Any]]:
         """
         Get comprehensive market data for a symbol.
@@ -1447,7 +1400,6 @@ class HyperliquidAPI(MarketInterface):
             'timestamp': datetime.now(),
         }
     
-    # @with_retry removed: Avoid double retry logic
     def get_asset_info(self) -> Optional[Dict[str, Any]]:
         """Get asset information for all perpetuals (Native + HIP-3 if enabled)."""
         cache_key = "asset_info"
@@ -1546,7 +1498,6 @@ class HyperliquidAPI(MarketInterface):
              
         return result
     
-    # @with_retry removed: Avoid double retry logic (outer decorator * inner _rate_limited_call)
     def get_ohlcv(self, symbol: str, timeframe: str = '1h', limit: int = 100, market_type: str = None) -> Optional[pd.DataFrame]:
         """
         Get OHLCV candlestick data with in-memory rolling cache.
@@ -2098,7 +2049,6 @@ class HyperliquidAPI(MarketInterface):
     # ACCOUNT & POSITIONS
     # =========================================================================
     
-    # @with_retry removed: Avoid double retry logic
     def get_account_balance(self) -> Optional[Dict[str, Any]]:
         """Get account balance and margin information."""
         cache_key = "account_balance"
@@ -2132,7 +2082,6 @@ class HyperliquidAPI(MarketInterface):
         # No need for _rate_limited_call here since _get_cached_user_state handles retries
         return _fetch()
     
-    # @with_retry removed: Avoid double retry logic
     def get_positions(self) -> List[Dict[str, Any]]:
         """Get current positions."""
         cache_key = "positions"
@@ -3232,7 +3181,6 @@ class HyperliquidAPI(MarketInterface):
             self.logger.error(f"Error getting order status: {e}")
             return None
     
-    # @with_retry removed: Avoid double retry logic
     def get_open_orders(self) -> List[Dict[str, Any]]:
         """Get all open orders."""
         def _fetch():
@@ -3356,7 +3304,6 @@ class HyperliquidAPI(MarketInterface):
     # =========================================================================
 
     
-    # @with_retry removed: Avoid double retry logic
     def get_spot_meta(self) -> Optional[Dict[str, Any]]:
         """Get spot market metadata."""
         try:
