@@ -56,3 +56,36 @@ for symbol, pos in self.positions.items():
 for pos_id, pos in self.multi_leg_positions.items():
     check_logic(pos)
 ```
+
+## 4. API Retry Logic
+
+### Rule: All API Calls Must Use `_rate_limited_call`
+
+All calls to `self.info.*` and `self.exchange.*` in `HyperliquidAPI` **MUST** be wrapped in `_rate_limited_call` to handle 429 rate limits and transient errors.
+
+### Backoff Pattern
+Use the **aggressive backoff** pattern consistently across all retry logic:
+```python
+backoff_steps = [2, 10, 30, 60]  # seconds
+```
+
+This provides ~2 minutes of total retry time for transient issues.
+
+### Implementation Pattern
+```python
+def some_api_method(self):
+    def _fetch():
+        return self.info.some_call()
+    
+    return self._rate_limited_call(_fetch)
+```
+
+### Do NOT:
+- Call `self.info.*` or `self.exchange.*` directly without retry wrapper
+- Use `2 ** attempt` exponential backoff (inconsistent timing)
+- Create new retry decorators - use `_rate_limited_call` only
+
+### Validation
+When adding new API methods, verify:
+1. All `self.info.*` and `self.exchange.*` calls are wrapped in `_rate_limited_call`
+2. Any local retry loops use `[2, 10, 30, 60]` backoff pattern
