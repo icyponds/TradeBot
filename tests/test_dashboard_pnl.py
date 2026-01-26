@@ -14,20 +14,20 @@ def mock_market_api():
         yield mock_api
 
 def test_get_leg_current_price_perp(mock_market_api):
-    mock_market_api.get_current_price.return_value = 100.0
+    mock_market_api.get_cached_price.return_value = 100.0
     price = _get_leg_current_price('BTC', 'perp')
     assert price == 100.0
-    mock_market_api.get_current_price.assert_called_with('BTC')
+    mock_market_api.get_cached_price.assert_called_with('BTC')
 
 def test_get_leg_current_price_spot(mock_market_api):
     # Case 1: Resolves via get_spot_api_name
     mock_market_api.get_spot_api_name.return_value = '@109' # UBTC(Spot)
-    mock_market_api.get_current_price.return_value = 100.0
+    mock_market_api.get_cached_price.return_value = 100.0
     
     price = _get_leg_current_price('UBTC', 'spot')
     assert price == 100.0
     mock_market_api.get_spot_api_name.assert_called_with('UBTC')
-    mock_market_api.get_current_price.assert_called_with('@109')
+    mock_market_api.get_cached_price.assert_called_with('@109')
 
 def test_format_multi_leg_position_pnl_calculation(mock_market_api):
     # Setup mock legs

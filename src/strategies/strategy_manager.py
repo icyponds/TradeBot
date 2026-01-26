@@ -3524,19 +3524,34 @@ class StrategyManager:
                 self.logger.error(f"Error checking startup exit for {symbol}: {e}")
     
     def update_position_prices(self):
-        """Update current prices for all open positions (single-leg and multi-leg)."""
+        """Update current prices and margin info for all open positions."""
+        now = time.time()
+        
         # Update single-leg positions
         for symbol, position in self.positions.items():
             current_price = self.market_api.get_current_price(symbol)
             if current_price:
                 position.current_price = current_price
+            
+            # Cache margin info periodically (every 30s per position)
+            last_margin_update = getattr(position, '_last_margin_update', 0)
+            if now - last_margin_update > 30:
+                try:
+                    margin_info = self.market_api.get_position_margin_info(symbol)
+                    if margin_info:
+                        position.liquidation_price = margin_info.get('liquidation_price')
+                        position.margin_used = margin_info.get('margin_used')
+                        position._last_margin_update = now
+                except Exception as e:
+                    self.logger.debug(f"Error caching margin info for {symbol}: {e}")
         
-        # Update multi-leg positions - use the position's current_prices dict
+        # Update multi-leg positions
         for position_id, position in self.multi_leg_positions.items():
             for leg in position.legs:
                 leg_price = self._get_leg_price(leg.symbol, leg.market_type)
                 if leg_price:
                     position.current_prices[leg.symbol] = leg_price
+                    leg.current_price = leg_price  # Cache on leg object for dashboard
     
     def get_positions_summary(self) -> Dict[str, Any]:
         """Get a summary of all open positions with PnL."""

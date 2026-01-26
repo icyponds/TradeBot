@@ -1276,6 +1276,30 @@ class HyperliquidAPI(MarketInterface):
         
         # Last resort: REST call
         return self._get_price_from_rest(symbol)
+    
+    def get_cached_price(self, symbol: str) -> Optional[float]:
+        """
+        Get price from local cache only (no API fallback).
+        
+        Used by dashboard to avoid API rate limits. Returns None if not cached.
+        Prices come from:
+        1. WebSocket allMids subscription (updated every tick)
+        2. Last known price from _price_data
+        
+        Returns:
+            Current price if cached, None otherwise
+        """
+        # Try WebSocket data (no staleness check - dashboard accepts slightly stale data)
+        with self._data_lock:
+            if symbol in self._price_data and self._price_data[symbol]:
+                latest = self._price_data[symbol][-1]
+                return latest['price']
+        
+        # Try allMids cache (from WebSocket subscription)
+        if hasattr(self, '_all_mids_cache') and symbol in self._all_mids_cache:
+            return float(self._all_mids_cache[symbol])
+        
+        return None
 
     def _get_bulk_market_data(self) -> Optional[Tuple[List[Any], List[Any]]]:
         """

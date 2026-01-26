@@ -303,17 +303,9 @@ def _format_position(position) -> Dict[str, Any]:
     highest_price = getattr(position, 'highest_price', None)
     lowest_price = getattr(position, 'lowest_price', None)
     
-    # Get liquidation price and margin from API
-    liquidation_price = None
-    margin_used = None
-    if _strategy_manager and _strategy_manager.market_api:
-        try:
-            margin_info = _strategy_manager.market_api.get_position_margin_info(position.symbol)
-            if margin_info:
-                liquidation_price = margin_info.get('liquidation_price')
-                margin_used = margin_info.get('margin_used')
-        except Exception as e:
-            logger.debug(f"Error getting margin info for {position.symbol}: {e}")
+    # Get liquidation price and margin from cached position attributes (no API calls)
+    liquidation_price = getattr(position, 'liquidation_price', None)
+    margin_used = getattr(position, 'margin_used', None)
     
     return {
         'symbol': position.symbol,
@@ -579,16 +571,16 @@ def _get_strategies_data() -> List[Dict[str, Any]]:
 
 
 def _get_current_prices(symbols: List[str]) -> Dict[str, float]:
-    """Get current prices for symbols."""
+    """Get current prices from local cache only (no API calls)."""
     prices = {}
     if _market_api is not None:
         for symbol in symbols:
             try:
-                price = _market_api.get_current_price(symbol)
+                price = _market_api.get_cached_price(symbol)
                 if price:
                     prices[symbol] = price
             except Exception as e:
-                logger.debug(f"Error getting current price for {symbol}: {e}")
+                logger.debug(f"Error getting cached price for {symbol}: {e}")
     return prices
 
 
@@ -609,30 +601,24 @@ def _calculate_pnl(pos: Dict) -> Optional[float]:
 
 
 def _get_leg_current_price(symbol: str, market_type: str) -> Optional[float]:
-    """Get current price for a leg, handling spot vs perp."""
+    """Get current price for a leg from cache (no API calls)."""
     if _market_api is None:
         return None
         
     try:
         if market_type == 'spot':
-            # For spot, we need the API name (e.g. @109) or get_spot_token_for_perp if we only have base
-            # If symbol contains '/', split it.
+            # For spot, try the API name first
             base = symbol.split('/')[0] if '/' in symbol else symbol
-            
-            # Try getting spot API name
             spot_api_name = _market_api.get_spot_api_name(base)
             if spot_api_name:
-                return _market_api.get_current_price(spot_api_name)
-            
-            # Fallback: try raw symbol or exchange method
-            return _market_api.get_current_price(symbol)
-            
+                return _market_api.get_cached_price(spot_api_name)
+            return _market_api.get_cached_price(symbol)
         else:
             # Perp/Hip3
-            return _market_api.get_current_price(symbol)
+            return _market_api.get_cached_price(symbol)
             
     except Exception as e:
-        logger.debug(f"Error getting price for {symbol}: {e}")
+        logger.debug(f"Error getting cached price for {symbol}: {e}")
         return None
 
 
@@ -706,23 +692,28 @@ def _get_total_realized_pnl(start_time: Optional[datetime] = None) -> float:
 
 
 def _get_total_unrealized_pnl() -> float:
-    """Get total unrealized PnL from open positions."""
+    """Get total unrealized PnL from position objects (no API calls)."""
     total = 0.0
     if _strategy_manager is not None:
-        # Single-leg positions
+        # Single-leg: use pre-calculated PnL
         for symbol, position in _strategy_manager.positions.items():
             if position.unrealized_pnl is not None:
                 total += position.unrealized_pnl
         
-        # Multi-leg positions
+        # Multi-leg: use pre-calculated PnL from position object or cached leg prices
         for pos_id, multi_pos in _strategy_manager.multi_leg_positions.items():
-            for leg in multi_pos.legs:
-                current_price = _get_leg_current_price(leg.symbol, leg.market_type)
-                if current_price:
-                    if leg.side == 'long':
-                        total += (current_price - leg.entry_price) * leg.size
-                    else:
-                        total += (leg.entry_price - current_price) * leg.size
+            # First try the position's own unrealized_pnl if available
+            if hasattr(multi_pos, 'unrealized_pnl') and multi_pos.unrealized_pnl is not None:
+                total += multi_pos.unrealized_pnl
+            else:
+                # Fallback: calculate from cached prices (still no API calls)
+                for leg in multi_pos.legs:
+                    current_price = getattr(leg, 'current_price', None) or _get_leg_current_price(leg.symbol, leg.market_type)
+                    if current_price:
+                        if leg.side == 'long':
+                            total += (current_price - leg.entry_price) * leg.size
+                        else:
+                            total += (leg.entry_price - current_price) * leg.size
     return total
 
 
