@@ -1274,9 +1274,12 @@ class HyperliquidAPI(MarketInterface):
 
     
     def test_connection(self) -> bool:
-        """Test API connection."""
+        """Test API connection with retry logic."""
+        def _fetch():
+            return self.info.meta()
+        
         try:
-            meta = self.info.meta()
+            meta = self._rate_limited_call(_fetch)
             if meta and 'universe' in meta:
                 self.logger.info("API connection test successful")
                 return True
@@ -1304,8 +1307,11 @@ class HyperliquidAPI(MarketInterface):
                     return latest['price']
         
         # Fall back to SDK's allMids (also uses WebSocket internally)
+        def _fetch():
+            return self.info.all_mids()
+        
         try:
-            all_mids = self.info.all_mids()
+            all_mids = self._rate_limited_call(_fetch)
             if symbol in all_mids:
                 return float(all_mids[symbol])
         except Exception as e:
@@ -2069,7 +2075,9 @@ class HyperliquidAPI(MarketInterface):
                     is_cross = False
             
             self.logger.info(f"Updating leverage for {symbol} to {leverage}x (Cross: {is_cross})")
-            result = self.exchange.update_leverage(leverage, symbol, is_cross)
+            def _update():
+                return self.exchange.update_leverage(leverage, symbol, is_cross)
+            result = self._rate_limited_call(_update)
             
             if result.get('status') == 'ok':
                 self.logger.info(f"Successfully updated leverage for {symbol}")
@@ -2214,8 +2222,11 @@ class HyperliquidAPI(MarketInterface):
     
     def get_spot_balance(self, token: str = "USDC") -> float:
         """Get balance of a specific token in spot account."""
+        def _fetch():
+            return self.info.spot_user_state(self.public_account_address)
+        
         try:
-            spot_state = self.info.spot_user_state(self.public_account_address)
+            spot_state = self._rate_limited_call(_fetch)
             for balance in spot_state.get('balances', []):
                 if balance.get('coin') == token:
                     return float(balance.get('total', 0))
@@ -2226,8 +2237,11 @@ class HyperliquidAPI(MarketInterface):
     
     def get_perp_balance(self) -> Dict[str, float]:
         """Get perp account balance and margin info."""
+        def _fetch():
+            return self.info.user_state(self.public_account_address)
+        
         try:
-            user_state = self.info.user_state(self.public_account_address)
+            user_state = self._rate_limited_call(_fetch)
             margin_summary = user_state.get('marginSummary', {})
             
             return {
@@ -2262,7 +2276,9 @@ class HyperliquidAPI(MarketInterface):
             # Round to 6 decimals (USDC precision) to avoid API errors
             amount = round(amount, 6)
             self.logger.info(f"Transferring ${amount:.6f} USDC from spot to perp")
-            result = self.exchange.usd_class_transfer(amount, to_perp=True)
+            def _transfer():
+                return self.exchange.usd_class_transfer(amount, to_perp=True)
+            result = self._rate_limited_call(_transfer)
             
             if result.get('status') == 'ok':
                 self.logger.info(f"Successfully transferred ${amount:.6f} to perp account")
@@ -2297,7 +2313,9 @@ class HyperliquidAPI(MarketInterface):
             # Round to 6 decimals (USDC precision) to avoid API errors
             amount = round(amount, 6)
             self.logger.info(f"Transferring ${amount:.6f} USDC from perp to spot")
-            result = self.exchange.usd_class_transfer(amount, to_perp=False)
+            def _transfer():
+                return self.exchange.usd_class_transfer(amount, to_perp=False)
+            result = self._rate_limited_call(_transfer)
             
             if result.get('status') == 'ok':
                 self.logger.info(f"Successfully transferred ${amount:.2f} to spot account")
@@ -2329,7 +2347,9 @@ class HyperliquidAPI(MarketInterface):
         
         try:
             self.logger.info(f"Adding ${amount:.2f} margin to {symbol} position")
-            result = self.exchange.update_isolated_margin(amount, symbol)
+            def _update():
+                return self.exchange.update_isolated_margin(amount, symbol)
+            result = self._rate_limited_call(_update)
             
             if result.get('status') == 'ok':
                 self.logger.info(f"Successfully updated margin for {symbol}")
