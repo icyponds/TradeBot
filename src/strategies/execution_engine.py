@@ -378,7 +378,7 @@ class ExecutionEngine:
                     order_result = self.market_api.execute_order(
                         symbol=symbol,
                         side=close_side,
-                        size=position.size,
+                        size=abs(position.size),  # Safety: ensure positive size
                         reduce_only=True,
                         urgency=urgency,
                         market_type=market_type

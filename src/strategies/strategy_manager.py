@@ -562,6 +562,25 @@ class StrategyManager:
                 
                 local_size = float(local_pos.size)
                 exch_size = float(exch_pos.get('size', 0))
+                local_side = local_pos.side
+                # Exchange uses 'szi' where positive = long, negative = short
+                exch_szi = float(exch_pos.get('szi', exch_pos.get('size', 0)))
+                exch_side = 'long' if exch_szi > 0 else 'short'
+                
+                # Check for SIDE mismatch first (critical issue)
+                if local_side != exch_side:
+                    changes_made = True
+                    self.logger.error(f"🚨 SIDE MISMATCH for {symbol}: DB={local_side} vs Exch={exch_side}")
+                    
+                    # Correct the local position side in memory
+                    local_pos.side = exch_side
+                    
+                    # Persist the corrected side to DB
+                    try:
+                        self.execution_engine._persist_position(local_pos)
+                        self.logger.info(f"Corrected {symbol} side in DB to {exch_side}")
+                    except Exception as e:
+                        self.logger.error(f"Error persisting corrected side for {symbol}: {e}")
                 
                 # Tolerance for float comparison
                 if abs(local_size - exch_size) > 0.0001:

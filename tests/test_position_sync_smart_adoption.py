@@ -127,5 +127,36 @@ class TestPositionSyncSmartAdoption(unittest.TestCase):
         # 4. Position persisted atomically via _persist_position
         self.manager.execution_engine._persist_position.assert_called()
 
+    def test_side_mismatch_detection_and_correction(self):
+        """Test that side mismatch between DB and exchange is detected and corrected."""
+        # Setup: Exchange has LONG (szi > 0), DB has SHORT
+        exchange_pos = [{'symbol': 'BTC', 'size': 1.0, 'szi': 1.0, 'side': 'LONG', 'entry_price': 50000.0}]
+        self.manager.market_api.get_positions.return_value = exchange_pos
+        
+        # DB has SHORT position (wrong side)
+        local_pos = Position(
+            symbol='BTC', side='short', size=1.0, entry_price=50000.0,
+            entry_time=datetime.now(), strategy='test', capital_at_risk=1000.0
+        )
+        self.manager.execution_engine.positions = {'BTC': local_pos}
+        
+        # Mock DB to return BTC
+        mock_db = MagicMock()
+        mock_db.get_all_live_position_symbols.return_value = ['BTC']
+        self.manager.performance_tracker.db = mock_db
+        
+        # Act
+        self.manager.sync_positions_with_exchange()
+        
+        # Assert
+        # 1. Side should be corrected to 'long'
+        self.assertEqual(local_pos.side, 'long')
+        
+        # 2. Error logged for side mismatch
+        self.manager.logger.error.assert_called()
+        
+        # 3. Position persisted with corrected side
+        self.manager.execution_engine._persist_position.assert_called()
+
 if __name__ == '__main__':
     unittest.main()
