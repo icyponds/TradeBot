@@ -944,7 +944,9 @@ class HyperliquidAPI(MarketInterface):
                     break
                 except Exception as e:
                     if "429" in str(e) and attempt < max_retries - 1:
-                        wait_time = 2 ** (attempt + 1)
+                        # Aggressive backoff: 2s, 10s, 30s, 60s
+                        backoff_steps = [2, 10, 30, 60]
+                        wait_time = backoff_steps[min(attempt, len(backoff_steps)-1)]
                         self.logger.warning(f"SDK Init 429 (attempt {attempt+1}/{max_retries}). Waiting {wait_time}s...")
                         time.sleep(wait_time)
                     else:

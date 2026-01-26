@@ -3806,7 +3806,9 @@ class StrategyManager:
                 self.logger.warning(f"Price fetch attempt {attempt+1}/{max_retries} for {symbol}: {e}")
             
             if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)  # Exponential backoff: 1s, 2s, 4s
+                # Aggressive backoff: 2s, 10s, 30s
+                backoff_steps = [2, 10, 30]
+                time.sleep(backoff_steps[min(attempt, len(backoff_steps)-1)])
         
         return None
     

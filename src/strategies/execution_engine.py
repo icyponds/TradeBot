@@ -391,7 +391,9 @@ class ExecutionEngine:
                     self.logger.warning(f"Close attempt {attempt+1}/{max_attempts} for {symbol}: {e}")
                 
                 if attempt < max_attempts - 1:
-                    wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s, 8s
+                    # Aggressive backoff: 2s, 10s, 30s, 60s
+                    backoff_steps = [2, 10, 30, 60]
+                    wait_time = backoff_steps[min(attempt, len(backoff_steps)-1)]
                     self.logger.info(f"Retrying close for {symbol} in {wait_time}s...")
                     time.sleep(wait_time)
             
