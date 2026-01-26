@@ -1343,16 +1343,21 @@ class ExecutionEngine:
                         # Reconstruct from DB format + metadata
                         symbol = pos_data['symbol']
                         
+                        # Normalize size and capital_at_risk to positive
+                        # Size should always be positive; 'side' indicates direction
+                        raw_size = pos_data['size']
+                        raw_capital = metadata.get('capital_at_risk', 0.0) or 0.0
+                        
                         position = Position(
                             symbol=symbol,
                             side=pos_data['side'],
-                            size=pos_data['size'],
+                            size=abs(raw_size),  # Always positive
                             entry_price=pos_data['entry_price'],
                             entry_time=entry_time,
                             strategy=pos_data['strategy'],
                             stop_loss=pos_data.get('stop_loss'),
                             take_profit=pos_data.get('take_profit'),
-                            capital_at_risk=metadata.get('capital_at_risk', 0.0),
+                            capital_at_risk=abs(raw_capital),  # Always positive
                             leverage=pos_data.get('leverage'),
                             order_id=pos_data.get('order_id'),  # Exchange OID
                             

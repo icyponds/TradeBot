@@ -2691,9 +2691,9 @@ class HyperliquidAPI(MarketInterface):
             
             remaining_size = round(size, sz_decimals)
             
-            # Validate minimum order value ($10)
+            # Validate minimum order value ($10) - but allow reduce_only to close dust positions
             order_value = remaining_size * current_price
-            if order_value < 10.0:
+            if order_value < 10.0 and not reduce_only:
                 self.logger.error(f"Order value ${order_value:.2f} below minimum $10")
                 return None
             
@@ -2986,9 +2986,9 @@ class HyperliquidAPI(MarketInterface):
                 self.logger.error(f"Cannot place order: no price for {symbol}")
                 return None
             
-            # Validate minimum order value ($10)
+            # Validate minimum order value ($10) - but allow reduce_only to close dust positions
             order_value = rounded_size * current_price
-            if order_value < 10.0:
+            if order_value < 10.0 and not reduce_only:
                 self.logger.error(f"Order value ${order_value:.2f} below minimum $10")
                 return None
             

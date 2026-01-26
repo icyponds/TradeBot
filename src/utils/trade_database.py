@@ -981,7 +981,7 @@ class TradeDatabase:
 
     def get_all_live_position_symbols(self) -> List[str]:
         """
-        Get symbols of all active single-leg positions.
+        Get symbols of all active positions (single-leg and multi-leg).
         
         Used by sync_positions_with_exchange to compare DB state against Exchange.
         Returns symbols only (not full position data) for efficiency.

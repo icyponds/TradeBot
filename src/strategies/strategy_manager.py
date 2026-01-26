@@ -548,7 +548,16 @@ class StrategyManager:
             # --------------------------------------------
             common_symbols = [s for s in local_positions if s in exchange_symbols]
             for symbol in common_symbols:
-                local_pos = self.execution_engine.positions[symbol]
+                local_pos = self.execution_engine.positions.get(symbol)
+                if not local_pos:
+                    # Check if this is a multi-leg position parent (symbol matches a multi-leg position)
+                    is_multi_leg = any(symbol in [leg.symbol for leg in pos.legs] 
+                                       for pos in self.multi_leg_positions.values())
+                    if is_multi_leg:
+                        # Multi-leg positions are synced separately
+                        continue
+                    self.logger.warning(f"Symbol {symbol} in DB but not loaded in memory, skipping sync")
+                    continue
                 exch_pos = exchange_map[symbol]
                 
                 local_size = float(local_pos.size)
@@ -1466,6 +1475,9 @@ class StrategyManager:
         
         # Sync with exchange to clear any ghost positions (closed while bot was off)
         self.sync_positions_with_exchange()
+        
+        # Check if any loaded positions already meet TP/SL conditions
+        self.check_startup_exits()
         
         # Start trading loop
         self.is_running = True
@@ -3417,6 +3429,38 @@ class StrategyManager:
     def load_positions_from_db(self):
         """Load positions from database."""
         return self.execution_engine.load_positions_from_db()
+    
+    def check_startup_exits(self):
+        """
+        Check TP/SL for all loaded positions on startup.
+        
+        Ghost positions loaded from DB may already be past their TP/SL levels.
+        This ensures we close them immediately rather than waiting for the next monitoring cycle.
+        """
+        if not self.positions:
+            return
+        
+        positions_to_check = list(self.positions.items())  # Copy to avoid dict mutation during iteration
+        
+        for symbol, position in positions_to_check:
+            try:
+                # Get current price
+                price = self.market_api.get_current_price(symbol)
+                if not price:
+                    self.logger.warning(f"Cannot check startup exit for {symbol}: no price available")
+                    continue
+                
+                # Update position's current price
+                position.current_price = price
+                
+                # Check if exit conditions are met
+                close_reason = self._should_close_position(position)
+                if close_reason:
+                    self.logger.warning(f"🚨 Position {symbol} meets {close_reason} on startup (price=${price:.2f}), closing immediately...")
+                    self.close_position(symbol, close_reason)
+                    
+            except Exception as e:
+                self.logger.error(f"Error checking startup exit for {symbol}: {e}")
     
     def update_position_prices(self):
         """Update current prices for all open positions (single-leg and multi-leg)."""
