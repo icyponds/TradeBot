@@ -826,6 +826,22 @@ class StrategyManager:
             
         except Exception as e:
             self.logger.error(f"Error in position sync loop: {e}")
+    
+    def _refresh_dead_mans_switch_periodic(self):
+        """Refresh dead man's switch heartbeat every 15 seconds."""
+        try:
+            now = time.time()
+            # Refresh every 15 seconds
+            if now - getattr(self, 'last_heartbeat_refresh', 0) < 15:
+                return
+            
+            self.last_heartbeat_refresh = now
+            
+            if hasattr(self.market_api, 'refresh_dead_mans_switch'):
+                self.market_api.refresh_dead_mans_switch(30)  # 30 second timeout
+                
+        except Exception as e:
+            self.logger.error(f"Error refreshing dead man's switch: {e}")
 
     @property
     def positions(self):
@@ -1492,6 +1508,22 @@ class StrategyManager:
         # Check for orphan positions (strategies no longer enabled)
         self._check_startup_orphans()
         
+        # SAFETY: Cancel all open orders before sync (clean slate on restart)
+        if hasattr(self.market_api, 'cancel_all_orders'):
+            try:
+                cancelled = self.market_api.cancel_all_orders()
+                if cancelled > 0:
+                    self.logger.warning(f"🧹 Cancelled {cancelled} stale orders on startup")
+            except Exception as e:
+                self.logger.error(f"Failed to cancel orders on startup: {e}")
+        
+        # SAFETY: Enable dead man's switch (auto-cancel if bot crashes)
+        if hasattr(self.market_api, 'set_dead_mans_switch'):
+            try:
+                self.market_api.set_dead_mans_switch(30)  # 30 second timeout
+            except Exception as e:
+                self.logger.error(f"Failed to set dead man's switch: {e}")
+        
         # Sync with exchange to clear any ghost positions (closed while bot was off)
         self.sync_positions_with_exchange()
         
@@ -1539,6 +1571,13 @@ class StrategyManager:
                 self.close_all_positions("shutdown")
             except Exception as e:
                 self.logger.error(f"Error closing positions during stop: {e}")
+        
+        # SAFETY: Disable dead man's switch on graceful shutdown
+        if hasattr(self.market_api, 'disable_dead_mans_switch'):
+            try:
+                self.market_api.disable_dead_mans_switch()
+            except Exception as e:
+                self.logger.error(f"Failed to disable dead man's switch: {e}")
         
         # Stop market API (only if it has a stop method)
         if hasattr(self.market_api, 'stop'):
@@ -1842,6 +1881,9 @@ class StrategyManager:
             
                 # Sync positions with exchange every 5 minutes
                 self._sync_positions_periodic()
+                
+                # Refresh dead man's switch heartbeat every ~15 seconds
+                self._refresh_dead_mans_switch_periodic()
                 
                 # Wait for next execution cycle
                 # We always sleep here to throttle the loop and mimic interval-based execution

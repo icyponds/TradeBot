@@ -2525,7 +2525,7 @@ class HyperliquidAPI(MarketInterface):
     _ORDER_WALK_MAX_ATTEMPTS = 5  # Max price improvement attempts
     _ORDER_WALK_STEP_BPS = 20  # 0.2% price step per attempt (20 basis points)
     _ORDER_WALK_DELAY = 0.3  # Seconds between attempts
-    _INITIAL_SLIPPAGE_BPS = 10  # 0.1% initial slippage tolerance
+    _INITIAL_SLIPPAGE_BPS = 50  # 0.5% initial slippage tolerance (aggressive for IOC)
     _MAX_SLIPPAGE_BPS = 100  # 1% max slippage for aggressive fills
     
     def _resolve_market_info(
@@ -3269,9 +3269,70 @@ class HyperliquidAPI(MarketInterface):
         
         return cancelled
     
+    def set_dead_mans_switch(self, timeout_seconds: int = 30) -> bool:
+        """
+        Set a dead man's switch that auto-cancels all orders after timeout.
+        
+        This is a safety mechanism - if the bot crashes, all pending orders
+        will be cancelled by the exchange after the timeout period.
+        
+        Args:
+            timeout_seconds: Seconds until auto-cancel (0 to disable)
+            
+        Returns:
+            True if successful
+        """
+        if not self.exchange:
+            self.logger.error("Exchange client not initialized")
+            return False
+        
+        try:
+            # Calculate timeout timestamp (milliseconds)
+            timeout_ms = int((time.time() + timeout_seconds) * 1000) if timeout_seconds > 0 else None
+            
+            # Build the scheduleCancel action
+            action = {
+                "type": "scheduleCancel",
+                "time": timeout_ms
+            }
+            
+            nonce = int(time.time() * 1000)
+            
+            # Use the exchange's internal post method
+            response = self._rate_limited_call(
+                self.exchange.post,
+                "/exchange",
+                action,
+                nonce=nonce
+            )
+            
+            if timeout_seconds > 0:
+                self.logger.info(f"Dead man's switch set: auto-cancel in {timeout_seconds}s")
+            else:
+                self.logger.info("Dead man's switch disabled")
+            
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Failed to set dead man's switch: {e}")
+            return False
+    
+    def refresh_dead_mans_switch(self, timeout_seconds: int = 30) -> bool:
+        """
+        Refresh the dead man's switch heartbeat.
+        
+        Should be called periodically (e.g., every 15s for a 30s timeout).
+        """
+        return self.set_dead_mans_switch(timeout_seconds)
+    
+    def disable_dead_mans_switch(self) -> bool:
+        """Disable the dead man's switch (for graceful shutdown)."""
+        return self.set_dead_mans_switch(0)
+    
     # =========================================================================
     # SPOT TRADING
     # =========================================================================
+
     
     # @with_retry removed: Avoid double retry logic
     def get_spot_meta(self) -> Optional[Dict[str, Any]]:
