@@ -67,3 +67,33 @@ We set `MAX_POSITION_SIZE_PERCENTAGE` to **40%**.
 ### Why 40%?
 *   **Capital Efficiency**: Allows sufficiently large positions to realize ~2% - 3% risk on most standard setups.
 *   **Safety**: Prevents a single trade from consuming >40% of the portfolio (Concentration Risk), leaving room for parallel strategies.
+
+---
+
+## 4. Strategy Allocation & Capacity Constraints
+The bot allocates capital to strategies based on **Dynamic Weighting** (performance-based) but constrains them with **Strategy-Specific Caps**.
+
+### Design Decision: Granular vs. Global Control
+We intentionally use granular, strategy-specific caps rather than a single global cap.
+
+```python
+"strategy_weight_caps": {
+    "vol_breakout_1h": {"min": 0.05, "max": 0.20},  # Fragile strategy, strictly capped
+    "stat_arb_1h":     {"min": 0.05, "max": 0.40},  # Proven strategy, moderate cap
+    "csm_4h":          {"min": 0.10, "max": 1.00},  # Robust strategy, high capacity
+}
+```
+
+### Rationale
+Not all strategies are created equal. We differentiate based on:
+
+1.  **Capacity Variance**: 
+    *   **High Capacity**: Strategies like `Cross-Sectional Momentum` on major pairs can handle 100% of equity without slippage.
+    *   **Low Capacity**: Strategies like `Liquidation Hunter` on altcoins face severe slippage if sized too large. A global cap would starve the robust ones or oversize the fragile ones.
+
+2.  **Risk Profile (Luck vs. Skill)**:
+    *   Short-term strategies can have "lucky streaks" in specific regimes.
+    *   Strategy-specific caps act as a "sandbox" to prevent a fragile strategy from dominating the portfolio during a temporary lucky streak, protecting against the inevitable drawdown.
+
+3.  **Fee Churn**:
+    *   High-turnover strategies have thinner edges and higher fee drag. We explicitly cap them lower than low-turnover strategies.
