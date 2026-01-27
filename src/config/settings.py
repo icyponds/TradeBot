@@ -258,7 +258,7 @@ def load_config() -> Dict[str, Any]:
             # Volatility Targeting & Risk Management
             "risk_per_trade_pct": float(os.getenv("RISK_PER_TRADE_PCT", "1.5")),  # 1.5% Risk Budget (was 3.0%)
             "target_annual_volatility": float(os.getenv("TARGET_ANNUAL_VOLATILITY", "0.40")),  # 40% Target Vol
-            "fallback_stop_loss_pct": 0.05,
+            "fallback_stop_loss_pct": 0.08,  # Widened from 0.05 - ou_mean_reversion_15m was losing $165 on tight stops
             
             # Dynamic Leverage Constraints
             "min_leverage": float(os.getenv("LEVERAGE_MIN", "0.5")),  # Allow deleveraging for high vol
@@ -293,7 +293,8 @@ def load_config() -> Dict[str, Any]:
                 # Volatility Breakout (15m, 1h, 4h)
                 # vol_breakout_15m disabled due to poor performance (-$3135) - too much chop
                 # {"type": "volatility_breakout", "name": "vol_breakout_15m", "timeframe": "15m"},
-                {"type": "volatility_breakout", "name": "vol_breakout_1h", "timeframe": "1h"},
+                # vol_breakout_1h disabled due to poor performance (23.8% win rate, -$36 PnL, -0.6% ROC)
+                # {"type": "volatility_breakout", "name": "vol_breakout_1h", "timeframe": "1h"},
                 {"type": "volatility_breakout", "name": "vol_breakout_4h", "timeframe": "4h"},
                 
                 # Adaptive Grid (15m, 1h, 4h)
