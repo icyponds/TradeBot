@@ -908,19 +908,28 @@ class HyperliquidAPI(MarketInterface):
                         raise e
             self._ws_enabled = False
             
-            # Initialize Exchange client if credentials provided
+            # Initialize Exchange client if credentials provided (with retry for 429)
             self.exchange = None
             if self.private_key and self.wallet_address:
-                try:
-                    wallet = Account.from_key(self.private_key)
-                    self.exchange = Exchange(
-                        wallet=wallet,
-                        base_url=self.base_url,
-                        perp_dexs=self.perp_dexs if self.hip3_enabled else None
-                    )
-                    self.logger.info("Exchange client initialized")
-                except Exception as e:
-                    self.logger.warning(f"Exchange client init failed: {e}")
+                max_retries = 5
+                backoff_steps = [2, 10, 30, 60]
+                for attempt in range(max_retries):
+                    try:
+                        wallet = Account.from_key(self.private_key)
+                        self.exchange = Exchange(
+                            wallet=wallet,
+                            base_url=self.base_url,
+                            perp_dexs=self.perp_dexs if self.hip3_enabled else None
+                        )
+                        self.logger.info("Exchange client initialized")
+                        break
+                    except Exception as e:
+                        if "429" in str(e) and attempt < max_retries - 1:
+                            wait_time = backoff_steps[min(attempt, len(backoff_steps)-1)]
+                            self.logger.warning(f"Exchange Init 429 (attempt {attempt+1}/{max_retries}). Waiting {wait_time}s...")
+                            time.sleep(wait_time)
+                        else:
+                            self.logger.warning(f"Exchange client init failed: {e}")
             
         except Exception as e:
             self.logger.error(f"SDK initialization failed: {e}")
