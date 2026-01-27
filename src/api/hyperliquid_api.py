@@ -1396,7 +1396,9 @@ class HyperliquidAPI(MarketInterface):
                         try:
                             # Note: This is expensive if we have many dexes.
                             # Ideally we cache which symbol is on which dex.
-                            res = self.info.post("/info", {"type": "metaAndAssetCtxs", "dex": dex_name})
+                            def _fetch_dex_ctx():
+                                return self.info.post("/info", {"type": "metaAndAssetCtxs", "dex": dex_name})
+                            res = self._rate_limited_call(_fetch_dex_ctx)
                             if res and len(res) >= 2:
                                 u_hip3 = res[0]['universe']
                                 c_hip3 = res[1]
@@ -1510,7 +1512,9 @@ class HyperliquidAPI(MarketInterface):
                             
                             try:
                                 # Fetch DEX specific context
-                                res = self.info.post("/info", {"type": "metaAndAssetCtxs", "dex": dex_name})
+                                def _fetch_hip3_dex():
+                                    return self.info.post("/info", {"type": "metaAndAssetCtxs", "dex": dex_name})
+                                res = self._rate_limited_call(_fetch_hip3_dex)
                                 if res and len(res) >= 2:
                                     _process_assets(res[0]['universe'], res[1], dex_name=dex_name)
                             except Exception as dex_err:
@@ -1608,7 +1612,9 @@ class HyperliquidAPI(MarketInterface):
                             # Fetch only the gap
                             gap_start_ms = int(gap_start_dt.timestamp() * 1000)
                             self.logger.debug(f"Gap-fill for {symbol} {timeframe}: fetching from {gap_start_dt}")
-                            candles = self.info.candles_snapshot(api_symbol, timeframe, gap_start_ms, end_time)
+                            def _fetch_gap():
+                                return self.info.candles_snapshot(api_symbol, timeframe, gap_start_ms, end_time)
+                            candles = self._rate_limited_call(_fetch_gap)
                             if candles:
                                 # Filter for DB (Strictly Closed)
                                 candles_db = [c for c in candles if c['t'] + interval_ms <= end_time]
@@ -1659,8 +1665,10 @@ class HyperliquidAPI(MarketInterface):
                                 # Sanity check
                                 if backfill_end_ms > backfill_start_ms:
                                     try:
-                                        hist_candles = self.info.candles_snapshot(api_symbol, timeframe, 
-                                                                                backfill_start_ms, backfill_end_ms)
+                                        def _fetch_backfill():
+                                            return self.info.candles_snapshot(api_symbol, timeframe, 
+                                                                            backfill_start_ms, backfill_end_ms)
+                                        hist_candles = self._rate_limited_call(_fetch_backfill)
                                         
                                         # Filter strictly before earliest_ts to avoid dupes
                                         valid_candles = []
@@ -1723,7 +1731,9 @@ class HyperliquidAPI(MarketInterface):
             candles = []
             try:
                 # This uses info.name_to_coin map which might miss new HIP-3 assets
-                candles = self.info.candles_snapshot(api_symbol, timeframe, start_time, end_time)
+                def _fetch_candles():
+                    return self.info.candles_snapshot(api_symbol, timeframe, start_time, end_time)
+                candles = self._rate_limited_call(_fetch_candles)
             except KeyError:
                 # Fallback: Symbol not in SDK map, try raw API call
                 # HIP-3 assets are often queryable by their name directly
@@ -1734,7 +1744,9 @@ class HyperliquidAPI(MarketInterface):
                         "startTime": start_time, 
                         "endTime": end_time
                     }
-                    candles = self.info.post("/info", {"type": "candleSnapshot", "req": req})
+                    def _fetch_hip3():
+                        return self.info.post("/info", {"type": "candleSnapshot", "req": req})
+                    candles = self._rate_limited_call(_fetch_hip3)
                 except Exception as e_raw:
                      # Phase 12: Enhanced logging to debug HIP-3 failures
                      error_details = str(e_raw)
@@ -1743,10 +1755,10 @@ class HyperliquidAPI(MarketInterface):
                          error_details += f" | Response: {e_raw.response.text}"
                      
                      self.logger.warning(f"Failed raw candle fetch for {api_symbol}: {error_details}")
-                     raise # Re-raise for retry
+                     raise # Re-raise for outer handler
             except Exception as e:
                 self.logger.error(f"Error fetching candles for {api_symbol}: {e}")
-                raise # Re-raise to trigger _rate_limited_call retry logic
+                raise # Re-raise to caller
                 
             if not candles:
                 return None
@@ -3632,7 +3644,9 @@ class HyperliquidAPI(MarketInterface):
                         try:
                             # Use Info's internal post method to reuse config/session
                             # Payload must match what verified script used: {"dex": "name"}
-                            dex_meta_ctx = self.info.post("/info", {"type": "metaAndAssetCtxs", "dex": dex_name})
+                            def _fetch_dex_meta():
+                                return self.info.post("/info", {"type": "metaAndAssetCtxs", "dex": dex_name})
+                            dex_meta_ctx = self._rate_limited_call(_fetch_dex_meta)
                             
                             if len(dex_meta_ctx) >= 2:
                                 d_universe = dex_meta_ctx[0].get('universe', [])
