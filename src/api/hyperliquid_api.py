@@ -2214,7 +2214,7 @@ class HyperliquidAPI(MarketInterface):
         return self._rate_limited_call(_fetch)
     
     def get_positions(self) -> List[Dict[str, Any]]:
-        """Get current positions."""
+        """Get current positions across all DEXs (native + HIP-3)."""
         cache_key = "positions"
         cached = self.cache.get(cache_key)
         if cached is not None:
@@ -2222,6 +2222,7 @@ class HyperliquidAPI(MarketInterface):
         
         def _fetch():
             all_positions = []
+            failed_dexs = []
             
             # Determine lists of DEXs to query
             # HIP-3 (Spot/Hyperliquidity) support is now enabled by default.
@@ -2233,39 +2234,58 @@ class HyperliquidAPI(MarketInterface):
             # The SDK expects string dex names for user_state calls.
             
             for dex_name in dexs_to_query:
-                # Let exceptions bubble up to _rate_limited_call for proper retry on network error
-                # Pass the dex name explicitly. Native is "" (empty string).
-                user_state = self.info.user_state(self.public_account_address, dex=dex_name)
-                
-                for pos in user_state.get('assetPositions', []):
-                    position_data = pos.get('position', {})
-                    size = float(position_data.get('szi', 0))
+                try:
+                    # Pass the dex name explicitly. Native is "" (empty string).
+                    user_state = self.info.user_state(self.public_account_address, dex=dex_name)
                     
-                    if size != 0:
-                        coin = position_data.get('coin')
-                        symbol = coin
+                    for pos in user_state.get('assetPositions', []):
+                        position_data = pos.get('position', {})
+                        size = float(position_data.get('szi', 0))
                         
-                        # Handle HIP-3 Symbol Prefixing (e.g. 'Hypurr:PLTR')
-                        # If dex_name is present (not empty), it's a HIP-3 asset.
-                        # We use the dex_name as the prefix to disambiguate.
-                        # e.g. 'Hypurr' -> 'Hypurr:PLTR'
-                        
-                        # Check truthiness (empty string is falsy, which is correct for Native)
-                        # Also check if prefix is already applied (some SDK versions might?)
-                        if dex_name:
-                             if not coin.startswith(f"{dex_name}:"):
-                                 symbol = f"{dex_name}:{coin}"
-                        
-                        all_positions.append({
-                            'symbol': symbol,
-                            'size': size,
-                            'side': 'long' if size > 0 else 'short',
-                            'entry_price': float(position_data.get('entryPx', 0)),
-                            'mark_price': float(position_data.get('positionValue', 0)) / abs(size) if size != 0 else 0,
-                            'unrealized_pnl': float(position_data.get('unrealizedPnl', 0)),
-                            'leverage': position_data.get('leverage', {}),
-                        })
-
+                        if size != 0:
+                            coin = position_data.get('coin')
+                            symbol = coin
+                            
+                            # Handle HIP-3 Symbol Prefixing (e.g. 'Hypurr:PLTR')
+                            # If dex_name is present (not empty), it's a HIP-3 asset.
+                            # We use the dex_name as the prefix to disambiguate.
+                            # e.g. 'Hypurr' -> 'Hypurr:PLTR'
+                            
+                            # Check truthiness (empty string is falsy, which is correct for Native)
+                            # Also check if prefix is already applied (some SDK versions might?)
+                            if dex_name:
+                                 if not coin.startswith(f"{dex_name}:"):
+                                     symbol = f"{dex_name}:{coin}"
+                            
+                            all_positions.append({
+                                'symbol': symbol,
+                                'size': size,
+                                'side': 'long' if size > 0 else 'short',
+                                'entry_price': float(position_data.get('entryPx', 0)),
+                                'mark_price': float(position_data.get('positionValue', 0)) / abs(size) if size != 0 else 0,
+                                'unrealized_pnl': float(position_data.get('unrealizedPnl', 0)),
+                                'leverage': position_data.get('leverage', {}),
+                            })
+                except Exception as e:
+                    err_str = str(e)
+                    # Re-raise retryable errors (429, 5xx, connection issues) for _rate_limited_call to handle
+                    # This ensures transient failures get proper backoff/retry
+                    if any(code in err_str for code in ["429", "500", "502", "503"]):
+                        raise
+                    if any(pattern in err_str.lower() for pattern in [
+                        "connectionerror", "connection refused", "connection reset", "timeout"
+                    ]):
+                        raise
+                    
+                    # Log non-retryable errors but continue to get positions from other DEXs
+                    # This is critical for ghost position detection - partial data is better than none
+                    dex_label = dex_name if dex_name else "native"
+                    failed_dexs.append(dex_label)
+                    self.logger.warning(f"Failed to fetch positions for dex '{dex_label}' (non-retryable): {e}")
+            
+            # Log a summary warning if any DEXs failed - important for debugging ghost positions
+            if failed_dexs:
+                self.logger.warning(f"Position fetch incomplete - failed DEXs: {failed_dexs}. Ghost positions on these DEXs may be missed!")
             
             self.cache.set(cache_key, all_positions, ttl=self.cache_ttl_positions)
             return all_positions

@@ -464,6 +464,12 @@ class StrategyManager:
             # 2. Get local positions from DB (source of truth)
             local_positions = self.performance_tracker.db.get_all_live_position_symbols()
             
+            # Debug logging for position sync diagnostics
+            if exchange_symbols:
+                self.logger.debug(f"[Position Sync] Exchange positions: {sorted(exchange_symbols)}")
+            if local_positions:
+                self.logger.debug(f"[Position Sync] Local DB positions: {sorted(local_positions)}")
+            
             # 3. Handling Unrecorded Positions (Exchange but not Local)
             # ---------------------------------------------------------
             # Gather all symbols used in Multi-Leg positions
@@ -471,6 +477,9 @@ class StrategyManager:
             for pos in self.multi_leg_positions.values():
                 for leg in pos.legs:
                     multi_leg_symbols.add(leg.symbol)
+            
+            if multi_leg_symbols:
+                self.logger.debug(f"[Position Sync] Multi-leg symbols: {sorted(multi_leg_symbols)}")
 
             for symbol in exchange_symbols:
                 if symbol not in local_positions and symbol not in multi_leg_symbols:
@@ -481,17 +490,19 @@ class StrategyManager:
                     size = float(exch_pos.get('size', 0))
                     side = exch_pos.get('side', 'neutral').lower()
                     
-                    if size > 0:
-                        self.logger.warning(f"🚨 UNRECORDED position detected: {symbol} {side} {size}. Initiating immediate closure.")
+                    # Use abs(size) to catch both long (positive) and short (negative) positions
+                    if abs(size) > 0:
+                        self.logger.warning(f"🚨 UNRECORDED position detected: {symbol} {side} size={size}. Initiating immediate closure.")
                         
                         # Execute reduce-only market order to close
                         # Opposite side
                         close_side = 'sell' if side == 'long' else 'buy'
                         
+                        # Use absolute size for the close order
                         self.execution_engine.market_api.execute_order(
                             symbol=symbol,
                             side=close_side,
-                            size=size,
+                            size=abs(size),
                             reduce_only=True,
                             urgency='high'
                         )
@@ -2503,7 +2514,7 @@ class StrategyManager:
                     signal['signal_strength'] *= strategy_weight
                 
                 self.logger.info(f"Executing {strategy_name} trade for {symbol} (weight: {float(strategy_weight or 0):.2f})")
-                self._execute_trade(symbol, signal, current_price, strategy_name, ohlcv, timestamp=timestamp)
+                self._execute_trade(symbol, signal, current_price, strategy_name, ohlcv)
             else:
                 self.logger.info(f"Skipping {strategy_name} signal for {symbol} - conditions not met")
                 
