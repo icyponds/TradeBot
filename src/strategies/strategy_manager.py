@@ -1907,6 +1907,41 @@ class StrategyManager:
             self.market_api.subscribe_symbol(symbol, required_timeframes=req_timeframes)
             self.logger.info(f"Subscribed to real-time data for {symbol}")
     
+    
+    def _check_triggers_realtime(self, symbol: str, price: float):
+        """
+        Check for SL/TP triggers immediately on price update.
+        Called from WebSocket thread - must be fast and safe.
+        """
+        position = self.positions.get(symbol)
+        if not position:
+            return
+
+        exit_reason = None
+        
+        # Check Stop Loss
+        if position.stop_loss:
+            if (position.side == 'long' and price <= position.stop_loss) or \
+               (position.side == 'short' and price >= position.stop_loss):
+                exit_reason = "stop_loss_realtime"
+        
+        # Check Take Profit
+        if not exit_reason and position.take_profit:
+            if (position.side == 'long' and price >= position.take_profit) or \
+               (position.side == 'short' and price <= position.take_profit):
+                exit_reason = "take_profit_realtime"
+                
+        # Execute if triggered
+        if exit_reason:
+            self.logger.info(f"⚡ Real-time trigger for {symbol}: {exit_reason} (Price: {price})")
+            # Close position immediately
+            # Note: close_position is thread-safe enough (uses API lock + dict ops)
+            self.execution_engine.close_position(
+                symbol=symbol, 
+                reason=exit_reason,
+                urgency='high' # Use aggressive closing for triggered exits
+            )
+
     def _on_price_update(self, symbol: str, price: float, timestamp: float):
         """Handle real-time price updates."""
         old_price = self._last_prices.get(symbol)
@@ -1923,6 +1958,11 @@ class StrategyManager:
             if abs(price_change) > 1.0:  # Log significant price changes (>1%)
                 self.logger.info(f"Real-time price update for {symbol}: ${float(old_price or 0):.4f} → ${float(price or 0):.4f} ({float(price_change or 0):+.2f}%)")
         
+        # Real-time Trigger Check
+        # Immediately check for SL/TP execution without waiting for polling loop
+        if symbol in self.positions:
+            self._check_triggers_realtime(symbol, price)
+
         # Notify callbacks
         for callback in self._price_callbacks:
             try:

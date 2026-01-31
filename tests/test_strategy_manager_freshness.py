@@ -1,6 +1,7 @@
 import pytest
 from unittest.mock import MagicMock, patch
 from src.strategies.strategy_manager import StrategyManager
+from datetime import datetime
 
 class TestStrategyManagerFreshness:
     
@@ -58,3 +59,50 @@ class TestStrategyManagerFreshness:
         # Case 2: Global connection FRESH -> Should return True
         strategy_manager.market_api.health_monitor.is_ws_data_fresh.return_value = True
         assert strategy_manager._is_data_ready_for_symbol(symbol) is True
+
+    def test_realtime_trigger_execution(self, strategy_manager):
+        """Test that _on_price_update triggers immediate execution checks."""
+        symbol = "BTC"
+        
+        # Setup position with tight SL/TP
+        from src.models.trade import Position
+        position = Position(
+            symbol=symbol, 
+            side='long', 
+            size=1.0, 
+            entry_price=50000, 
+            current_price=50000, 
+            entry_time=datetime.now(),
+            strategy='test'
+        )
+        # Set TP/SL attributes directly as Position model fields might vary
+        position.stop_loss = 49000
+        position.take_profit = 51000
+        
+        strategy_manager.execution_engine.positions = {symbol: position}
+        
+        # Mock execution engine
+        strategy_manager.execution_engine.close_position = MagicMock()
+        
+        # Case 1: No trigger (Price inside range)
+        strategy_manager._on_price_update(symbol, 50500, 1234567890)
+        strategy_manager.execution_engine.close_position.assert_not_called()
+        
+        # Case 2: Stop Loss Trigger (Price drops to 48000)
+        strategy_manager._on_price_update(symbol, 48000, 1234567890)
+        strategy_manager.execution_engine.close_position.assert_called_with(
+            symbol=symbol, 
+            reason="stop_loss_realtime", 
+            urgency='high'
+        )
+        
+        # Reset mock
+        strategy_manager.execution_engine.close_position.reset_mock()
+        
+        # Case 3: Take Profit Trigger (Price rises to 52000)
+        strategy_manager._on_price_update(symbol, 52000, 1234567890)
+        strategy_manager.execution_engine.close_position.assert_called_with(
+            symbol=symbol, 
+            reason="take_profit_realtime", 
+            urgency='high'
+        )

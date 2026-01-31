@@ -787,9 +787,15 @@ class HyperliquidAPI(MarketInterface):
             config['api']['wallet_address']
         )
         
-        # HIP-3 configuration
+        # HIP-3 configuration (Hypurr/Spot-linked assets)
+        # Enabled by default to ensure all assets are visible.
+        # Calling code can still restrict using internal logic if needed, 
+        # but the API layer should be permissive.
+        self.hip3_enabled = True 
+        
+        # Determine PERP DEX indices (Native is 0, others are HIP-3)
+        # We will auto-discover these in _init_sdk_clients unless checking config for overrides
         hip3_config = config.get('hip3', {})
-        self.hip3_enabled = hip3_config.get('enabled', False)
         self.perp_dexs = hip3_config.get('perp_dexs', None)
         
         # Rate limiter configuration
@@ -881,9 +887,14 @@ class HyperliquidAPI(MarketInterface):
             from hyperliquid.exchange import Exchange
             from eth_account import Account
 
-            # Auto-discover HIP-3 dexes if enabled but not specified
-            if self.hip3_enabled and self.perp_dexs is None:
-                self.perp_dexs = self._discover_perp_dexs()
+            # Auto-discover HIP-3 dexes if enabled (always) but not specified
+            if self.perp_dexs is None:
+                try:
+                    self.perp_dexs = self._discover_perp_dexs()
+                    self.logger.info(f"Auto-discovered PERP DEX indices: {self.perp_dexs}")
+                except Exception as e:
+                    self.logger.warning(f"Failed to auto-discover PERP DEXs: {e}. Defaulting to native [0].")
+                    self.perp_dexs = [0]
             
             # Initialize Info client WITHOUT WebSocket first (fast, non-blocking)
             # WebSocket will be enabled when start() is called
@@ -894,7 +905,7 @@ class HyperliquidAPI(MarketInterface):
                     self.info = Info(
                         self.base_url,
                         skip_ws=True,  # Start without WebSocket for fast init
-                        perp_dexs=self.perp_dexs if self.hip3_enabled else None
+                        perp_dexs=self.perp_dexs
                     )
                     break
                 except Exception as e:
@@ -1265,10 +1276,24 @@ class HyperliquidAPI(MarketInterface):
         Uses WebSocket data if available, otherwise falls back to REST.
         """
         # Try WebSocket data first (real-time)
+        # Handle HIP-3 prefix (e.g. "1:TSLA" -> "TSLA")
+        clean_symbol = symbol
+        if ":" in symbol:
+            parts = symbol.split(":", 1)
+            if parts[0].isdigit():
+                clean_symbol = parts[1]
+
         with self._data_lock:
-            if symbol in self._price_data and self._price_data[symbol]:
-                latest = self._price_data[symbol][-1]
+            # Check for clean symbol (standard)
+            if clean_symbol in self._price_data and self._price_data[clean_symbol]:
+                latest = self._price_data[clean_symbol][-1]
                 # Only use if fresh (< 5 seconds old)
+                if time.time() - latest['timestamp'] < 5.0:
+                    return latest['price']
+            
+            # Fallback: check raw symbol if different (just in case)
+            if clean_symbol != symbol and symbol in self._price_data and self._price_data[symbol]:
+                latest = self._price_data[symbol][-1]
                 if time.time() - latest['timestamp'] < 5.0:
                     return latest['price']
         
@@ -1278,7 +1303,9 @@ class HyperliquidAPI(MarketInterface):
         
         try:
             all_mids = self._rate_limited_call(_fetch)
-            if symbol in all_mids:
+            if clean_symbol in all_mids:
+                return float(all_mids[clean_symbol])
+            if clean_symbol != symbol and symbol in all_mids:
                 return float(all_mids[symbol])
         except Exception as e:
             self.logger.debug(f"all_mids failed: {e}")
@@ -2102,30 +2129,72 @@ class HyperliquidAPI(MarketInterface):
             return cached
         
         def _fetch():
-            # Use cached user_state to reduce API calls and enable fallback
-            user_state = self._get_cached_user_state()
-            if not user_state:
-                self.logger.warning("Failed to get user_state for account balance")
-                return None
+            # Iterate through all discovered DEXs to aggregate balance
+            # HIP-3/Spot assets live in different contexts
+            dexs_to_query = self.perp_dexs if self.perp_dexs else [0]
+            if 0 not in dexs_to_query:
+                dexs_to_query = [0] + dexs_to_query
+
+            total_equity = 0.0
+            total_free_margin = 0.0 # Will calculate as Total Equity - Total Margin Used
+            total_used_margin = 0.0
+            total_unrealized_pnl = 0.0
             
-            margin_summary = user_state.get('marginSummary', {})
+            # Track main withdrawable to detect shared collateral vs segregated
+            main_withdrawable = 0.0
             
-            account_value = float(margin_summary.get('accountValue', 0))
-            total_margin_used = float(margin_summary.get('totalMarginUsed', 0))
-            
+            for i, dex_index in enumerate(dexs_to_query):
+                try:
+                    # Fetch state for this context
+                    # Note: We don't cache individual DEX calls here efficiently yet, 
+                    # but rate limiter handles them.
+                    user_state = self.info.user_state(self.public_account_address, dex=dex_index)
+                    
+                    margin_summary = user_state.get('marginSummary', {})
+                    account_value = float(margin_summary.get('accountValue', 0))
+                    used_margin = float(margin_summary.get('totalMarginUsed', 0))
+                    unrealized_pnl = float(margin_summary.get('totalUnrealizedPnl', 0))
+                    withdrawable = float(margin_summary.get('withdrawable', 0))
+                    
+                    if dex_index == 0:
+                        # Native Context (Baseline)
+                        total_equity += account_value
+                        main_withdrawable = withdrawable
+                    else:
+                        # Secondary Context (HIP-3 / Spot)
+                        
+                        # Logic: Account Value = Withdrawable + Margin + PnL
+                        # If 'withdrawable' matches Main (within epsilon), it's shared collateral.
+                        # We shouldn't count it twice.
+                        # If it's different (segregated), we count it.
+                        
+                        equity_contribution = account_value
+                        
+                        # Check for shared collateral (approx match)
+                        if abs(withdrawable - main_withdrawable) < 1.0: # $1 tolerance
+                            # Shared: Remove the cash component, keep Margin+PnL
+                            equity_contribution -= withdrawable
+                            
+                        total_equity += equity_contribution
+                    
+                    total_used_margin += used_margin
+                    total_unrealized_pnl += unrealized_pnl
+                    
+                except Exception as e:
+                    self.logger.warning(f"Failed to fetch balance for dex {dex_index}: {e}")
+
             result = {
                 'wallet_address': self.public_account_address,
-                'total_equity': account_value,
-                'free_margin': account_value - total_margin_used,
-                'used_margin': total_margin_used,
-                'unrealized_pnl': float(margin_summary.get('totalUnrealizedPnl', 0)),
+                'total_equity': total_equity,
+                'free_margin': total_equity - total_used_margin,
+                'used_margin': total_used_margin,
+                'unrealized_pnl': total_unrealized_pnl,
             }
             
             self.cache.set(cache_key, result, ttl=self.cache_ttl_positions)
             return result
         
-        # No need for _rate_limited_call here since _get_cached_user_state handles retries
-        return _fetch()
+        return self._rate_limited_call(_fetch)
     
     def get_positions(self) -> List[Dict[str, Any]]:
         """Get current positions."""
@@ -2138,12 +2207,18 @@ class HyperliquidAPI(MarketInterface):
             all_positions = []
             
             # Determine lists of DEXs to query
-            dexs_to_query = [''] # Default to Native only
-            if self.hip3_enabled and self.perp_dexs:
-                dexs_to_query = self.perp_dexs
-
+            # HIP-3 (Spot/Hyperliquidity) support is now enabled by default.
+            # We query all discovered DEX indices plus the native one index 0.
+            # dexs_to_query represents the indices to check.
+            
+            dexs_to_query = self.perp_dexs if self.perp_dexs else [0]
+            
+            # Ensure we are handling the format correctly. perp_dexs is usually list of ints.
+            # The API expects integer index for user_state calls.
+            
             for dex_index in dexs_to_query:
-                # Let exceptions bubble up to _rate_limited_call for proper retry
+                # Let exceptions bubble up to _rate_limited_call for proper retry on network error
+                # Pass the dex index explicitly. Native is index 0.
                 user_state = self.info.user_state(self.public_account_address, dex=dex_index)
                 
                 for pos in user_state.get('assetPositions', []):
@@ -2152,15 +2227,21 @@ class HyperliquidAPI(MarketInterface):
                     
                     if size != 0:
                         coin = position_data.get('coin')
+                        symbol = coin
                         
                         # Handle HIP-3 Symbol Prefixing (e.g. 'xyz:PLTR')
-                        # If dex_index is present, it's a HIP-3 asset
-                        # Check if coin already has prefix to avoid double-prefixing (e.g. 'xyz:xyz:PLTR')
-                        if dex_index and not coin.startswith(f"{dex_index}:"):
-                            symbol = f"{dex_index}:{coin}"
-                        else:
-                            symbol = coin
-                            
+                        # If dex_index is present (and not 0/empty), it's a HIP-3 asset.
+                        # We use the dex_index as the prefix to disambiguate.
+                        # e.g. 'xyz' -> 'xyz:PLTR'
+                        # e.g. 1 -> '1:TSLA' (if user configured indices manually or auto-discovery yielded ints)
+                        
+                        # Check truthiness (swallows 0 and empty string, which is correct for Native)
+                        # Also check if prefix is already applied (some SDK versions might?)
+                        if dex_index:
+                             prefix = str(dex_index)
+                             if not coin.startswith(f"{prefix}:"):
+                                 symbol = f"{prefix}:{coin}"
+                        
                         all_positions.append({
                             'symbol': symbol,
                             'size': size,
@@ -2170,6 +2251,7 @@ class HyperliquidAPI(MarketInterface):
                             'unrealized_pnl': float(position_data.get('unrealizedPnl', 0)),
                             'leverage': position_data.get('leverage', {}),
                         })
+
             
             self.cache.set(cache_key, all_positions, ttl=self.cache_ttl_positions)
             return all_positions
@@ -2620,14 +2702,21 @@ class HyperliquidAPI(MarketInterface):
                 }
             else:
                 # Perp or HIP-3 (both use same symbol format)
-                asset_info = self._get_asset_info_for_symbol(symbol)
-                price = self.get_current_price(symbol)
+                # Parse strip prefix for SDK (e.g. "1:TSLA" -> "TSLA") but keep original for display
+                clean_symbol = symbol
+                if ":" in symbol:
+                    parts = symbol.split(":", 1)
+                    if parts[0].isdigit():
+                        clean_symbol = parts[1]
+                
+                asset_info = self._get_asset_info_for_symbol(clean_symbol)
+                price = self.get_current_price(symbol) # This handles stripping internally now
                 
                 if not price:
                     return None
                 
                 return {
-                    'symbol': symbol,
+                    'symbol': clean_symbol, # Important: Pass stripped symbol to SDK
                     'display_symbol': symbol,
                     'price': price,
                     'sz_decimals': asset_info.get('szDecimals', 2) if asset_info else 2,
@@ -4017,9 +4106,17 @@ class HyperliquidAPI(MarketInterface):
     def _get_asset_info_for_symbol(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Get asset info for a specific symbol."""
         asset_info = self.get_asset_info()
+        
+        # Handle prefixes
+        clean_symbol = symbol
+        if ":" in symbol:
+            parts = symbol.split(":", 1)
+            if parts[0].isdigit():
+                clean_symbol = parts[1]
+
         if asset_info:
             for asset in asset_info.get('universe', []):
-                if asset['name'] == symbol:
+                if asset['name'] == clean_symbol:
                     return asset
         return None
     
