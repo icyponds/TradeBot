@@ -28,24 +28,25 @@ class TestPositionSyncSmartAdoption(unittest.TestCase):
             self.manager._find_closing_fill = MagicMock(return_value=(0.0, datetime.now(), "Unknown", 0.0))
 
     def test_unrecorded_position_immediate_close(self):
-        """Protocol 1: Unrecorded Position -> Immediate Close (Reduce-Only)."""
+        """Protocol 1: Unrecorded Position -> Immediate Close via ExecutionEngine."""
         # Setup: Exchange has BTC, DB has nothing
-        exchange_pos = [{'symbol': 'BTC', 'size': 1.0, 'side': 'LONG', 'entry_price': 50000.0}]
+        exchange_pos = [{'symbol': 'BTC', 'size': 1.0, 'side': 'long', 'entry_price': 50000.0}]
         self.manager.market_api.get_positions.return_value = exchange_pos
         self.manager.execution_engine.positions = {} # Empty local
+        
+        # Mock the close_untracked_position method
+        self.manager.execution_engine.close_untracked_position = MagicMock(return_value=(True, "Closed"))
         
         # Act
         self.manager.sync_positions_with_exchange()
         
         # Assert
-        # Should call execute_order to CLOSE the unrecorded position
-        # Side should be SHORT (opposite of LONG), Size 1.0, reduce_only=True
-        self.manager.execution_engine.market_api.execute_order.assert_called_once_with(
+        # Should call close_untracked_position via execution_engine
+        # Size 1.0, side='long' (from exchange)
+        self.manager.execution_engine.close_untracked_position.assert_called_once_with(
             symbol='BTC',
-            side='sell',
             size=1.0,
-            reduce_only=True,
-            urgency='high'
+            side='long'
         )
         self.manager.logger.warning.assert_called()
 

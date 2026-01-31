@@ -593,13 +593,16 @@ class StrategyManager:
                         self.logger.error(f"Error persisting corrected side for {symbol}: {e}")
                 
                 # Tolerance for float comparison
-                if abs(local_size - exch_size) > 0.0001:
+                # Use absolute values because local_size is always positive, but exch_size might be signed (shorts)
+                abs_exch_size = abs(exch_size)
+                
+                if abs(local_size - abs_exch_size) > 0.0001:
                     changes_made = True
-                    self.logger.warning(f"State Drift Detected for {symbol}: DB={local_size} vs Exch={exch_size}")
+                    self.logger.warning(f"State Drift Detected for {symbol}: DB={local_size} vs Exch={abs_exch_size} (raw: {exch_size})")
                     
-                    if exch_size < local_size:
+                    if abs_exch_size < local_size:
                         # CASE A: External Partial Close (Reduced)
-                        diff = local_size - exch_size
+                        diff = local_size - abs_exch_size
                         self.logger.info(f"Adopting external reduction check for {symbol}: -{diff:.4f}")
                         
                         # 1. Record Phantom Trade for the difference
@@ -638,7 +641,7 @@ class StrategyManager:
                         
                     else:
                         # CASE B: External Add (Increased)
-                        diff = exch_size - local_size
+                        diff = abs_exch_size - local_size
                         self.logger.info(f"Adopting external increase for {symbol}: +{diff:.4f}")
                         
                         # 1. Update DB Size
@@ -657,17 +660,146 @@ class StrategyManager:
                         # 4. Persist updated position atomically
                         self.execution_engine._persist_position(local_pos)
 
-            # 6. Multi-Leg Ghost Detection
+            # 6. Multi-Leg Position Sync (Ghost + Broken Detection)
             ml_ghosts = []
+            ml_broken = []  # Positions with SOME legs missing (breaks delta neutrality)
             
-            for pos_id, pos in self.multi_leg_positions.items():
-                # Check if ALL legs are missing from exchange
-                legs_on_exchange = [leg.symbol for leg in pos.legs if leg.symbol in exchange_symbols]
+            for pos_id, pos in list(self.multi_leg_positions.items()):
+                # Check which legs exist on exchange
+                legs_on_exchange = [leg for leg in pos.legs if leg.symbol in exchange_symbols]
+                legs_missing = [leg for leg in pos.legs if leg.symbol not in exchange_symbols]
                 
-                # If NO legs are on exchange, it's a ghost
-                # (A partial fill is tricky, but usually 0 legs means fully closed)
+                # 6c. Check for Drift (Size/Side mismatches) in existing legs
+                drift_detected = False
+                if legs_on_exchange:
+                    for leg in legs_on_exchange:
+                        exch_pos = exchange_map.get(leg.symbol)
+                        if not exch_pos: continue
+                        
+                        exch_size = float(exch_pos.get('size', 0))
+                        exch_szi = float(exch_pos.get('szi', exch_size))
+                        exch_side = 'long' if exch_szi > 0 else 'short'
+                        
+                        # Check Drift
+                        abs_exch_size = abs(exch_size)
+                        if leg.side != exch_side or abs(leg.size - abs_exch_size) > 0.0001:
+                            self.logger.warning(f"Multi-Leg Drift Detected for {pos_id} leg {leg.symbol}: Local({leg.side} {leg.size}) vs Exch({exch_side} {abs_exch_size})")
+                            drift_detected = True
+                            
+                if drift_detected:
+                     self._update_multi_leg_position_from_exchange(pos_id, exchange_map)
+                     changes_made = True
+                     # Refresh local pos reference after update for subsequent checks
+                     pos = self.multi_leg_positions.get(pos_id)
+                     if not pos: continue
+                     # Re-eval lists
+                     legs_on_exchange = [leg for leg in pos.legs if leg.symbol in exchange_symbols]
+                     legs_missing = [leg for leg in pos.legs if leg.symbol not in exchange_symbols]
+                
                 if not legs_on_exchange:
+                    # ALL legs missing - full ghost
                     ml_ghosts.append(pos_id)
+                elif legs_missing:
+                    # SOME legs missing - BROKEN position (delta neutrality broken!)
+                    ml_broken.append((pos_id, legs_on_exchange, legs_missing))
+            
+            # 6a. Handle BROKEN multi-leg positions (critical - unhedged exposure!)
+            if ml_broken:
+                changes_made = True
+                for pos_id, remaining_legs, missing_legs in ml_broken:
+                    pos = self.multi_leg_positions.get(pos_id)
+                    if not pos:
+                        continue
+                    
+                    missing_symbols = [leg.symbol for leg in missing_legs]
+                    remaining_symbols = [leg.symbol for leg in remaining_legs]
+                    
+                    self.logger.critical(
+                        f"🚨 BROKEN MULTI-LEG POSITION {pos_id}: "
+                        f"Missing legs {missing_symbols}, Remaining legs {remaining_symbols}. "
+                        f"Delta neutrality compromised! Unwinding remaining legs..."
+                    )
+                    
+                    # Unwind remaining legs to restore delta neutrality
+                    unwind_pnl = 0.0
+                    unwind_fees = 0.0
+                    unwind_success = True
+                    
+                    for leg in remaining_legs:
+                        try:
+                            # Close the remaining leg
+                            close_side = 'sell' if leg.side == 'long' else 'buy'
+                            
+                            # Get current exchange size (might differ from DB)
+                            exch_pos = exchange_map.get(leg.symbol, {})
+                            actual_size = abs(float(exch_pos.get('size', leg.size)))
+                            
+                            self.logger.warning(f"Unwinding orphaned leg {leg.symbol}: {close_side} {actual_size}")
+                            
+                            result = self.market_api.execute_order(
+                                symbol=leg.symbol,
+                                side=close_side,
+                                size=actual_size,
+                                reduce_only=True,
+                                urgency='high',
+                                market_type=leg.market_type
+                            )
+                            
+                            if result and result.get('filled_size', 0) > 0:
+                                exit_price = result['avg_fill_price']
+                                filled_size = result['filled_size']
+                                fee = result.get('total_fee', 0.0)
+                                
+                                # Calculate leg PnL
+                                price_diff = exit_price - leg.entry_price
+                                if leg.side == 'short':
+                                    price_diff = -price_diff
+                                leg_pnl = price_diff * filled_size
+                                
+                                unwind_pnl += leg_pnl
+                                unwind_fees += fee
+                                
+                                self.logger.info(f"✅ Unwound orphaned leg {leg.symbol}: {filled_size} @ {exit_price}, PnL: ${leg_pnl:.2f}")
+                            else:
+                                self.logger.error(f"❌ Failed to unwind orphaned leg {leg.symbol}")
+                                unwind_success = False
+                                
+                        except Exception as e:
+                            self.logger.error(f"Error unwinding orphaned leg {leg.symbol}: {e}")
+                            unwind_success = False
+                    
+                    # Record the broken position closure
+                    # Include PnL from both missing legs (assume 0 PnL since we don't know exit) and unwound legs
+                    avg_entry = sum(leg.entry_price * leg.size for leg in pos.legs) / sum(leg.size for leg in pos.legs) if pos.legs else 0
+                    total_size = sum(leg.size for leg in pos.legs)
+                    
+                    self.performance_tracker.record_trade_from_position(
+                        symbol=pos.primary_symbol,
+                        strategy=pos.strategy,
+                        side="multi_leg",
+                        entry_price=avg_entry,
+                        exit_price=avg_entry,
+                        size=total_size,
+                        entry_time=pos.entry_time,
+                        exit_time=datetime.now(),
+                        capital_at_risk=pos.capital_at_risk or 0,
+                        exit_reason="Broken Position - Leg Missing",
+                        pnl_override=unwind_pnl,  # Only PnL from unwound legs
+                        fees=unwind_fees
+                    )
+                    
+                    self.logger.info(f"Recorded broken position closure {pos_id}: PnL=${unwind_pnl:.2f}")
+                    
+                    # Remove from DB and local state
+                    try:
+                        self.performance_tracker.db.delete_position(pos_id)
+                    except Exception as e:
+                        self.logger.error(f"Failed to delete broken ML position {pos_id} from DB: {e}")
+                    
+                    if pos_id in self.execution_engine.multi_leg_positions:
+                        del self.execution_engine.multi_leg_positions[pos_id]
+            
+            # 6b. Handle FULL ghost multi-leg positions (all legs closed externally)
             
             if ml_ghosts:
                 changes_made = True
@@ -744,6 +876,48 @@ class StrategyManager:
             
         except Exception as e:
             self.logger.error(f"Error syncing positions with exchange: {e}")
+
+    def _update_multi_leg_position_from_exchange(self, pos_id: str, exchange_map: Dict[str, Any]):
+        """Update multi-leg position legs based on exchange reality."""
+        from src.models.trade import PositionLeg
+        pos = self.multi_leg_positions.get(pos_id)
+        if not pos: return
+        
+        updated_legs = []
+        changes_log = []
+        
+        for leg in pos.legs:
+            exch_pos = exchange_map.get(leg.symbol)
+            if not exch_pos: 
+                updated_legs.append(leg) # Should be handled by ghost logic if missing
+                continue
+                
+            exch_size = float(exch_pos.get('size', 0))
+            exch_szi = float(exch_pos.get('szi', exch_size))
+            exch_side = 'long' if exch_szi > 0 else 'short'
+            
+            # Create new leg with updated values
+            new_leg = PositionLeg(
+                symbol=leg.symbol,
+                market_type=leg.market_type,
+                side=exch_side,
+                size=abs(exch_size),
+                entry_price=float(exch_pos.get('entry_price', leg.entry_price)),
+                order_id=leg.order_id
+            )
+            updated_legs.append(new_leg)
+            
+            if new_leg.side != leg.side or abs(new_leg.size - leg.size) > 0.0001:
+                changes_log.append(f"{leg.symbol}: {leg.side} {leg.size} -> {new_leg.side} {new_leg.size}")
+                
+        if changes_log:
+            self.logger.warning(f"Correcting Multi-Leg Drift for {pos_id}: {'; '.join(changes_log)}")
+            pos.legs = updated_legs
+            
+            # Update capital at risk?
+            # Ideally yes, but logic is complex. For now just sync structure.
+            
+            self.execution_engine._persist_multi_leg_position(pos)
 
     def _find_closing_fill(self, symbol: str, side: str, entry_time: datetime) -> Tuple[float, datetime, str, float]:
         """

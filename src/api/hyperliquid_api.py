@@ -782,10 +782,13 @@ class HyperliquidAPI(MarketInterface):
         self.base_url = config['api']['base_url']
         self.private_key = config['api']['private_key']
         self.wallet_address = config['api']['wallet_address']
-        self.public_account_address = config['api'].get(
-            'public_account_address', 
-            config['api']['wallet_address']
-        )
+        # Public account address: the account to read positions from and trade on behalf of
+        # If not specified or empty, defaults to wallet_address
+        _public_addr = config['api'].get('public_account_address', '')
+        self.public_account_address = _public_addr if _public_addr else config['api']['wallet_address']
+        
+        self.logger.info(f"Wallet Address: {self.wallet_address}")
+        self.logger.info(f"Public Account Address: {self.public_account_address}")
         
         # HIP-3 configuration (Hypurr/Spot-linked assets)
         # Enabled by default to ensure all assets are visible.
@@ -928,21 +931,28 @@ class HyperliquidAPI(MarketInterface):
                     try:
                         wallet = Account.from_key(self.private_key)
                         
-                        # Determine if we need to trade on behalf of a different account
-                        # This is needed when public_account_address differs from wallet_address
-                        # (e.g., API wallet trading on behalf of main account)
-                        account_addr = None
-                        if self.public_account_address != self.wallet_address:
-                            account_addr = self.public_account_address
-                            self.logger.info(f"Exchange will trade on behalf of: {account_addr}")
+                        # API Wallet Configuration:
+                        # When using an API wallet created on Hyperliquid, the agent is already
+                        # authorized to trade on behalf of the main account. We do NOT use
+                        # vault_address (that's for Hyperliquid Vaults, a different concept).
+                        #
+                        # The agent signs with its own key, and the exchange recognizes the
+                        # pre-existing authorization from when the API wallet was created.
+                        #
+                        # account_address is used for position lookups (e.g., market_close)
+                        if self.public_account_address.lower() != self.wallet_address.lower():
+                            self.logger.info(f"API wallet {self.wallet_address} trading on behalf of {self.public_account_address}")
+                        else:
+                            self.logger.info("Trading with own wallet (no separate account)")
                         
                         self.exchange = Exchange(
                             wallet=wallet,
                             base_url=self.base_url,
-                            account_address=account_addr,
+                            # NO vault_address - API wallets don't use vault mechanism
+                            account_address=self.public_account_address,  # For position lookups
                             perp_dexs=self.perp_dexs if self.hip3_enabled else None
                         )
-                        self.logger.info("Exchange client initialized")
+                        self.logger.info(f"Exchange client initialized")
                         break
                     except Exception as e:
                         if "429" in str(e) and attempt < max_retries - 1:
@@ -2850,6 +2860,65 @@ class HyperliquidAPI(MarketInterface):
                 return None
             
             is_buy = side.lower() == 'buy'
+            
+            # DUST POSITION HANDLING: If reduce_only and size rounds to ~0, handle specially
+            # This handles positions too small for normal limit orders
+            if reduce_only and (remaining_size < 0.0001 or order_value < 10.0):
+                self.logger.info(f"Dust position detected ({size} {display_symbol} = ${size * current_price:.2f}). Attempting direct close...")
+                try:
+                    # For HIP-3 and other cases, get price from L2 order book and place aggressive order
+                    # SDK's market_close doesn't work for HIP-3 (doesn't pass dex= to user_state)
+                    l2 = self._rate_limited_call(self.info.l2_snapshot, trading_symbol)
+                    
+                    if l2 and 'levels' in l2:
+                        bids = l2['levels'][0]
+                        asks = l2['levels'][1]
+                        
+                        # Determine price based on side (buy uses asks, sell uses bids)
+                        if is_buy and asks:
+                            base_price = float(asks[0]['px'])
+                            exec_price = round(base_price * 1.05, 2)  # 5% above ask
+                        elif not is_buy and bids:
+                            base_price = float(bids[0]['px'])
+                            exec_price = round(base_price * 0.95, 2)  # 5% below bid
+                        else:
+                            exec_price = round(current_price * (1.05 if is_buy else 0.95), 2)
+                        
+                        self.logger.info(f"Dust close: {side} {size} {display_symbol} @ {exec_price}")
+                        
+                        # Place aggressive IOC order with original (unrounded) size
+                        dust_result = self._rate_limited_call(
+                            self.exchange.order,
+                            trading_symbol,
+                            is_buy,
+                            size,  # Use original size, not rounded
+                            exec_price,
+                            {"limit": {"tif": "Ioc"}},
+                            reduce_only=True
+                        )
+                        
+                        fill_result = self._parse_order_response(dust_result, trading_symbol, side, size, exec_price)
+                        if fill_result and fill_result.get('filled_size', 0) > 0:
+                            self.logger.info(f"✅ Closed dust position {display_symbol}: {fill_result['filled_size']} @ {fill_result['avg_fill_price']}")
+                            return {
+                                'order_id': f"dust_close_{trading_symbol}_{int(time.time() * 1000)}",
+                                'symbol': trading_symbol,
+                                'display_symbol': display_symbol,
+                                'side': side,
+                                'size': size,
+                                'filled_size': fill_result['filled_size'],
+                                'unfilled_size': 0,
+                                'avg_fill_price': fill_result['avg_fill_price'],
+                                'status': 'filled',
+                                'market_type': market_type,
+                                'timestamp': datetime.now(),
+                            }
+                        else:
+                            self.logger.warning(f"Dust close order returned no fill for {display_symbol}")
+                    else:
+                        self.logger.warning(f"Could not get L2 orderbook for dust position {display_symbol}")
+                except Exception as e:
+                    self.logger.warning(f"Dust position close failed for {display_symbol}: {e}")
             
             # Configure slippage based on urgency (defaults)
             if urgency == "low":

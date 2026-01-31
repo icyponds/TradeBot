@@ -60,12 +60,12 @@ class TestOrderFallback:
                 # Should have called market_open once
                 assert api_client.exchange.market_open.call_count == 1
                 
-                # Check args: asset, is_buy, size, px(slippage), slippage_pct
+                # Check args: asset, is_buy, size, px, slippage_pct
                 # For SELL, is_buy=False
-                # Slippage logic in execute_order uses 5% for fallback:
-                # worst_price = price * 0.95 (for sell) -> 9500.0
+                # We now pass current_price (not None) because HIP-3 symbols
+                # aren't in all_mids() and the SDK needs a price reference
                 api_client.exchange.market_open.assert_called_with(
-                    'BTC', False, 0.1, None, 0.05
+                    'BTC', False, 0.1, 10000.0, 0.05  # current_price is passed, not None
                 )
                 
                 # Result should reflect the market fill

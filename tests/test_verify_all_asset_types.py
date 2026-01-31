@@ -84,20 +84,37 @@ class TestVerifyAllAssetTypes:
         assert coin_arg == "BTC"
         
     def test_hip3_execution(self, mock_api):
-        """Verify HIP-3 (1:TSLA) execution."""
-        # execute_order("1:TSLA")
+        """Verify HIP-3 (xyz:TSLA) execution.
+        
+        HIP-3 symbols use the format 'dex:symbol' (e.g., 'xyz:TSLA', 'Hypurr:PLTR').
+        The SDK expects the FULL prefixed name - it's not stripped.
+        """
+        # Update mock to include xyz:TSLA in universe and prices
+        mock_api.info.meta_and_asset_ctxs.return_value = (
+            {'universe': [
+                {'name': 'BTC', 'szDecimals': 4},
+                {'name': 'xyz:TSLA', 'szDecimals': 2}  # HIP-3 asset with prefix
+            ]},
+            [{}, {}]
+        )
+        mock_api.info.all_mids.return_value = {
+            'BTC': '100000.0', 
+            'xyz:TSLA': '200.0',  # HIP-3 uses prefixed name
+        }
+        
+        # execute_order("xyz:TSLA")
         result = mock_api.execute_order(
-            symbol="1:TSLA",
+            symbol="xyz:TSLA",
             side="buy",
             size=1.0,
-            market_type="perp" # or hip3
+            market_type="hip3"
         )
         
-        # Expectation: SDK called with "TSLA" (stripped)
+        # Expectation: SDK called with FULL prefixed name "xyz:TSLA"
         assert mock_api.exchange.order.called
         call_args = mock_api.exchange.order.call_args
         coin_arg = call_args[0][0]
-        assert coin_arg == "TSLA"
+        assert coin_arg == "xyz:TSLA"
 
     def test_spot_execution(self, mock_api):
         """Verify Spot (PURR/USDC) execution."""

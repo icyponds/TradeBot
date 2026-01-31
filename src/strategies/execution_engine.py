@@ -505,18 +505,25 @@ class ExecutionEngine:
             elif ':' in symbol:
                 market_type = 'hip3'  # HIP-3 perp
             
-            self.logger.info(f"Closing untracked {side} position: {symbol} size={abs(size)} market_type={market_type}")
+            remaining_size = abs(size)
+            total_filled = 0.0
+            weighted_price_sum = 0.0
+            
+            self.logger.info(f"Closing untracked {side} position: {symbol} size={remaining_size} market_type={market_type}")
             
             # Use high urgency with retry for ghost position closure
             max_attempts = 5
             last_error = None
             
             for attempt in range(max_attempts):
+                if remaining_size <= 0.0001:  # Dust threshold
+                    break
+                    
                 try:
                     order_result = self.market_api.execute_order(
                         symbol=symbol,
                         side=close_side,
-                        size=abs(size),
+                        size=remaining_size,
                         reduce_only=True,
                         urgency='high',
                         market_type=market_type
@@ -525,17 +532,32 @@ class ExecutionEngine:
                     if order_result and order_result.get('filled_size', 0) > 0:
                         filled = order_result['filled_size']
                         price = order_result.get('avg_fill_price', 0)
-                        self.logger.info(f"✅ Closed untracked position {symbol}: {filled} @ {price}")
-                        return True, f"Closed {filled} @ {price}"
+                        
+                        total_filled += filled
+                        weighted_price_sum += filled * price
+                        remaining_size -= filled
+                        
+                        self.logger.info(f"✓ Partial fill {symbol}: {filled} @ {price} (remaining: {remaining_size})")
+                        
+                        # If fully closed, return success
+                        if remaining_size <= 0.0001:
+                            avg_price = weighted_price_sum / total_filled if total_filled > 0 else price
+                            self.logger.info(f"✅ Fully closed untracked position {symbol}: {total_filled} @ {avg_price}")
+                            return True, f"Closed {total_filled} @ {avg_price}"
                         
                 except Exception as e:
                     last_error = e
                     self.logger.warning(f"Close attempt {attempt+1}/{max_attempts} for untracked {symbol}: {e}")
                 
                 if attempt < max_attempts - 1:
-                    import time
                     backoff = [2, 10, 30, 60]
                     time.sleep(backoff[min(attempt, len(backoff)-1)])
+            
+            # Partial success - some filled but not all
+            if total_filled > 0:
+                avg_price = weighted_price_sum / total_filled
+                self.logger.warning(f"⚠️ Partially closed untracked position {symbol}: {total_filled}/{abs(size)} @ {avg_price} (remaining: {remaining_size})")
+                return False, f"Partial close: {total_filled}/{abs(size)} @ {avg_price}, remaining: {remaining_size}"
             
             return False, f"Failed after {max_attempts} attempts: {last_error}"
             
