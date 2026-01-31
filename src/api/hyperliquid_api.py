@@ -877,6 +877,11 @@ class HyperliquidAPI(MarketInterface):
         self._init_sdk_clients()
         
         self.logger.info(f"Initialized HyperliquidAPI (HIP-3: {self.hip3_enabled})")
+        # Initialize state for periodic checks
+        self._last_expiration_check = 0.0
+        
+        # Check API key expiration
+        self.check_api_key_expiration()
     
     def _init_sdk_clients(self):
         """Initialize SDK Info and Exchange clients."""
@@ -965,6 +970,76 @@ class HyperliquidAPI(MarketInterface):
         except Exception as e:
             self.logger.error(f"SDK initialization failed: {e}")
             raise
+
+    def check_api_key_expiration(self):
+        """
+        Check if the API key is nearing its 6-month expiration date.
+        Checks 'key_expiration_date' first, then falls back to 'key_created_at'.
+        
+        Dynamic Cooldowns:
+        - Critical (<7 days): 1 hour
+        - Warning (<30 days): 6 hours
+        - Normal (>30 days): 24 hours
+        """
+        expiration_date = None
+        
+        # 1. Check for explicit expiration date (YYYY-MM-DD)
+        expiry_str = self.config.get('api', {}).get('key_expiration_date')
+        if expiry_str:
+            try:
+                expiration_date = datetime.strptime(expiry_str.strip(), "%Y-%m-%d")
+            except ValueError:
+                self.logger.warning(f"Invalid format for TRADING_API_KEY_EXPIRATION_DATE: '{expiry_str}'. Use YYYY-MM-DD.")
+
+        # 2. Check for creation date fallback (YYYY-MM-DD) -> +6 months
+        if not expiration_date:
+            created_at_str = self.config.get('api', {}).get('key_created_at')
+            if created_at_str:
+                try:
+                    created_at = datetime.strptime(created_at_str.strip(), "%Y-%m-%d")
+                    expiration_date = created_at + timedelta(days=180)
+                except ValueError:
+                    self.logger.warning(f"Invalid format for TRADING_API_KEY_CREATED_AT: '{created_at_str}'. Use YYYY-MM-DD.")
+        
+        if not expiration_date:
+             # If no date is configured, we can't check. 
+             # We still apply a long cooldown to avoid spamming the "No dates configured" log.
+             now = time.time()
+             if now - self._last_expiration_check < 86400:
+                 return
+             self._last_expiration_check = now
+             self.logger.info("ℹ️ API Key Expiration: No dates configured (TRADING_API_KEY_EXPIRATION_DATE or TRADING_API_KEY_CREATED_AT). Cannot track expiration.")
+             return
+
+        try:
+            # Determine urgency
+            days_remaining = (expiration_date - datetime.now()).days
+            
+            # cooldown in seconds
+            if days_remaining <= 7:
+                cooldown = 3600      # 1 hour for Critical
+            elif days_remaining <= 30:
+                cooldown = 21600     # 6 hours for Warning
+            else:
+                cooldown = 86400     # 24 hours for Normal
+            
+            # Cooldown Check
+            now = time.time()
+            if now - self._last_expiration_check < cooldown:
+                return
+                
+            self._last_expiration_check = now
+            
+            # Log based on urgency
+            if days_remaining <= 7:
+                self.logger.critical(f"🚨 API KEY EXPIRATION IMMINENT! Key expires in {days_remaining} days (on {expiration_date.strftime('%Y-%m-%d')}). UPDATE IMMEDIATELY.")
+            elif days_remaining <= 30:
+                self.logger.warning(f"⚠️ API Key expires in {days_remaining} days (on {expiration_date.strftime('%Y-%m-%d')}). Plan to rotate keys soon.")
+            else:
+                self.logger.info(f"✅ API Key valid. Expires in {days_remaining} days ({expiration_date.strftime('%Y-%m-%d')}).")
+                
+        except Exception as e:
+            self.logger.error(f"Failed to check API key expiration: {e}")
     
     def _enable_websocket(self, timeout: float = 10.0, force_reconnect: bool = False):
         """Enable WebSocket connection (called from start() or for reconnection)."""

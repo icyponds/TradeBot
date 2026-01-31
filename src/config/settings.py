@@ -58,6 +58,12 @@ def load_config() -> Dict[str, Any]:
                 "ws_stale_threshold": float(os.getenv("API_HEALTH_WS_STALE_THRESHOLD", "60.0")),
                 "latency_warning_ms": float(os.getenv("API_HEALTH_LATENCY_WARNING_MS", "1000.0")),
             },
+            
+            # API Key Expiration Monitoring
+            # Set explicit expiration date (YYYY-MM-DD) OR creation date (YYYY-MM-DD)
+            # Default to the specific date requested by user if env var not set
+            "key_created_at": os.getenv("TRADING_API_KEY_CREATED_AT", ""),
+            "key_expiration_date": os.getenv("TRADING_API_KEY_EXPIRATION_DATE", "2026-07-30"),
         },
         
         # HIP-3 Perps Configuration (Builder-deployed perpetual markets)

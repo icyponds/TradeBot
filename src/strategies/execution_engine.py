@@ -887,66 +887,74 @@ class ExecutionEngine:
                 executor.map(execute_leg_order, position.legs)
 
             
-            # Calculate P&L and total fees
-            total_pnl = 0.0
-            total_fees = 0.0
-            for result in exit_results:
-                leg = result['leg']
-                exit_price = result['exit_price']
-                price_diff = exit_price - leg.entry_price
-                if leg.side == 'short':
-                    price_diff = -price_diff
-                leg_pnl = price_diff * result['filled_size']
-                total_pnl += leg_pnl
-                total_fees += result.get('fee', 0.0)
+            try:
+                # Calculate P&L and total fees
+                total_pnl = 0.0
+                total_fees = 0.0
+                for result in exit_results:
+                    leg = result['leg']
+                    exit_price = result['exit_price']
+                    price_diff = exit_price - leg.entry_price
+                    if leg.side == 'short':
+                        price_diff = -price_diff
+                    leg_pnl = price_diff * result['filled_size']
+                    total_pnl += leg_pnl
+                    total_fees += result.get('fee', 0.0)
 
-            exit_time = current_time
+                exit_time = current_time
 
-            # For funding rate arbitrage we store realized PnL as funding payments only (delta-neutral)
-            # and represent side as 'delta_neutral' in the DB.
-            pnl_to_record = total_pnl
-            trade_side = "multi_leg"
-            if strategy_name == "funding_rate_arbitrage":
-                pnl_to_record = self.estimate_funding_arb_realized_pnl(position, exit_time, strategies_map)
-                trade_side = "delta_neutral"
+                # For funding rate arbitrage we store realized PnL as funding payments only (delta-neutral)
+                # and represent side as 'delta_neutral' in the DB.
+                pnl_to_record = total_pnl
+                trade_side = "multi_leg"
+                if strategy_name == "funding_rate_arbitrage":
+                    pnl_to_record = self.estimate_funding_arb_realized_pnl(position, exit_time, strategies_map)
+                    trade_side = "delta_neutral"
 
-            # Record trade in performance tracker
-            self.performance_tracker.record_trade_from_position(
-                symbol=position.primary_symbol,
-                strategy=strategy_name,
-                side=trade_side,
-                entry_price=sum(leg.entry_price * leg.size for leg in position.legs) / sum(leg.size for leg in position.legs) if position.legs and sum(leg.size for leg in position.legs) > 0 else 0,
-                exit_price=sum(r['exit_price'] * r['filled_size'] for r in exit_results) / sum(r['filled_size'] for r in exit_results) if exit_results and sum(r['filled_size'] for r in exit_results) > 0 else 0,
-                size=sum(r['filled_size'] for r in exit_results),
-                entry_time=position.entry_time,
-                exit_time=exit_time,
-                capital_at_risk=position.capital_at_risk or 0,
-                exit_reason=signal.get('reason', 'signal'),
-                pnl_override=pnl_to_record,
-                stop_loss=position.legs[0].to_dict().get('metadata', {}).get('stop_loss') if position.legs and position.legs[0].market_type == 'perp' else None,
-                fees=total_fees
-            )
-
-            # LIVE FEEDBACK LOOP: Report result to StrategySelector immediately
-            # This updates the strategy's recent performance window for dynamic signal sizing
-            if self.strategy_selector:
-                self.strategy_selector.record_trade_result(
-                    strategy_name, 
-                    pnl_to_record / position.initial_capital if position.initial_capital > 0 else 0,
-                    exit_time
+                # Record trade in performance tracker
+                self.performance_tracker.record_trade_from_position(
+                    symbol=position.primary_symbol,
+                    strategy=strategy_name,
+                    side=trade_side,
+                    entry_price=sum(leg.entry_price * leg.size for leg in position.legs) / sum(leg.size for leg in position.legs) if position.legs and sum(leg.size for leg in position.legs) > 0 else 0,
+                    exit_price=sum(r['exit_price'] * r['filled_size'] for r in exit_results) / sum(r['filled_size'] for r in exit_results) if exit_results and sum(r['filled_size'] for r in exit_results) > 0 else 0,
+                    size=sum(r['filled_size'] for r in exit_results),
+                    entry_time=position.entry_time,
+                    exit_time=exit_time,
+                    capital_at_risk=position.capital_at_risk or 0,
+                    exit_reason=signal.get('reason', 'signal'),
+                    pnl_override=pnl_to_record,
+                    stop_loss=position.legs[0].to_dict().get('metadata', {}).get('stop_loss') if position.legs and position.legs[0].market_type == 'perp' else None,
+                    fees=total_fees
                 )
 
-            # Close position in leverage manager
-            self.leverage_manager.close_position(position.primary_symbol, 0)
-            
-            # Delete from DB persistence
-            try:
-                self.performance_tracker.db.delete_position(position.position_id)
-            except Exception as e:
-                self.logger.error(f"Failed to delete multi-leg position {position.position_id} from DB: {e}")
+                # LIVE FEEDBACK LOOP: Report result to StrategySelector immediately
+                # This updates the strategy's recent performance window for dynamic signal sizing
+                if self.strategy_selector:
+                    self.strategy_selector.record_trade_result(
+                        strategy_name, 
+                        pnl_to_record / position.initial_capital if position.initial_capital > 0 else 0,
+                        exit_time
+                    )
 
-            # Remove from active positions
-            del self.multi_leg_positions[position.position_id]
+            except Exception as e:
+                self.logger.error(f"Error recording multi-leg trade or updating strategies: {e}")
+            
+            finally:
+                # ALWAYS clean up memory and DB if possible
+                try:
+                    # Close position in leverage manager
+                    self.leverage_manager.close_position(position.primary_symbol, 0)
+                    
+                    # Delete from DB persistence
+                    self.performance_tracker.db.delete_position(position.position_id)
+                except Exception as e:
+                    self.logger.error(f"Failed to delete multi-leg position {position.position_id} from DB: {e}")
+
+                # Remove from active positions
+                if position.position_id in self.multi_leg_positions:
+                    del self.multi_leg_positions[position.position_id]
+                    self.logger.info(f"Deleted position {position.position_id} from memory")
             
             # Update stats
             self.total_pnl += pnl_to_record

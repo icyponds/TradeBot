@@ -805,6 +805,14 @@ class StrategyManager:
                 changes_made = True
                 self.logger.warning(f"Ghost multi-leg positions detected: {ml_ghosts}")
                 for pos_id in ml_ghosts:
+                    # FIX: Race condition check. 
+                    # If position was Manually Closed during this loop, it might have been removed 
+                    # from ExecutionEngine but was present in the initial loop snapshot.
+                    # self.multi_leg_positions delegates to ExecEngine, so checking it here is safe.
+                    if pos_id not in self.multi_leg_positions:
+                        self.logger.info(f"Ghost {pos_id} was removed concurrently (Manual Close?), skipping external close logic.")
+                        continue
+                        
                     pos = self.multi_leg_positions.get(pos_id)
                     if not pos: continue
                     
@@ -1921,6 +1929,10 @@ class StrategyManager:
 
             # Update regime and change-point gating from market proxy (once per cycle)
             self._maybe_update_regime_and_changepoint()
+            
+            # Periodic API key expiration check (has internal 24h cooldown)
+            if hasattr(self.market_api, 'check_api_key_expiration'):
+                self.market_api.check_api_key_expiration()
             
             # NOTE: Pair rotation is now handled by the continuous scouting loop
             # in DynamicPairSelector._background_data_fetcher(). No rescan trigger needed.
