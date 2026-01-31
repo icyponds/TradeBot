@@ -2985,16 +2985,6 @@ class HyperliquidAPI(MarketInterface):
                 
                 # Place IOC order (smart market execution)
                 if market_type == "spot":
-                    # Spot order
-                    response = self._rate_limited_call(
-                        self.exchange.order,
-                        trading_symbol,
-                        is_buy,
-                        remaining_size,
-                        exec_price,
-                        {"limit": {"tif": "Ioc"}}
-                    )
-                    # Spot order
                     response = self._rate_limited_call(
                         self.exchange.order,
                         trading_symbol,

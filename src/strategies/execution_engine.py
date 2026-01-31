@@ -8,6 +8,8 @@ import os
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Tuple
 import pandas as pd
+from concurrent.futures import ThreadPoolExecutor
+import threading
 
 from src.models.trade import Trade, Position, MultiLegPosition, PositionLeg
 from src.api import HyperliquidAPI
@@ -841,7 +843,10 @@ class ExecutionEngine:
             urgency = signal.get('urgency', 'normal')
             
             exit_results = []
-            for leg in position.legs:
+            results_lock = threading.Lock()
+            urgency = signal.get('urgency', 'normal')
+
+            def execute_leg_order(leg):
                 order_side = 'sell' if leg.side == 'long' else 'buy'
                 
                 result = self.market_api.execute_order(
@@ -869,12 +874,18 @@ class ExecutionEngine:
                         except Exception as e:
                             self.logger.warning(f"Failed to fetch fee for multi-leg exit {leg.symbol}: {e}")
 
-                    exit_results.append({
-                        'leg': leg,
-                        'exit_price': result['avg_fill_price'],
-                        'filled_size': result['filled_size'],
-                        'fee': fee
-                    })
+                    with results_lock:
+                        exit_results.append({
+                            'leg': leg,
+                            'exit_price': result['avg_fill_price'],
+                            'filled_size': result['filled_size'],
+                            'fee': fee
+                        })
+
+            # Execute all legs in parallel to minimize unhedged time
+            with ThreadPoolExecutor(max_workers=len(position.legs)) as executor:
+                executor.map(execute_leg_order, position.legs)
+
             
             # Calculate P&L and total fees
             total_pnl = 0.0
