@@ -3216,17 +3216,20 @@ class HyperliquidAPI(MarketInterface):
         if not response:
             return None
         
+        # Debug: Log response type and content for troubleshooting HIP-3 orders
+        self.logger.debug(f"Order response for {symbol}: type={type(response).__name__}, content={str(response)[:500]}")
+        
+        # Handle string responses (usually error messages from SDK)
+        if isinstance(response, str):
+            self.logger.error(f"Order rejected for {symbol} (string response): {response}")
+            return None
+        
+        # Handle non-dict responses
+        if not isinstance(response, dict):
+            self.logger.error(f"Order rejected for {symbol} - unexpected type {type(response).__name__}: {response}")
+            return None
+        
         try:
-            # Handle string responses (usually error messages from SDK)
-            if isinstance(response, str):
-                self.logger.error(f"Order rejected (string response): {response}")
-                return None
-            
-            # Handle non-dict responses
-            if not isinstance(response, dict):
-                self.logger.error(f"Unexpected order response type: {type(response).__name__}: {response}")
-                return None
-            
             status_data = response.get('response', {}).get('data', {}).get('statuses', [])
             
             if not status_data:
