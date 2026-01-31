@@ -474,6 +474,29 @@ class StatisticalArbitrageStrategy(BaseStrategy):
         if current_data is None:
             return False, None
             
+        # 0. Max Hold Time Limit (Safety) - CHECK FIRST
+        # Prevents holding losing positions indefinitely (Survivor Bias)
+        if hasattr(position, 'entry_time') and position.entry_time:
+            entry_time = position.entry_time
+            if isinstance(entry_time, str):
+                entry_time = pd.to_datetime(entry_time)
+            
+            # Simple datetime subtraction
+            try:
+                # Ensure entry_time is timezone-aware if now() is (or both naive)
+                now = datetime.now()
+                if entry_time.tzinfo and not now.tzinfo:
+                   now = now.astimezone()
+                elif not entry_time.tzinfo and now.tzinfo:
+                   entry_time = entry_time.replace(tzinfo=now.tzinfo)
+
+                time_held = now - entry_time
+                if time_held > timedelta(hours=self.max_holding_hours):
+                    return True, f"max_holding_time_exceeded ({time_held})"
+            except Exception as e:
+                self.logger.warning(f"Error checking max hold time: {e}") 
+
+            
         symbol = getattr(position, 'symbol', None)
         # Note: StrategyManager might pass just the symbol name if checking globally, 
         # but here we need to know WHICH spread this position belongs to.
@@ -506,6 +529,10 @@ class StatisticalArbitrageStrategy(BaseStrategy):
         # If 'z_score' is passed in current_data (from StrategyManager's analysis loop):
         z_score = current_data.get('z_score')
         
+        
+        # DEBUG TRACE
+
+
         if z_score is not None:
             # 1. Take Profit: Mean Reversion
             if abs(z_score) < self.z_score_exit:
@@ -526,21 +553,6 @@ class StatisticalArbitrageStrategy(BaseStrategy):
                 elif entry_z > 0 and z_score > entry_z + self.max_adverse_z_delta:
                     return True, f"max_adverse_spread_stop (entry={entry_z:.2f}, now={z_score:.2f})"
                 
-        # 3. Max Hold Time Limit (Safety)
-        # Prevents holding losing positions indefinitely (Survivor Bias)
-        if hasattr(position, 'entry_time') and position.entry_time:
-            entry_time = position.entry_time
-            if isinstance(entry_time, str):
-                entry_time = pd.to_datetime(entry_time)
-            
-            # Simple datetime subtraction (ensure both are naive or aware)
-            # In backtest/bot, typically naive local time or UTC
-            try:
-                time_held = datetime.now() - entry_time
-                if time_held > timedelta(hours=self.max_holding_hours):
-                    return True, f"max_holding_time_exceeded ({time_held})"
-            except Exception as e:
-                self.logger.warning(f"Error checking max hold time: {e}")
 
         return False, None
 

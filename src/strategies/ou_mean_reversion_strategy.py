@@ -12,7 +12,7 @@ from typing import Dict, Any, Optional, Tuple, TYPE_CHECKING
 if TYPE_CHECKING:
     from src.models.trade import Position
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
 from .base_strategy import BaseStrategy
@@ -102,6 +102,9 @@ class OUMeanReversionStrategy(BaseStrategy):
         # Cache for OU parameters
         self.ou_params_cache: Dict[str, Tuple[OUParameters, datetime]] = {}
         self.cache_ttl_hours = ou_config.get('cache_ttl_hours', 4)
+
+        # Max holding time (safety stop)
+        self.max_holding_hours = ou_config.get('max_holding_hours', 120)  # Default 5 days
         
         # Active positions tracking
         self.active_positions: Dict[str, Dict[str, Any]] = {}
@@ -523,6 +526,26 @@ class OUMeanReversionStrategy(BaseStrategy):
         symbol = getattr(position, 'symbol', None)
         if not symbol:
             return False, None
+
+        # 0. Max Hold Time Limit (Safety) - CHECK FIRST
+        if hasattr(position, 'entry_time') and position.entry_time:
+            entry_time = position.entry_time
+            if isinstance(entry_time, str):
+                entry_time = pd.to_datetime(entry_time)
+            
+            try:
+                now = datetime.now()
+                # Timezone awareness safety
+                if entry_time.tzinfo and not now.tzinfo:
+                   now = now.astimezone()
+                elif not entry_time.tzinfo and now.tzinfo:
+                   entry_time = entry_time.replace(tzinfo=now.tzinfo)
+
+                time_held = now - entry_time
+                if time_held > timedelta(hours=self.max_holding_hours):
+                    return True, f"max_holding_time_exceeded ({time_held})"
+            except Exception as e:
+                self.logger.warning(f"Error checking max hold time: {e}")
         
         # Get OHLCV data for Z-score calculation
         ohlcv = current_data.get('ohlcv')

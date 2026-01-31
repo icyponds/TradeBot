@@ -3406,8 +3406,7 @@ class HyperliquidAPI(MarketInterface):
             response = self._rate_limited_call(
                 self.exchange.post,
                 "/exchange",
-                action,
-                nonce=nonce
+                action
             )
             
             if timeout_seconds > 0:
