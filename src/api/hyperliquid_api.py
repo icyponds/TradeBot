@@ -2736,14 +2736,17 @@ class HyperliquidAPI(MarketInterface):
                 }
             else:
                 # Perp or HIP-3 (both use same symbol format)
-                # Parse strip prefix for SDK (e.g. "1:TSLA" -> "TSLA") but keep original for display
-                clean_symbol = symbol
-                if ":" in symbol:
-                    parts = symbol.split(":", 1)
-                    if parts[0].isdigit():
-                        clean_symbol = parts[1]
+                # HIP-3 symbols use prefix format: "xyz:TSLA", "Hypurr:PLTR", etc.
+                # The SDK's name_to_coin mapping expects this full prefixed format
+                # e.g., 'xyz:TSLA' -> 'xyz:TSLA' is in the mapping, but 'TSLA' is NOT
+                clean_symbol = symbol  # Keep prefix for SDK - it's required
                 
-                asset_info = self._get_asset_info_for_symbol(clean_symbol)
+                # For asset_info lookup, we may need to strip the prefix
+                lookup_symbol = symbol
+                if ":" in symbol:
+                    lookup_symbol = symbol.split(":", 1)[1]
+                
+                asset_info = self._get_asset_info_for_symbol(lookup_symbol)
                 price = self.get_current_price(symbol) # This handles stripping internally now
                 
                 if not price:
@@ -3008,12 +3011,14 @@ class HyperliquidAPI(MarketInterface):
                     )
                     try:
                         # Use SDK's market_open for position closure with 5% slippage
+                        # CRITICAL: Pass current_price instead of None for HIP-3 assets
+                        # The SDK's all_mids() doesn't include HIP-3 symbols, so px=None fails
                         market_response = self._rate_limited_call(
                             self.exchange.market_open,
                             trading_symbol,
                             is_buy,  # Opposite side to close position
                             remaining_size,
-                            None,  # px=None for market order
+                            current_price,  # Must provide price for HIP-3 (all_mids doesn't have them)
                             0.05,  # 5% slippage tolerance
                         )
                         
@@ -3201,7 +3206,7 @@ class HyperliquidAPI(MarketInterface):
     
     def _parse_order_response(
         self,
-        response: Dict[str, Any],
+        response: Any,
         symbol: str,
         side: str,
         size: float,
@@ -3212,6 +3217,16 @@ class HyperliquidAPI(MarketInterface):
             return None
         
         try:
+            # Handle string responses (usually error messages from SDK)
+            if isinstance(response, str):
+                self.logger.error(f"Order rejected (string response): {response}")
+                return None
+            
+            # Handle non-dict responses
+            if not isinstance(response, dict):
+                self.logger.error(f"Unexpected order response type: {type(response).__name__}: {response}")
+                return None
+            
             status_data = response.get('response', {}).get('data', {}).get('statuses', [])
             
             if not status_data:
