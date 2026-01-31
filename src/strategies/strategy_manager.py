@@ -494,18 +494,17 @@ class StrategyManager:
                     if abs(size) > 0:
                         self.logger.warning(f"🚨 UNRECORDED position detected: {symbol} {side} size={size}. Initiating immediate closure.")
                         
-                        # Execute reduce-only market order to close
-                        # Opposite side
-                        close_side = 'sell' if side == 'long' else 'buy'
-                        
-                        # Use absolute size for the close order
-                        self.execution_engine.market_api.execute_order(
+                        # Route through execution engine for consistent order handling
+                        success, msg = self.execution_engine.close_untracked_position(
                             symbol=symbol,
-                            side=close_side,
-                            size=abs(size),
-                            reduce_only=True,
-                            urgency='high'
+                            size=size,
+                            side=side
                         )
+                        
+                        if success:
+                            self.logger.info(f"✅ Closed unrecorded position {symbol}: {msg}")
+                        else:
+                            self.logger.error(f"❌ Failed to close unrecorded position {symbol}: {msg}")
 
             # 4. Handling Ghost Positions (Local but not Exchange)
             # ----------------------------------------------------

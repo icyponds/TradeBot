@@ -891,7 +891,7 @@ class HyperliquidAPI(MarketInterface):
             if self.perp_dexs is None:
                 try:
                     self.perp_dexs = self._discover_perp_dexs()
-                    self.logger.info(f"Auto-discovered PERP DEX names: {self.perp_dexs}")
+                    # Note: _discover_perp_dexs() already logs the discovered dexes
                 except Exception as e:
                     self.logger.warning(f"Failed to auto-discover PERP DEXs: {e}. Defaulting to native [\"\"].")
                     self.perp_dexs = [""]  # Empty string = native dex
@@ -927,9 +927,19 @@ class HyperliquidAPI(MarketInterface):
                 for attempt in range(max_retries):
                     try:
                         wallet = Account.from_key(self.private_key)
+                        
+                        # Determine if we need to trade on behalf of a different account
+                        # This is needed when public_account_address differs from wallet_address
+                        # (e.g., API wallet trading on behalf of main account)
+                        account_addr = None
+                        if self.public_account_address != self.wallet_address:
+                            account_addr = self.public_account_address
+                            self.logger.info(f"Exchange will trade on behalf of: {account_addr}")
+                        
                         self.exchange = Exchange(
                             wallet=wallet,
                             base_url=self.base_url,
+                            account_address=account_addr,
                             perp_dexs=self.perp_dexs if self.hip3_enabled else None
                         )
                         self.logger.info("Exchange client initialized")
@@ -3216,8 +3226,8 @@ class HyperliquidAPI(MarketInterface):
         if not response:
             return None
         
-        # Debug: Log response type and content for troubleshooting HIP-3 orders
-        self.logger.debug(f"Order response for {symbol}: type={type(response).__name__}, content={str(response)[:500]}")
+        # Log response type and content for troubleshooting HIP-3 orders
+        self.logger.info(f"Order response for {symbol}: type={type(response).__name__}, content={str(response)[:300]}")
         
         # Handle string responses (usually error messages from SDK)
         if isinstance(response, str):
@@ -3230,7 +3240,19 @@ class HyperliquidAPI(MarketInterface):
             return None
         
         try:
-            status_data = response.get('response', {}).get('data', {}).get('statuses', [])
+            # Safely navigate nested response structure
+            # The SDK can return various structures, including error strings at any level
+            resp_data = response.get('response', {})
+            if isinstance(resp_data, str):
+                self.logger.error(f"Order rejected for {symbol}: {resp_data}")
+                return None
+            
+            data = resp_data.get('data', {}) if isinstance(resp_data, dict) else {}
+            if isinstance(data, str):
+                self.logger.error(f"Order rejected for {symbol}: {data}")
+                return None
+                
+            status_data = data.get('statuses', []) if isinstance(data, dict) else []
             
             if not status_data:
                 return None
@@ -3238,7 +3260,7 @@ class HyperliquidAPI(MarketInterface):
             status = status_data[0]
             
             if 'error' in status:
-                self.logger.error(f"Order error: {status['error']}")
+                self.logger.error(f"Order error for {symbol}: {status['error']}")
                 return None
             
             order_id = None

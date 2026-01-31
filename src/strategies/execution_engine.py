@@ -483,6 +483,66 @@ class ExecutionEngine:
             self.logger.error(f"Error closing position for {symbol}: {e}")
             return False, f"Exception: {str(e)}"
 
+    def close_untracked_position(self, symbol: str, size: float, side: str) -> Tuple[bool, str]:
+        """
+        Close a position that exists on exchange but isn't tracked locally (ghost position).
+        
+        Args:
+            symbol: Trading symbol (e.g., 'xyz:TSLA', 'BTC')
+            size: Position size (use absolute value)
+            side: Position side ('long' or 'short')
+            
+        Returns:
+            Tuple of (success, message)
+        """
+        try:
+            close_side = 'sell' if side == 'long' else 'buy'
+            
+            # Determine market type from symbol
+            market_type = 'perp'
+            if symbol.endswith('_SPOT'):
+                market_type = 'spot'
+            elif ':' in symbol:
+                market_type = 'hip3'  # HIP-3 perp
+            
+            self.logger.info(f"Closing untracked {side} position: {symbol} size={abs(size)} market_type={market_type}")
+            
+            # Use high urgency with retry for ghost position closure
+            max_attempts = 5
+            last_error = None
+            
+            for attempt in range(max_attempts):
+                try:
+                    order_result = self.market_api.execute_order(
+                        symbol=symbol,
+                        side=close_side,
+                        size=abs(size),
+                        reduce_only=True,
+                        urgency='high',
+                        market_type=market_type
+                    )
+                    
+                    if order_result and order_result.get('filled_size', 0) > 0:
+                        filled = order_result['filled_size']
+                        price = order_result.get('avg_fill_price', 0)
+                        self.logger.info(f"✅ Closed untracked position {symbol}: {filled} @ {price}")
+                        return True, f"Closed {filled} @ {price}"
+                        
+                except Exception as e:
+                    last_error = e
+                    self.logger.warning(f"Close attempt {attempt+1}/{max_attempts} for untracked {symbol}: {e}")
+                
+                if attempt < max_attempts - 1:
+                    import time
+                    backoff = [2, 10, 30, 60]
+                    time.sleep(backoff[min(attempt, len(backoff)-1)])
+            
+            return False, f"Failed after {max_attempts} attempts: {last_error}"
+            
+        except Exception as e:
+            self.logger.error(f"Error closing untracked position {symbol}: {e}")
+            return False, f"Exception: {str(e)}"
+
     def handle_multi_leg_signal(
         self, 
         symbol: str, 
