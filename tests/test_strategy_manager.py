@@ -446,3 +446,52 @@ class TestStrategyManager:
         assert strategy_manager._is_data_ready_for_symbol(symbol) is False
 
 
+
+    def test_sync_positions_negative_size_fix(self, strategy_manager):
+        """
+        Verify that negative positions from exchange (shorts) are converted to positive size.
+        This tests the fix for the bug where short positions were saved with negative sizes.
+        """
+        # Setup: Local position needs update
+        # Local: 1.0 (positive)
+        # Exchange: -2.0 (short, increased size)
+        
+        symbol = 'DOGE'
+        local_pos = Position(
+            symbol=symbol,
+            side='short',
+            size=1.0,  # Currently positive
+            entry_price=0.10,
+            entry_time=datetime.now(),
+            strategy='vol_breakout_4h'
+        )
+        strategy_manager.execution_engine.positions = {symbol: local_pos}
+        
+        # Mock exchange positions returning negative size
+        exchange_positions = [{
+            'symbol': symbol,
+            'size': -2.0,  # Negative size from exchange
+            'entry_price': 0.11,
+            'side': 'short',
+            'mark_price': 0.12
+        }]
+        strategy_manager.market_api.get_positions = MagicMock(return_value=exchange_positions)
+        
+        # Mock DB methods used during sync
+        strategy_manager.performance_tracker.db.get_all_live_position_symbols = MagicMock(return_value=[symbol])
+        strategy_manager.execution_engine._persist_position = MagicMock()
+        
+        # Run sync
+        strategy_manager.sync_positions_with_exchange()
+        
+        # Verify
+        # 1. Position size should be updated to ABSOLUTE value (2.0), not -2.0
+        assert local_pos.size == 2.0
+        assert local_pos.size > 0
+        
+        # 2. Should have called persist
+        strategy_manager.execution_engine._persist_position.assert_called_with(local_pos)
+        
+        # 3. Verify logs
+        # We can't easily check logs here without a log capture fixture, 
+        # but the assertion on size proves the fix works.

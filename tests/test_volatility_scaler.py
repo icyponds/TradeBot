@@ -46,7 +46,7 @@ class TestATRCalculation:
     
     def _create_ohlcv(self, high_range, low_range, close_start, n_bars=20):
         """Helper to create OHLCV dataframe."""
-        dates = pd.date_range(end=datetime.now(), periods=n_bars, freq='1H')
+        dates = pd.date_range(end=datetime.now(), periods=n_bars, freq='1h')
         closes = [close_start + np.random.uniform(-0.5, 0.5) for _ in range(n_bars)]
         
         data = {
@@ -91,7 +91,7 @@ class TestVolatilityRatioCalculation:
     
     def _create_ohlcv(self, volatility, n_bars=20):
         """Helper to create OHLCV with specific volatility level."""
-        dates = pd.date_range(end=datetime.now(), periods=n_bars, freq='1H')
+        dates = pd.date_range(end=datetime.now(), periods=n_bars, freq='1h')
         base_price = 100
         closes = []
         current = base_price

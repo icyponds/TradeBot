@@ -1325,7 +1325,7 @@ class ExecutionEngine:
                                 symbol=ld['symbol'],
                                 market_type=ld['market_type'],
                                 side=ld['side'],
-                                size=ld['size'],
+                                size=abs(ld['size']),
                                 entry_price=ld['entry_price'],
                                 order_id=ld.get('order_id')
                             ))

@@ -41,3 +41,26 @@ class TestPerformanceTracker:
         assert metrics.total_trades == 1
         assert metrics.win_rate == 100.0
         assert metrics.total_pnl == 10.0
+
+    def test_record_trade_from_position_negative_size(self, tracker):
+        """Test defensive handling of negative sizes in record_trade_from_position."""
+        # Tracker calls db.insert_trade and others, simpler to test via checking recorded data
+        
+        # Test short position with negative size input
+        # Correct behavior: Size treated as positive, PnL calculated correctly (Entry > Exit = Profit)
+        trade = tracker.record_trade_from_position(
+            symbol="BTC",
+            strategy="test",
+            side="short",
+            entry_price=100.0,
+            exit_price=90.0,
+            size=-1.0,  # Negative input
+            entry_time=datetime.now(),
+            exit_time=datetime.now(),
+            capital_at_risk=100.0,
+            exit_reason="test"
+        )
+        
+        assert trade.size == 1.0  # Should be normalized
+        assert trade.pnl == 10.0  # (100 - 90) * 1.0 = 10.0
+

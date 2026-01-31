@@ -356,15 +356,19 @@ class PerformanceTracker:
         if pnl_override is not None:
             pnl = float(pnl_override)
         else:
+            abs_size = abs(size)
             if side == 'long':
-                pnl = (exit_price - entry_price) * size - fees
+                pnl = (exit_price - entry_price) * abs_size - fees
             elif side == 'short':
-                pnl = (entry_price - exit_price) * size - fees
+                pnl = (entry_price - exit_price) * abs_size - fees
             else:
                 raise ValueError(
                     f"record_trade_from_position() requires pnl_override for side='{side}'. "
                     "Valid price-based sides are 'long' or 'short'."
                 )
+        
+        # Ensure reported size is positive
+        size = abs(size)
         
         # Calculate PnL percentage based on capital at risk
         if pnl_percentage_override is not None:

@@ -621,7 +621,7 @@ class StrategyManager:
                         )
                         
                         # 2. Update DB Size
-                        local_pos.size = exch_size
+                        local_pos.size = abs(exch_size)
                         
                         # 3. Persist updated position atomically
                         self.execution_engine._persist_position(local_pos)
@@ -632,7 +632,7 @@ class StrategyManager:
                         self.logger.info(f"Adopting external increase for {symbol}: +{diff:.4f}")
                         
                         # 1. Update DB Size
-                        local_pos.size = exch_size
+                        local_pos.size = abs(exch_size)
                         
                         # 2. Update Entry Price (Weighted Avg changed)
                         new_entry = float(exch_pos.get('entry_price', local_pos.entry_price))
