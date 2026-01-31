@@ -6,7 +6,7 @@ An automated multi-strategy trading bot for Hyperliquid perpetual futures exchan
 
 ### 🛡️ Robust & Self-Healing
 - **Auto-Reconnecting WebSockets**: Intelligent watchdog detects stale connections (>60s silence) and automatically reconnects, preventing signal generation stoppages.
-- **Graceful Shutdown**: Ensures positions are managed on exit.
+- **Position Persistence**: Positions are persisted in the database and automatically synchronized on restart, preventing loss of state during crashes or updates. Includes detection and correction of "Ghost Positions".
 - **Rate Limit Handling**: Exponential backoff for 429 errors.
 
 ### 🧠 Intelligent Trading Engine
