@@ -35,19 +35,20 @@ class TestHip3Default:
         
         # Mock class-level _discover_perp_dexs to simulate finding multiple universes
         # We patch the METHOD on the class src.api.hyperliquid_api.HyperliquidAPI
-        with patch('src.api.hyperliquid_api.HyperliquidAPI._discover_perp_dexs', return_value=[0, 1]):
+        # perp_dexs now uses strings: "" for native, dex names for HIP-3
+        with patch('src.api.hyperliquid_api.HyperliquidAPI._discover_perp_dexs', return_value=["", "Hypurr"]):
             api = HyperliquidAPI(mock_config)
             
             # 1. Verify HIP-3 enabled flag
             assert api.hip3_enabled is True
-            assert api.perp_dexs == [0, 1]
+            assert api.perp_dexs == ["", "Hypurr"]
             
-            # 2. Test get_positions queries both indices (0 and 1)
-            # Querying user_state(address, dex=dex_index)
+            # 2. Test get_positions queries both dex names ("" and "Hypurr")
+            # Querying user_state(address, dex=dex_name)
             mock_info_instance.user_state.side_effect = [
-                # Response for DEX 0 (Native)
+                # Response for DEX "" (Native)
                 {'assetPositions': [{'position': {'coin': 'BTC', 'szi': '1.0', 'entryPx': '50000'}}]},
-                # Response for DEX 1 (HIP-3)
+                # Response for DEX "Hypurr" (HIP-3)
                 {'assetPositions': [{'position': {'coin': 'TSLA', 'szi': '10.0', 'entryPx': '200'}}]}
             ]
             
@@ -55,24 +56,24 @@ class TestHip3Default:
             
             # Verify calls
             assert mock_info_instance.user_state.call_count == 2
-            mock_info_instance.user_state.assert_any_call(api.public_account_address, dex=0)
-            mock_info_instance.user_state.assert_any_call(api.public_account_address, dex=1)
+            mock_info_instance.user_state.assert_any_call(api.public_account_address, dex="")
+            mock_info_instance.user_state.assert_any_call(api.public_account_address, dex="Hypurr")
             
             # Verify results aggregated
             assert len(positions) == 2
             symbols = {p['symbol'] for p in positions}
             assert 'BTC' in symbols
-            assert '1:TSLA' in symbols # Prefix is applied for index 1
+            assert 'Hypurr:TSLA' in symbols # Prefix is the dex name for HIP-3
             
     @patch('hyperliquid.info.Info')
     @patch('hyperliquid.exchange.Exchange')
     @patch('eth_account.Account')
     def test_discovery_fallback(self, mock_account, mock_exchange, mock_info_cls, mock_config):
-        """Test fallback to [0] if discovery fails."""
+        """Test fallback to [""] if discovery fails."""
          # Mock discovery failure
         with patch('src.api.hyperliquid_api.HyperliquidAPI._discover_perp_dexs', side_effect=Exception("API Error")):
              api = HyperliquidAPI(mock_config)
              
-             # Should default to [0] and not crash
-             assert api.perp_dexs == [0]
+             # Should default to [""] (native dex only) and not crash
+             assert api.perp_dexs == [""]
              assert api.hip3_enabled is True # Still enabled in intent

@@ -891,10 +891,10 @@ class HyperliquidAPI(MarketInterface):
             if self.perp_dexs is None:
                 try:
                     self.perp_dexs = self._discover_perp_dexs()
-                    self.logger.info(f"Auto-discovered PERP DEX indices: {self.perp_dexs}")
+                    self.logger.info(f"Auto-discovered PERP DEX names: {self.perp_dexs}")
                 except Exception as e:
-                    self.logger.warning(f"Failed to auto-discover PERP DEXs: {e}. Defaulting to native [0].")
-                    self.perp_dexs = [0]
+                    self.logger.warning(f"Failed to auto-discover PERP DEXs: {e}. Defaulting to native [\"\"].")
+                    self.perp_dexs = [""]  # Empty string = native dex
             
             # Initialize Info client WITHOUT WebSocket first (fast, non-blocking)
             # WebSocket will be enabled when start() is called
@@ -1012,23 +1012,33 @@ class HyperliquidAPI(MarketInterface):
         return False
     
     def _discover_perp_dexs(self) -> List[str]:
-        """Discover available perp dexes."""
+        """Discover available perp dexes.
+        
+        Returns a list of dex name strings:
+        - "" (empty string) represents the native/original dex
+        - HIP-3 dexes are represented by their names (e.g., "Hypurr")
+        """
         try:
             from hyperliquid.info import Info
             temp_info = Info(self.base_url, skip_ws=True)
             dexs = temp_info.perp_dexs()
             
-            dex_names = [""]  # Always include native
+            # SDK expects dex NAMES as strings, not indices
+            # Native dex is "" (empty string), HIP-3 dexes have names
+            # The API returns: [native_dex_obj, hip3_dex_1, hip3_dex_2, ...]
+            # where hip3 dexes have a "name" field
+            dex_names = [""]  # Always include native dex
             if dexs and len(dexs) > 1:
+                # Add HIP-3 dex names (skip first entry which is native)
                 for dex in dexs[1:]:
-                    if isinstance(dex, dict) and 'name' in dex:
-                        dex_names.append(dex['name'])
+                    if isinstance(dex, dict) and "name" in dex:
+                        dex_names.append(dex["name"])
             
-            self.logger.info(f"Discovered perp dexes: {dex_names}")
+            self.logger.info(f"Discovered perp dexes (names): {dex_names}")
             return dex_names
         except Exception as e:
             self.logger.warning(f"Perp dex discovery failed: {e}")
-            return [""]
+            return [""]  # Default to native dex only
     
     def _setup_websocket_subscriptions(self):
         """Setup WebSocket subscriptions using SDK."""
@@ -1136,7 +1146,12 @@ class HyperliquidAPI(MarketInterface):
                         is_retryable = False
                     else:
                         is_retryable = True
-                elif "network" in err_str.lower() or "connection" in err_str.lower(): # Network
+                elif any(pattern in err_str.lower() for pattern in [
+                    "connectionerror", "connection refused", "connection reset",
+                    "connection failed", "networkerror", "network unreachable",
+                    "timeout", "timed out"
+                ]):
+                    # Network errors - but NOT HTTP headers like "'Connection': 'keep-alive'"
                     is_retryable = True
                     
                 if is_retryable and attempt < max_retries:
@@ -2131,9 +2146,10 @@ class HyperliquidAPI(MarketInterface):
         def _fetch():
             # Iterate through all discovered DEXs to aggregate balance
             # HIP-3/Spot assets live in different contexts
-            dexs_to_query = self.perp_dexs if self.perp_dexs else [0]
-            if 0 not in dexs_to_query:
-                dexs_to_query = [0] + dexs_to_query
+            # perp_dexs is a list of dex name strings: "" for native, "Hypurr" etc for HIP-3
+            dexs_to_query = self.perp_dexs if self.perp_dexs else [""]
+            if "" not in dexs_to_query:
+                dexs_to_query = [""] + dexs_to_query
 
             total_equity = 0.0
             total_free_margin = 0.0 # Will calculate as Total Equity - Total Margin Used
@@ -2143,12 +2159,13 @@ class HyperliquidAPI(MarketInterface):
             # Track main withdrawable to detect shared collateral vs segregated
             main_withdrawable = 0.0
             
-            for i, dex_index in enumerate(dexs_to_query):
+            for i, dex_name in enumerate(dexs_to_query):
                 try:
                     # Fetch state for this context
                     # Note: We don't cache individual DEX calls here efficiently yet, 
                     # but rate limiter handles them.
-                    user_state = self.info.user_state(self.public_account_address, dex=dex_index)
+                    # SDK expects dex as a string: "" for native, dex name for HIP-3
+                    user_state = self.info.user_state(self.public_account_address, dex=dex_name)
                     
                     margin_summary = user_state.get('marginSummary', {})
                     account_value = float(margin_summary.get('accountValue', 0))
@@ -2156,7 +2173,7 @@ class HyperliquidAPI(MarketInterface):
                     unrealized_pnl = float(margin_summary.get('totalUnrealizedPnl', 0))
                     withdrawable = float(margin_summary.get('withdrawable', 0))
                     
-                    if dex_index == 0:
+                    if dex_name == "":
                         # Native Context (Baseline)
                         total_equity += account_value
                         main_withdrawable = withdrawable
@@ -2181,7 +2198,7 @@ class HyperliquidAPI(MarketInterface):
                     total_unrealized_pnl += unrealized_pnl
                     
                 except Exception as e:
-                    self.logger.warning(f"Failed to fetch balance for dex {dex_index}: {e}")
+                    self.logger.warning(f"Failed to fetch balance for dex '{dex_name}': {e}")
 
             result = {
                 'wallet_address': self.public_account_address,
@@ -2208,18 +2225,17 @@ class HyperliquidAPI(MarketInterface):
             
             # Determine lists of DEXs to query
             # HIP-3 (Spot/Hyperliquidity) support is now enabled by default.
-            # We query all discovered DEX indices plus the native one index 0.
-            # dexs_to_query represents the indices to check.
+            # We query all discovered DEX names: "" for native, "Hypurr" etc for HIP-3.
             
-            dexs_to_query = self.perp_dexs if self.perp_dexs else [0]
+            dexs_to_query = self.perp_dexs if self.perp_dexs else [""]
             
-            # Ensure we are handling the format correctly. perp_dexs is usually list of ints.
-            # The API expects integer index for user_state calls.
+            # perp_dexs is a list of dex name strings.
+            # The SDK expects string dex names for user_state calls.
             
-            for dex_index in dexs_to_query:
+            for dex_name in dexs_to_query:
                 # Let exceptions bubble up to _rate_limited_call for proper retry on network error
-                # Pass the dex index explicitly. Native is index 0.
-                user_state = self.info.user_state(self.public_account_address, dex=dex_index)
+                # Pass the dex name explicitly. Native is "" (empty string).
+                user_state = self.info.user_state(self.public_account_address, dex=dex_name)
                 
                 for pos in user_state.get('assetPositions', []):
                     position_data = pos.get('position', {})
@@ -2229,18 +2245,16 @@ class HyperliquidAPI(MarketInterface):
                         coin = position_data.get('coin')
                         symbol = coin
                         
-                        # Handle HIP-3 Symbol Prefixing (e.g. 'xyz:PLTR')
-                        # If dex_index is present (and not 0/empty), it's a HIP-3 asset.
-                        # We use the dex_index as the prefix to disambiguate.
-                        # e.g. 'xyz' -> 'xyz:PLTR'
-                        # e.g. 1 -> '1:TSLA' (if user configured indices manually or auto-discovery yielded ints)
+                        # Handle HIP-3 Symbol Prefixing (e.g. 'Hypurr:PLTR')
+                        # If dex_name is present (not empty), it's a HIP-3 asset.
+                        # We use the dex_name as the prefix to disambiguate.
+                        # e.g. 'Hypurr' -> 'Hypurr:PLTR'
                         
-                        # Check truthiness (swallows 0 and empty string, which is correct for Native)
+                        # Check truthiness (empty string is falsy, which is correct for Native)
                         # Also check if prefix is already applied (some SDK versions might?)
-                        if dex_index:
-                             prefix = str(dex_index)
-                             if not coin.startswith(f"{prefix}:"):
-                                 symbol = f"{prefix}:{coin}"
+                        if dex_name:
+                             if not coin.startswith(f"{dex_name}:"):
+                                 symbol = f"{dex_name}:{coin}"
                         
                         all_positions.append({
                             'symbol': symbol,
@@ -3391,22 +3405,14 @@ class HyperliquidAPI(MarketInterface):
             return False
         
         try:
-            # Calculate timeout timestamp (milliseconds)
+            # Calculate timeout timestamp (milliseconds UTC)
+            # SDK's schedule_cancel expects time in UTC ms, or None to disable
             timeout_ms = int((time.time() + timeout_seconds) * 1000) if timeout_seconds > 0 else None
             
-            # Build the scheduleCancel action
-            action = {
-                "type": "scheduleCancel",
-                "time": timeout_ms
-            }
-            
-            nonce = int(time.time() * 1000)
-            
-            # Use the exchange's internal post method
+            # Use the SDK's built-in schedule_cancel method which handles proper signing
             response = self._rate_limited_call(
-                self.exchange.post,
-                "/exchange",
-                action
+                self.exchange.schedule_cancel,
+                timeout_ms
             )
             
             if timeout_seconds > 0:

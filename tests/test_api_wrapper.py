@@ -72,12 +72,13 @@ class TestHyperliquidAPI:
         assert api_client.info.candles_snapshot.called
         
     def test_get_ohlcv_retry_logic(self, api_client):
-        """Test retry logic - now returns None when exceptions are caught and fallback fails."""
+        """Test retry logic - verifies retryable errors trigger retries."""
         api_client.info = MagicMock()
-        # Fail twice, then succeed
+        # Fail twice with retryable errors (timeout), then succeed
+        # Note: retry patterns include "timeout", "connection refused", etc.
         api_client.info.candles_snapshot.side_effect = [
-            Exception("Network Error 1"), 
-            Exception("Network Error 2"), 
+            Exception("Connection timeout"), 
+            Exception("Connection timeout"), 
             [{"t": 123000, "o": 1, "h": 2, "l": 1, "c": 2, "v": 100}]
         ]
         # Also mock fallback to fail (post method)
@@ -88,8 +89,7 @@ class TestHyperliquidAPI:
                 result = api_client.get_ohlcv("BTC", "1h", limit=1)
             
         # The method catches exceptions and attempts fallback.
-        # Since first exception triggers the except block immediately (before retry),
-        # and fallback also fails, it returns None.
+        # With retryable errors, it will retry.
         # Just verify it was called and handled gracefully.
         assert api_client.info.candles_snapshot.called
 

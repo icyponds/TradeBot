@@ -124,12 +124,12 @@ def create_dashboard_app() -> Flask:
                 if symbol not in _strategy_manager.positions:
                     return jsonify({'success': False, 'error': f'Position {symbol} not found'}), 404
                     
-                success = _strategy_manager.close_position(symbol, reason="manual_dashboard")
+                success, message = _strategy_manager.close_position(symbol, reason="manual_dashboard")
                 
                 if success:
                     return jsonify({'success': True, 'message': f'Closed position {symbol}'})
                 else:
-                    return jsonify({'success': False, 'error': 'Failed to close position'}), 500
+                    return jsonify({'success': False, 'error': f'Failed: {message}'}), 500
 
             elif pos_type == 'multi':
                 # Multi-leg position (identifier = position_id)

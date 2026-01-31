@@ -539,11 +539,75 @@
             font-size: 13px;
         }
 
+        /* Toast Notifications */
+        .toast-container {
+            position: fixed;
+            bottom: 24px;
+            right: 24px;
+            z-index: 1000;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .toast {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            padding: 16px 20px;
+            border-radius: 8px;
+            color: var(--text-primary);
+            font-size: 14px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+            min-width: 300px;
+            animation: slideIn 0.3s ease-out;
+            border-left: 4px solid var(--accent);
+        }
+
+        .toast.success {
+            border-left-color: var(--green);
+        }
+
+        .toast.error {
+            border-left-color: var(--red);
+        }
+
+        .toast-icon {
+            font-size: 18px;
+        }
+
+        @keyframes slideIn {
+            from {
+                transform: translateX(100%);
+                opacity: 0;
+            }
+
+            to {
+                transform: translateX(0);
+                opacity: 1;
+            }
+        }
+
+        @keyframes fadeOut {
+            from {
+                opacity: 1;
+            }
+
+            to {
+                opacity: 0;
+            }
+        }
+
         /* ... existing styles ... */
     </style>
 </head>
 
 <body>
+    <!-- Toast Container -->
+    <div id="toast-container" class="toast-container"></div>
+
     <div class="container">
         <!-- Header -->
         <div class="header">
@@ -740,6 +804,29 @@
                 return pnl >= 0 ? 'pnl-positive' : 'pnl-negative';
             }
 
+            function showToast(message, type = 'info') {
+                const container = document.getElementById('toast-container');
+                const toast = document.createElement('div');
+                toast.className = `toast ${type}`;
+                
+                let icon = 'ℹ️';
+                if (type === 'success') icon = '✅';
+                if (type === 'error') icon = '🚨';
+                
+                toast.innerHTML = `
+                    <div class="toast-icon">${icon}</div>
+                    <div class="toast-message">${message}</div>
+                `;
+                
+                container.appendChild(toast);
+                
+                // Remove after 5 seconds
+                setTimeout(() => {
+                    toast.style.animation = 'fadeOut 0.3s forwards';
+                    setTimeout(() => toast.remove(), 300);
+                }, 5000);
+            }
+
             async function closePosition(identifier, type) {
                 if (!confirm(`Are you sure you want to close this ${type} position?`)) {
                     return;
@@ -760,15 +847,14 @@
                     const result = await response.json();
 
                     if (result.success) {
-                        // Show success toast (or just alert for now)
-                        // alert('Close request sent: ' + result.message);
+                        showToast(result.message || 'Position closed successfully', 'success');
                         updateDashboard(); // Refresh immediately
                     } else {
-                        alert('Error closing position: ' + result.error);
+                        showToast('Error: ' + (result.error || 'Unknown error'), 'error');
                     }
                 } catch (error) {
                     console.error('Error closing position:', error);
-                    alert('Failed to send close request');
+                    showToast('Failed to send close request: ' + error.message, 'error');
                 }
             }
 

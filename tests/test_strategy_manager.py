@@ -93,7 +93,8 @@ class TestStrategyManager:
         
         # Mock dependencies
         strategy_manager._should_close_position = MagicMock(return_value="take_profit")
-        strategy_manager.close_position = MagicMock(return_value=True)
+        # close_position returns (bool, str) tuple
+        strategy_manager.close_position = MagicMock(return_value=(True, "Success"))
         strategy_manager._check_emergency_stop = MagicMock(return_value=False)
         
         # Run method

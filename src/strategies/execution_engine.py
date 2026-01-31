@@ -6,7 +6,7 @@ import random
 import json
 import os
 from datetime import datetime, timedelta
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 import pandas as pd
 
 from src.models.trade import Trade, Position, MultiLegPosition, PositionLeg
@@ -353,11 +353,11 @@ class ExecutionEngine:
         except Exception as e:
             self.logger.error(f"Error executing trade for {symbol}: {e}")
     
-    def close_position(self, symbol: str, reason: str = "manual", timestamp: datetime = None) -> bool:
+    def close_position(self, symbol: str, reason: str = "manual", timestamp: datetime = None) -> Tuple[bool, str]:
         """Close a position and record it."""
         if symbol not in self.positions:
             self.logger.warning(f"No position to close for {symbol}")
-            return False
+            return False, "Position not found"
             
         current_time = timestamp if timestamp else datetime.now()
         
@@ -373,6 +373,7 @@ class ExecutionEngine:
             max_attempts = 5
             order_result = None
             
+            last_error = None
             for attempt in range(max_attempts):
                 try:
                     order_result = self.market_api.execute_order(
@@ -388,6 +389,7 @@ class ExecutionEngine:
                         break  # Success
                         
                 except Exception as e:
+                    last_error = e
                     self.logger.warning(f"Close attempt {attempt+1}/{max_attempts} for {symbol}: {e}")
                 
                 if attempt < max_attempts - 1:
@@ -398,8 +400,8 @@ class ExecutionEngine:
                     time.sleep(wait_time)
             
             if not order_result or order_result.get('filled_size', 0) == 0:
-                self.logger.error(f"🚨 FAILED to close {symbol} after {max_attempts} attempts!")
-                return False
+                self.logger.error(f"🚨 FAILED to close {symbol} after {max_attempts} attempts! Last error: {last_error}")
+                return False, f"Failed after {max_attempts} attempts. Last error: {last_error}"
             
             if order_result and order_result.get('filled_size', 0) > 0:
                 exit_price = order_result['avg_fill_price']
@@ -473,13 +475,13 @@ class ExecutionEngine:
                     )
 
                 self.logger.info(f"✅ Closed position for {symbol}: P&L ${pnl:.2f} ({reason})")
-                return True
+                return True, "Success"
                 
-            return False
+            return False, "Unknown execution error"
             
         except Exception as e:
             self.logger.error(f"Error closing position for {symbol}: {e}")
-            return False
+            return False, f"Exception: {str(e)}"
 
     def handle_multi_leg_signal(
         self, 

@@ -35,7 +35,8 @@ class TestDashboardCloseRepro:
         mock_strategy_manager.positions = {
             'BTC': MagicMock()
         }
-        mock_strategy_manager.close_position.return_value = True
+        # close_position returns (bool, str) tuple
+        mock_strategy_manager.close_position.return_value = (True, "Success")
         
         # Call endpoint
         response = client.post('/api/close_position', json={
@@ -65,7 +66,8 @@ class TestDashboardCloseRepro:
     def test_close_single_leg_position_failure(self, client, mock_strategy_manager):
         """Test close failure (e.g. execution error)."""
         mock_strategy_manager.positions = {'BTC': MagicMock()}
-        mock_strategy_manager.close_position.return_value = False
+        # close_position returns (bool, str) tuple
+        mock_strategy_manager.close_position.return_value = (False, "Order rejected")
         
         response = client.post('/api/close_position', json={
             'identifier': 'BTC',
@@ -75,7 +77,7 @@ class TestDashboardCloseRepro:
         assert response.status_code == 500
         data = json.loads(response.data)
         assert data['success'] is False
-        assert data['error'] == 'Failed to close position'
+        assert 'Order rejected' in data['error']
 
     def test_close_multi_leg_position(self, client, mock_strategy_manager):
         """Test multi-leg close."""

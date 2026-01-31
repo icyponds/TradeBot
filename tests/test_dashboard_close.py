@@ -39,7 +39,7 @@ def client(mock_strategy_manager):
         yield client
 
 def test_close_single_leg_success(client, mock_strategy_manager):
-    mock_strategy_manager.close_position.return_value = True
+    mock_strategy_manager.close_position.return_value = (True, "Success")
     
     response = client.post('/api/close_position', json={
         'identifier': 'BTC-PERP',

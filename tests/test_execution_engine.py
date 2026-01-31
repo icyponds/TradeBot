@@ -97,7 +97,8 @@ class TestExecutionEngine:
         
         result = execution_engine.close_position(symbol, reason="test")
         
-        assert result is True
+        # close_position returns (bool, str) tuple
+        assert result[0] is True
         
         assert symbol not in execution_engine.positions
         mock_market_api.execute_order.assert_called()

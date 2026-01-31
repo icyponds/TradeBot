@@ -18,7 +18,7 @@ class TestEquityAggregation:
                     'private_key': '0x123',
                     'wallet_address': '0x123'
                 },
-                'hip3': {'enabled': True, 'perp_dexs': [0, 1]}
+                'hip3': {'enabled': True, 'perp_dexs': ["", "Hypurr"]}
             }
             api = HyperliquidAPI(config)
             api.exchange = MagicMock()
@@ -28,14 +28,14 @@ class TestEquityAggregation:
     def test_shared_collateral_aggregation(self, mock_api):
         """
         Verify equity aggregation when collateral (USDC) is shared.
-        Dex 0: Equity 1000 (900 Cash + 100 PnL)
-        Dex 1: Equity 950 (900 Cash + 50 Spot Value)
+        Dex "" (native): Equity 1000 (900 Cash + 100 PnL)
+        Dex "Hypurr" (HIP-3): Equity 950 (900 Cash + 50 Spot Value)
         Expected Total: 1000 + 50 = 1050 (Cash counted once)
         """
-        mock_api.perp_dexs = [0, 1]
+        mock_api.perp_dexs = ["", "Hypurr"]  # String dex names
         
-        def mock_user_state(address, dex=0):
-            if dex == 0:
+        def mock_user_state(address, dex=""):
+            if dex == "":  # Native dex
                 return {
                     'marginSummary': {
                         'accountValue': '1000.0',
@@ -44,7 +44,7 @@ class TestEquityAggregation:
                         'withdrawable': '900.0'
                     }
                 }
-            elif dex == 1:
+            elif dex == "Hypurr":  # HIP-3 dex
                 return {
                     'marginSummary': {
                         'accountValue': '950.0', # 900 Cash + 50 Spot
@@ -60,24 +60,24 @@ class TestEquityAggregation:
         balance = mock_api.get_account_balance()
         
         # Expected:
-        # Dex 0 Equity: 1000
-        # Dex 1 Contribution: 950 - 900 (shared cash) = 50
+        # Dex "" Equity: 1000
+        # Dex "Hypurr" Contribution: 950 - 900 (shared cash) = 50
         # Total: 1050
         assert balance['total_equity'] == 1050.0
-        assert balance['unrealized_pnl'] == 100.0 # Only Dex 0 has PnL here
+        assert balance['unrealized_pnl'] == 100.0 # Only native dex has PnL here
         assert balance['used_margin'] == 150.0 # 100 + 50
 
     def test_segregated_collateral_aggregation(self, mock_api):
         """
         Verify equity aggregation when collateral is NOT shared.
-        Dex 0: Equity 1000 (900 Cash + 100 PnL)
-        Dex 1: Equity 500 (500 Cash + 0 PnL) - Completely separate
+        Dex "" (native): Equity 1000 (900 Cash + 100 PnL)
+        Dex "Hypurr" (HIP-3): Equity 500 (500 Cash + 0 PnL) - Completely separate
         Expected Total: 1000 + 500 = 1500
         """
-        mock_api.perp_dexs = [0, 1]
+        mock_api.perp_dexs = ["", "Hypurr"]  # String dex names
         
-        def mock_user_state(address, dex=0):
-            if dex == 0:
+        def mock_user_state(address, dex=""):
+            if dex == "":  # Native dex
                 return {
                     'marginSummary': {
                         'accountValue': '1000.0',
@@ -86,7 +86,7 @@ class TestEquityAggregation:
                         'withdrawable': '900.0'
                     }
                 }
-            elif dex == 1:
+            elif dex == "Hypurr":  # HIP-3 dex
                 return {
                     'marginSummary': {
                         'accountValue': '500.0',
@@ -102,7 +102,7 @@ class TestEquityAggregation:
         balance = mock_api.get_account_balance()
         
         # Expected:
-        # Dex 0 Equity: 1000
-        # Dex 1 Contribution: 500 (full amount since withdrawable differs)
+        # Dex "" Equity: 1000
+        # Dex "Hypurr" Contribution: 500 (full amount since withdrawable differs)
         # Total: 1500
         assert balance['total_equity'] == 1500.0

@@ -156,7 +156,8 @@ class TestClosePositionRetry:
         with patch('time.sleep'):
             result = execution_engine.close_position('TAO', 'take_profit')
         
-        assert result is True
+        # close_position returns (bool, str) tuple
+        assert result[0] is True
         assert execution_engine.market_api.execute_order.call_count == 3
     
     def test_close_position_fails_after_max_retries(self, execution_engine):
@@ -177,7 +178,8 @@ class TestClosePositionRetry:
         with patch('time.sleep'):
             result = execution_engine.close_position('TAO', 'stop_loss')
         
-        assert result is False
+        # close_position returns (bool, str) tuple
+        assert result[0] is False
         assert execution_engine.market_api.execute_order.call_count == 5  # max_attempts
 
 

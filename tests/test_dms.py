@@ -17,7 +17,7 @@ class TestDeadMansSwitch:
                     'private_key': '0x123',
                     'wallet_address': '0x123'
                 },
-                'hip3': {'enabled': True, 'perp_dexs': [0]}
+                'hip3': {'enabled': True, 'perp_dexs': [""]}
             }
             api = HyperliquidAPI(config)
             api.exchange = MagicMock()
@@ -25,7 +25,7 @@ class TestDeadMansSwitch:
             return api
 
     def test_set_dead_mans_switch_signature(self, mock_api):
-        """Test that set_dead_mans_switch calls exchange.post with correct args (no nonce)."""
+        """Test that set_dead_mans_switch calls exchange.schedule_cancel with correct args."""
         
         # 1. Call set_dead_mans_switch
         result = mock_api.set_dead_mans_switch(timeout_seconds=30)
@@ -34,25 +34,17 @@ class TestDeadMansSwitch:
         assert result is True
         
         # 3. Verify Mock Call
-        # Expected: exchange.post("/exchange", payload)
-        # Payload should be {'type': 'mkt', 'action': {'type': 'setDms', 'timeout': 30000}}
-        # CRITICAL: Confirm 'nonce' kwarg is NOT passed
+        # The SDK's schedule_cancel method handles signing properly
+        # Expected: exchange.schedule_cancel(timeout_ms)
         
-        assert mock_api.exchange.post.called
+        assert mock_api.exchange.schedule_cancel.called
         
-        args, kwargs = mock_api.exchange.post.call_args
+        args, kwargs = mock_api.exchange.schedule_cancel.call_args
         
-        # Check Positional Args
-        assert args[0] == "/exchange"
+        # Check Positional Args - first arg is the timeout in ms
+        timeout_ms = args[0]
         
-        payload = args[1]
-        payload = args[1]
-        assert payload['type'] == 'scheduleCancel'
         # Verify time is approximately now + 30s (in ms)
         # We can't match exact ms, but can check it's an int and > 0
-        assert isinstance(payload['time'], int)
-        assert payload['time'] > 0
-        
-        # Check Keyword Args
-        # Ensure 'nonce' is NOT in kwargs
-        assert 'nonce' not in kwargs, "Exchange.post was called with invalid 'nonce' argument!"
+        assert isinstance(timeout_ms, int)
+        assert timeout_ms > 0

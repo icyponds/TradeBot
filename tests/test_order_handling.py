@@ -44,10 +44,11 @@ class TestDeadMansSwitch:
         result = mock_api.set_dead_mans_switch(0)
         
         assert result is True
-        # Action should have time=None for disable
+        # With timeout=0, schedule_cancel is called with None
         call_args = mock_api._rate_limited_call.call_args
-        action = call_args[0][2]  # Third positional arg is the action
-        assert action['time'] is None
+        # Args: (exchange.schedule_cancel, timeout_ms)
+        timeout_ms = call_args[0][1]  # Second positional arg is the timeout
+        assert timeout_ms is None
     
     def test_set_dead_mans_switch_no_exchange(self, mock_api):
         """Test dead man's switch fails gracefully without exchange."""

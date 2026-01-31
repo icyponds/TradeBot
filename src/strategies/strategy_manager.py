@@ -2893,7 +2893,7 @@ class StrategyManager:
                 count += 1
         return count
     
-    def close_position(self, symbol: str, reason: str = "manual", timestamp: datetime = None) -> bool:
+    def close_position(self, symbol: str, reason: str = "manual", timestamp: datetime = None) -> Tuple[bool, str]:
 
         """Close a position and record it."""
         return self.execution_engine.close_position(symbol, reason, timestamp=timestamp)
@@ -3816,7 +3816,8 @@ class StrategyManager:
             
             # Close positions
             for symbol, reason in positions_to_close:
-                if self.close_position(symbol, reason, timestamp=timestamp):
+                success, _ = self.close_position(symbol, reason, timestamp=timestamp)
+                if success:
                     self.total_positions_closed += 1
             
             # Emergency stop check (every 30 seconds)
