@@ -1086,25 +1086,62 @@ class HyperliquidAPI(MarketInterface):
             self._setup_websocket_subscriptions()
             self.logger.info("WebSocket enabled successfully")
     
+    
+    def check_connection_status(self) -> bool:
+        """
+        Active heartbeat to check WebSocket health and trigger non-blocking reconnection if needed.
+        Designed to be called from the main trading loop without blocking.
+        
+        Returns:
+            True if connection is healthy or reconnecting, False if critical error.
+        """
+        # 1. Check health monitor
+        if self.health_monitor.check_and_request_reconnect():
+            self.logger.warning("Main Loop Heartbeat: WebSocket is stale. Triggering background reconnection...")
+            
+            # Spawn non-blocking reconnection thread
+            # We use a lock to ensure only one reconnect thread runs at a time
+            if getattr(self, '_reconnect_thread', None) and self._reconnect_thread.is_alive():
+                self.logger.debug("Reconnection thread already running, skipping dispatch.")
+                return True
+                
+            self._reconnect_thread = threading.Thread(
+                target=self.attempt_ws_reconnect,
+                name="BackgroundWSReconnect",
+                daemon=True
+            )
+            self._reconnect_thread.start()
+            
+        return True
+
     def attempt_ws_reconnect(self) -> bool:
         """
         Attempt to reconnect WebSocket if stale for too long.
+        Now designed to run in a background thread.
         
         Returns:
             True if reconnection was attempted, False otherwise.
         """
-        if self.health_monitor.check_and_request_reconnect():
-            self.logger.warning("Attempting WebSocket reconnection...")
-            try:
-                self._enable_websocket(timeout=10.0, force_reconnect=True)
-                # Reset health monitor staleness tracking
-                self.health_monitor._reconnect_requested = False
-                self.health_monitor._ws_stale_since = None
-                self.logger.info("WebSocket reconnection completed")
-                return True
-            except Exception as e:
-                self.logger.error(f"WebSocket reconnection failed: {e}")
-        return False
+        # Double check inside the thread (race condition handling)
+        if not self.health_monitor.check_and_request_reconnect():
+            return False
+
+        self.logger.warning("Attempting WebSocket reconnection (Background Thread)...")
+        try:
+            # Force close existing connection first to ensure clean slate
+            # (Note: _enable_websocket with force_reconnect=True handles logical reset, 
+            # but we want to ensure the socket is truly closed at the network level if possible)
+            
+            self._enable_websocket(timeout=10.0, force_reconnect=True)
+            
+            # Reset health monitor staleness tracking on success
+            self.health_monitor._reconnect_requested = False
+            self.health_monitor._ws_stale_since = None
+            self.logger.info("WebSocket reconnection completed successfully")
+            return True
+        except Exception as e:
+            self.logger.error(f"WebSocket reconnection failed: {e}")
+            return False
     
     def _discover_perp_dexs(self) -> List[str]:
         """Discover available perp dexes.

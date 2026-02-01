@@ -2065,6 +2065,10 @@ class StrategyManager:
         
         while self.is_running:
             try:
+                # Active Heartbeat: Ensure WebSocket is connected (non-blocking)
+                if hasattr(self.market_api, 'check_connection_status'):
+                    self.market_api.check_connection_status()
+
                 # Run one cycle of trading logic
                 # This has been extracted to allow step-by-step execution in backtesting
                 self.run_trading_cycle()
