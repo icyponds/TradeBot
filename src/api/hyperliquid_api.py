@@ -2291,6 +2291,8 @@ class HyperliquidAPI(MarketInterface):
             # Track main withdrawable to detect shared collateral vs segregated
             main_withdrawable = 0.0
             
+            fetches_succeeded = 0
+            
             for i, dex_name in enumerate(dexs_to_query):
                 try:
                     # Fetch state for this context
@@ -2328,9 +2330,14 @@ class HyperliquidAPI(MarketInterface):
                     
                     total_used_margin += used_margin
                     total_unrealized_pnl += unrealized_pnl
+                    fetches_succeeded += 1
                     
                 except Exception as e:
                     self.logger.warning(f"Failed to fetch balance for dex '{dex_name}': {e}")
+
+            if fetches_succeeded == 0:
+                 self.logger.error("Failed to fetch balance for ANY dex context. Returning None to trigger fallback.")
+                 return None
 
             result = {
                 'wallet_address': self.public_account_address,
