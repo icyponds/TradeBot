@@ -67,7 +67,7 @@ def create_mock_ohlcv(length=100, trend=False):
 class TestStrategyOptimizations:
 
     def test_stat_arb_tight_stop(self, mock_config):
-        """Test that Stat Arb triggers stop loss at 3.0 sigma (Hard Stop)."""
+        """Test that Stat Arb triggers stop loss at 4.0 sigma (Hard Stop) after grace period."""
         strategy = StatisticalArbitrageStrategy(mock_config)
         strategy.active_spreads = {
             'A/B': {
@@ -78,19 +78,30 @@ class TestStrategyOptimizations:
             }
         }
         
-        strategy._calculate_spread_zscore = MagicMock(return_value=3.1)
+        # Z-score above 4.0 threshold
+        strategy._calculate_spread_zscore = MagicMock(return_value=4.2)
         strategy._get_hedge_ratio = MagicMock(return_value=(1.0, 1.0))
         
         df_a = create_mock_ohlcv()
         df_b = create_mock_ohlcv()
         
+        # First call starts grace period
+        res = strategy.generate_pair_signal('A', df_a, 'B', df_b)
+        assert res is None  # Grace period just started
+        assert 'A/B' in strategy.regime_break_grace_periods
+        
+        # Simulate grace period expired
+        from datetime import datetime, timedelta
+        strategy.regime_break_grace_periods['A/B'] = (datetime.now() - timedelta(seconds=400)).timestamp()
+        
+        # Second call triggers exit
         res = strategy.generate_pair_signal('A', df_a, 'B', df_b)
         
-        # Expect a 'buy' signal (closing short) with reason "Regime Break ... > 3.0"
+        # Expect a 'buy' signal (closing short) with reason "Regime Break ... > 4.0"
         assert res is not None
-        assert res['signal'] == 'buy' # Close short
+        assert res['signal'] == 'buy'  # Close short
         assert "Regime Break" in res['reason']
-        assert "3.0" in res['reason'] # Verify updated threshold
+        assert "4" in res['reason']  # Verify threshold 4.0 in reason
 
     def test_ou_adx_filter(self, mock_config):
         """Test that OU Mean Reversion rejects signals when ADX > 30."""

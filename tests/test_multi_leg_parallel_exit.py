@@ -59,6 +59,12 @@ class TestMultiLegParallelExit(unittest.TestCase):
             
         self.market_api.execute_order.side_effect = slow_execute
         self.market_api.get_execution_fee.return_value = 0.1
+        
+        # Mock get_positions to return the legs (for pre-exit verification)
+        self.market_api.get_positions.return_value = [
+            {'coin': 'LINK', 'szi': '10.0'},
+            {'coin': 'AVAX', 'szi': '-5.0'},
+        ]
 
         # 3. Trigger Exit
         signal = {'action': 'exit', 'reason': 'test', 'urgency': 'high'}

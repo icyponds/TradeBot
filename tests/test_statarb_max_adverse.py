@@ -122,7 +122,7 @@ class TestStatArbMaxAdverse:
         assert pair_key not in strategy.active_spreads # Position removed
 
     def test_hard_stop_trigger(self, strategy):
-        """Test hard stop triggers at |z| > 4.0."""
+        """Test hard stop triggers at |z| > 4.0 after grace period expires."""
         symbol_a = 'BTC'
         symbol_b = 'ETH'
         pair_key = f"{symbol_a}/{symbol_b}"
@@ -145,10 +145,21 @@ class TestStatArbMaxAdverse:
         ohlcv_a = pd.DataFrame({'close': [50000.0] * 100})
         ohlcv_b = pd.DataFrame({'close': [2000.0] * 100})
         
+        # First call: Starts grace period, should NOT exit yet
+        res = strategy.generate_pair_signal(symbol_a, ohlcv_a, symbol_b, ohlcv_b)
+        assert res is None  # Grace period just started
+        assert pair_key in strategy.active_spreads
+        assert pair_key in strategy.regime_break_grace_periods  # Grace started
+        
+        # Simulate grace period expired (set timestamp to past)
+        from datetime import datetime, timedelta
+        strategy.regime_break_grace_periods[pair_key] = (datetime.now() - timedelta(seconds=400)).timestamp()
+        
+        # Second call: Grace period expired, should trigger exit now
         res = strategy.generate_pair_signal(symbol_a, ohlcv_a, symbol_b, ohlcv_b)
         
         assert res is not None
-        assert res['signal'] == 'sell' # Close Long
+        assert res['signal'] == 'sell'  # Close Long
         assert "Regime Break" in res['reason']
         assert pair_key not in strategy.active_spreads
 
