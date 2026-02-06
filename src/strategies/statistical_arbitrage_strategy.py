@@ -60,6 +60,11 @@ class StatisticalArbitrageStrategy(BaseStrategy):
         self.max_holding_hours = stat_arb_config.get('max_holding_hours', 120) # Default 5 days
         self.max_adverse_z_delta = stat_arb_config.get('max_adverse_z_delta', 1.0)  # Exit if z moves 1.0σ against entry (Tightened from 1.5)
         
+        # Regime break detection (per trade analysis: 366+ premature exits at 3.0)
+        self.regime_break_threshold = stat_arb_config.get('regime_break_threshold', 4.0)  # Increased from 3.0
+        self.regime_break_grace_seconds = stat_arb_config.get('regime_break_grace_seconds', 300)  # 5 minutes
+        self.regime_break_grace_periods: Dict[str, float] = {}  # pair_key -> timestamp of first breach
+        
         # Cointegration parameters
         self.adf_pvalue_threshold = coint_config.get('adf_pvalue_threshold', 0.05)
         self.half_life_max_hours = coint_config.get('half_life_max_hours', 48)
@@ -84,6 +89,7 @@ class StatisticalArbitrageStrategy(BaseStrategy):
         
         self.logger.info(f"Initialized Cointegration Stat Arb Strategy: "
                         f"z_entry={self.z_score_entry}, z_exit={self.z_score_exit}, "
+                        f"regime_break={self.regime_break_threshold}, grace={self.regime_break_grace_seconds}s, "
                         f"kalman={self.use_kalman_filter}")
     
     def get_regime_adjusted_params(self, symbol: str) -> Dict[str, float]:
@@ -249,11 +255,30 @@ class StatisticalArbitrageStrategy(BaseStrategy):
                     signal = 'buy'
                     reason = f'Stat Arb Exit: {pair_key} Z-Score {z_score:.2f} < {z_exit:.2f} (Close Short)'
                     del self.active_spreads[pair_key]
-                # Stop Loss Handling
-                elif z_score > 3.0: # Hard Stop (Tightened from 4.0)
-                    signal = 'buy' 
-                    reason = f'Stat Arb Stop: {pair_key} Regime Break Z-Score {z_score:.2f} > 3.0'
-                    del self.active_spreads[pair_key]
+                # Stop Loss Handling: Regime Break with Grace Period
+                elif z_score > self.regime_break_threshold:
+                    # Check grace period
+                    current_time = datetime.now().timestamp()
+                    if pair_key not in self.regime_break_grace_periods:
+                        # First breach - start grace period
+                        self.regime_break_grace_periods[pair_key] = current_time
+                        self.logger.debug(f"Regime break grace started for {pair_key}: z={z_score:.2f}")
+                    else:
+                        # Check if grace period expired
+                        elapsed = current_time - self.regime_break_grace_periods[pair_key]
+                        if elapsed > self.regime_break_grace_seconds:
+                            # Grace period expired - exit now
+                            signal = 'buy' 
+                            reason = f'Stat Arb Stop: {pair_key} Regime Break Z-Score {z_score:.2f} > {self.regime_break_threshold} (sustained {elapsed:.0f}s)'
+                            del self.active_spreads[pair_key]
+                            self.regime_break_grace_periods.pop(pair_key, None)
+                        else:
+                            self.logger.debug(f"Regime break grace active for {pair_key}: {elapsed:.0f}/{self.regime_break_grace_seconds}s")
+                else:
+                    # Z-score back below threshold - clear grace period
+                    if pair_key in self.regime_break_grace_periods:
+                        self.regime_break_grace_periods.pop(pair_key, None)
+                        self.logger.debug(f"Regime break grace cleared for {pair_key}: z={z_score:.2f}")
                 else:
                     # Max Adverse Stop (Check entry z-score)
                     entry_z = self.active_spreads[pair_key].get('entry_zscore')
@@ -267,11 +292,30 @@ class StatisticalArbitrageStrategy(BaseStrategy):
                     signal = 'sell'
                     reason = f'Stat Arb Exit: {pair_key} Z-Score {z_score:.2f} > -{z_exit:.2f} (Close Long)'
                     del self.active_spreads[pair_key]
-                # Stop Loss Handling
-                elif z_score < -3.0: # Hard Stop (Tightened from 4.0)
-                    signal = 'sell'
-                    reason = f'Stat Arb Stop: {pair_key} Regime Break Z-Score {z_score:.2f} < -3.0'
-                    del self.active_spreads[pair_key]
+                # Stop Loss Handling: Regime Break with Grace Period
+                elif z_score < -self.regime_break_threshold:
+                    # Check grace period
+                    current_time = datetime.now().timestamp()
+                    if pair_key not in self.regime_break_grace_periods:
+                        # First breach - start grace period
+                        self.regime_break_grace_periods[pair_key] = current_time
+                        self.logger.debug(f"Regime break grace started for {pair_key}: z={z_score:.2f}")
+                    else:
+                        # Check if grace period expired
+                        elapsed = current_time - self.regime_break_grace_periods[pair_key]
+                        if elapsed > self.regime_break_grace_seconds:
+                            # Grace period expired - exit now
+                            signal = 'sell'
+                            reason = f'Stat Arb Stop: {pair_key} Regime Break Z-Score {z_score:.2f} < -{self.regime_break_threshold} (sustained {elapsed:.0f}s)'
+                            del self.active_spreads[pair_key]
+                            self.regime_break_grace_periods.pop(pair_key, None)
+                        else:
+                            self.logger.debug(f"Regime break grace active for {pair_key}: {elapsed:.0f}/{self.regime_break_grace_seconds}s")
+                else:
+                    # Z-score back below threshold - clear grace period
+                    if pair_key in self.regime_break_grace_periods:
+                        self.regime_break_grace_periods.pop(pair_key, None)
+                        self.logger.debug(f"Regime break grace cleared for {pair_key}: z={z_score:.2f}")
                 else:
                     # Max Adverse Stop (Check entry z-score)
                     entry_z = self.active_spreads[pair_key].get('entry_zscore')
