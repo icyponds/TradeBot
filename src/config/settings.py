@@ -108,7 +108,7 @@ def load_config() -> Dict[str, Any]:
             
             # Portfolio-based position sizing
             "use_portfolio_based_sizing": os.getenv("USE_PORTFOLIO_BASED_SIZING", "true").lower() == "true",
-            "max_position_size_percentage": float(os.getenv("MAX_POSITION_SIZE_PERCENTAGE", "40.0")),  # Max % of portfolio per position (Balanced: 40%)
+            "max_position_size_percentage": float(os.getenv("MAX_POSITION_SIZE_PERCENTAGE", "20.0")),  # Max % of portfolio per position (Reduced by 50% per trade analysis)
             "max_positions_percentage": float(os.getenv("MAX_POSITIONS_PERCENTAGE", "90.0")),  # Max % of portfolio in all positions
             
             # Order monitoring settings
@@ -147,9 +147,14 @@ def load_config() -> Dict[str, Any]:
             # Pair blacklist/penalties to avoid or downweight problematic symbols
             "pair_blacklist": [
                 asset.strip()
-                for asset in os.getenv("PAIR_BLACKLIST", "").split(",")
+                for asset in os.getenv("PAIR_BLACKLIST", "kBONK").split(",")
                 if asset.strip()
             ],
+            # Symbol blacklist per trade performance analysis
+            "symbol_blacklist": {
+                "global": ["kBONK"],  # Worst performer: -$87.85 over 32 trades
+                "stat_arb": ["BTC", "XRP", "ZEC", "AVAX", "ASTER"],  # Poor R/R ratio despite wins
+            },
             "pair_penalties": {
                 # symbol: scale (0-1). Example env: PAIR_PENALTY_STABLE=0.2
                 "STABLE": float(os.getenv("PAIR_PENALTY_STABLE", "1.0")),
@@ -288,11 +293,13 @@ def load_config() -> Dict[str, Any]:
                 # Statistical Arbitrage (15m, 1h, 4h)
                 # stat_arb_15m disabled due to poor backtest performance (-$40)
                 # {"type": "stat_arb", "name": "stat_arb_15m", "timeframe": "15m"},
-                {"type": "stat_arb", "name": "stat_arb_1h",  "timeframe": "1h"},
+                # stat_arb_1h DISABLED per trade analysis: -$162.26 over 232 trades (47% win rate)
+                # {"type": "stat_arb", "name": "stat_arb_1h",  "timeframe": "1h"},
                 {"type": "stat_arb", "name": "stat_arb_4h",  "timeframe": "4h"},
 
                 # OU Mean Reversion (15m, 1h, 4h)
-                {"type": "ou_mean_reversion", "name": "ou_mean_reversion_15m", "timeframe": "15m"},
+                # ou_mean_reversion_15m DISABLED per trade analysis: -$88.50 over 505 trades (44% win rate)
+                # {"type": "ou_mean_reversion", "name": "ou_mean_reversion_15m", "timeframe": "15m"},
                 {"type": "ou_mean_reversion", "name": "ou_mean_reversion_1h",  "timeframe": "1h"},
                 {"type": "ou_mean_reversion", "name": "ou_mean_reversion_4h",  "timeframe": "4h"},
                 

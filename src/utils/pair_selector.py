@@ -1577,6 +1577,26 @@ class DynamicPairSelector:
             if market_type == 'spot':
                 return
             
+            # Apply symbol blacklist filter (from trade performance analysis)
+            symbol_blacklist = self.config.get('trading', {}).get('symbol_blacklist', {})
+            global_blacklist = symbol_blacklist.get('global', [])
+            
+            # Check global blacklist
+            if symbol in global_blacklist:
+                self.logger.debug(f"[Blacklist] Skipped {symbol}: in global blacklist")
+                return
+            
+            # Check strategy-specific blacklists
+            # Get active strategy types to check relevant blacklists
+            active_strategies = self._get_active_strategy_types()
+            for strategy_prefix in ['stat_arb', 'ou_mean_reversion', 'vol_breakout']:
+                if any(strategy_prefix in s for s in active_strategies):
+                    strategy_blacklist = symbol_blacklist.get(strategy_prefix, [])
+                    if symbol in strategy_blacklist:
+                        self.logger.debug(f"[Blacklist] Skipped {symbol}: in {strategy_prefix} blacklist")
+                        return
+
+            
             # Calculate fresh metrics for this asset
             metrics = self._calculate_asset_metrics(asset)
             if not metrics or metrics.composite_score <= 0:
