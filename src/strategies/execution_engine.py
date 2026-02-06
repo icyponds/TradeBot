@@ -839,7 +839,38 @@ class ExecutionEngine:
             position = self._get_multi_leg_position_for_symbol(symbol)
             if not position:
                 return
+            
+            # =========================================================================
+            # PRE-EXIT LEG VERIFICATION: Check all legs still exist on exchange
+            # This catches external closures (liquidations, manual trades) before we
+            # attempt to close legs that no longer exist.
+            # =========================================================================
+            exchange_positions = self.market_api.get_positions() or []
+            exchange_symbols = set()
+            for pos in exchange_positions:
+                sym = pos.get('coin') or pos.get('symbol')
+                if sym:
+                    exchange_symbols.add(sym)
+            
+            legs_on_exchange = [leg for leg in position.legs if leg.symbol in exchange_symbols]
+            legs_missing = [leg for leg in position.legs if leg.symbol not in exchange_symbols]
+            
+            if legs_missing:
+                self.logger.warning(
+                    f"⚠️ Pre-exit check: {len(legs_missing)} leg(s) missing from exchange for {position.position_id}. "
+                    f"Missing: {[l.symbol for l in legs_missing]}. "
+                    f"Will only close {len(legs_on_exchange)} remaining leg(s)."
+                )
+                # Update position legs to only those that still exist
+                # This prevents failed close attempts on non-existent positions
+                position.legs = legs_on_exchange
                 
+                if not legs_on_exchange:
+                    self.logger.info(f"All legs already closed externally for {position.position_id}")
+                    # Record as ghost position closure
+                    self._cleanup_ghost_position(position, signal.get('reason', 'External Close'))
+                    return
+            
             urgency = signal.get('urgency', 'normal')
             
             exit_results = []
@@ -1396,6 +1427,65 @@ class ExecutionEngine:
             self.performance_tracker.db.delete_position(position_id)
         except Exception as e:
             self.logger.error(f"Failed to delete position {position_id} from DB: {e}")
+
+    def _cleanup_ghost_position(self, position, reason: str = "External Close"):
+        """
+        Clean up a multi-leg position that was closed externally (all legs gone).
+        
+        Records the trade with best-effort PnL calculation and removes from tracking.
+        """
+        try:
+            position_id = position.position_id
+            
+            # Try to estimate PnL based on entry prices vs current/last known prices
+            estimated_pnl = 0.0
+            total_fees = 0.0
+            
+            for leg in getattr(position, '_original_legs', position.legs):
+                try:
+                    current_price = self.get_leg_price(leg.symbol, leg.market_type)
+                    if current_price:
+                        price_diff = current_price - leg.entry_price
+                        if leg.side == 'short':
+                            price_diff = -price_diff
+                        leg_pnl = price_diff * leg.size
+                        estimated_pnl += leg_pnl
+                except Exception:
+                    pass
+            
+            self.logger.warning(
+                f"🔄 Ghost position cleanup: {position_id} ({reason}). "
+                f"Estimated PnL: ${estimated_pnl:.2f}"
+            )
+            
+            # Record trade
+            self.performance_tracker.record_trade(
+                strategy=position.strategy,
+                symbol=position.head_leg.symbol if position.legs else "UNKNOWN",
+                action='close',
+                entry_price=position.avg_entry_price if hasattr(position, 'avg_entry_price') else 0.0,
+                exit_price=0.0,  # Unknown
+                position_size=sum(l.size for l in getattr(position, '_original_legs', position.legs)),
+                pnl=estimated_pnl,
+                fees=total_fees,
+                exit_reason=f"Ghost - {reason}",
+            )
+            
+            # Remove from memory
+            if position_id in self.multi_leg_positions:
+                del self.multi_leg_positions[position_id]
+            
+            # Remove from DB
+            self.delete_position_from_db(position_id)
+            
+            # Release margin
+            head_symbol = position.head_leg.symbol if position.legs else None
+            if head_symbol:
+                self.leverage_manager.release_position(head_symbol, 'multi_leg')
+            
+        except Exception as e:
+            self.logger.error(f"Error cleaning up ghost position {getattr(position, 'position_id', 'UNKNOWN')}: {e}")
+
 
     def load_positions_from_db(self):
         """Load positions from database."""
