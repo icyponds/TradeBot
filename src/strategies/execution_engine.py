@@ -1459,13 +1459,16 @@ class ExecutionEngine:
             )
             
             # Record trade
+            original_legs = getattr(position, '_original_legs', position.legs)
+            head_symbol = original_legs[0].symbol if original_legs else "UNKNOWN"
+            
             self.performance_tracker.record_trade(
                 strategy=position.strategy,
-                symbol=position.head_leg.symbol if position.legs else "UNKNOWN",
+                symbol=head_symbol,
                 action='close',
                 entry_price=position.avg_entry_price if hasattr(position, 'avg_entry_price') else 0.0,
                 exit_price=0.0,  # Unknown
-                position_size=sum(l.size for l in getattr(position, '_original_legs', position.legs)),
+                position_size=sum(l.size for l in original_legs),
                 pnl=estimated_pnl,
                 fees=total_fees,
                 exit_reason=f"Ghost - {reason}",
@@ -1479,8 +1482,7 @@ class ExecutionEngine:
             self.delete_position_from_db(position_id)
             
             # Release margin
-            head_symbol = position.head_leg.symbol if position.legs else None
-            if head_symbol:
+            if head_symbol and head_symbol != "UNKNOWN":
                 self.leverage_manager.release_position(head_symbol, 'multi_leg')
             
         except Exception as e:

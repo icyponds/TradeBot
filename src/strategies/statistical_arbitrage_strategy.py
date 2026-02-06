@@ -275,11 +275,10 @@ class StatisticalArbitrageStrategy(BaseStrategy):
                         else:
                             self.logger.debug(f"Regime break grace active for {pair_key}: {elapsed:.0f}/{self.regime_break_grace_seconds}s")
                 else:
-                    # Z-score back below threshold - clear grace period
+                    # Z-score below regime break threshold - check if grace period needs clearing
                     if pair_key in self.regime_break_grace_periods:
                         self.regime_break_grace_periods.pop(pair_key, None)
                         self.logger.debug(f"Regime break grace cleared for {pair_key}: z={z_score:.2f}")
-                else:
                     # Max Adverse Stop (Check entry z-score)
                     entry_z = self.active_spreads[pair_key].get('entry_zscore')
                     if entry_z and entry_z > 0 and z_score > (entry_z + self.max_adverse_z_delta):
@@ -312,11 +311,10 @@ class StatisticalArbitrageStrategy(BaseStrategy):
                         else:
                             self.logger.debug(f"Regime break grace active for {pair_key}: {elapsed:.0f}/{self.regime_break_grace_seconds}s")
                 else:
-                    # Z-score back below threshold - clear grace period
+                    # Z-score above threshold (less negative) - check if grace period needs clearing
                     if pair_key in self.regime_break_grace_periods:
                         self.regime_break_grace_periods.pop(pair_key, None)
                         self.logger.debug(f"Regime break grace cleared for {pair_key}: z={z_score:.2f}")
-                else:
                     # Max Adverse Stop (Check entry z-score)
                     entry_z = self.active_spreads[pair_key].get('entry_zscore')
                     if entry_z and entry_z < 0 and z_score < (entry_z - self.max_adverse_z_delta):
