@@ -288,3 +288,68 @@ class TestExecutionEngine:
         
         # Verify Aggressor did NOT execute
         assert len(execution_engine.multi_leg_positions) == 0
+
+    def test_close_position_urgency_detection(self, execution_engine, mock_market_api):
+        """Test that urgency is correctly determined based on exit reason (substring matching)."""
+        from src.models.trade import Position
+        
+        # Setup: Create a test position
+        test_position = Position(
+            symbol='TEST',
+            side='long',
+            size=1.0,
+            entry_price=100.0,
+            strategy='test_strat',
+            entry_time=datetime.now(),
+            capital_at_risk=100.0,
+            leverage=1.0
+        )
+        execution_engine.positions['TEST'] = test_position
+        
+        # Mock successful order response
+        mock_market_api.execute_order.return_value = {
+            'order_id': 'close_123',
+            'status': 'filled',
+            'filled_size': 1.0,
+            'avg_fill_price': 105.0,
+            'fills': [{'oid': 'fill_123'}]
+        }
+        
+        # Test cases: (reason, expected_urgency)
+        test_cases = [
+            ('stop_loss', 'high'),              # Exact match
+            ('stop_loss_realtime', 'high'),     # Substring match (the bug fix)
+            ('stop_loss_trailing', 'high'),     # Substring match
+            ('liquidation_risk', 'high'),       # Exact match
+            ('liquidation_risk_margin', 'high'),# Substring match
+            ('emergency', 'high'),              # Exact match
+            ('emergency_portfolio', 'high'),    # Substring match
+            ('take_profit', 'normal'),          # No match
+            ('take_profit_realtime', 'normal'), # No match
+            ('manual', 'normal'),               # No match
+            ('regime_break', 'normal'),         # No match
+        ]
+        
+        for reason, expected_urgency in test_cases:
+            # Reset position for each test
+            execution_engine.positions['TEST'] = Position(
+                symbol='TEST',
+                side='long',
+                size=1.0,
+                entry_price=100.0,
+                strategy='test_strat',
+                entry_time=datetime.now(),
+                capital_at_risk=100.0,
+                leverage=1.0
+            )
+            mock_market_api.execute_order.reset_mock()
+            
+            # Execute close
+            execution_engine.close_position('TEST', reason=reason)
+            
+            # Verify the API was called with the correct urgency
+            call_kwargs = mock_market_api.execute_order.call_args[1]
+            actual_urgency = call_kwargs.get('urgency', 'normal')
+            
+            assert actual_urgency == expected_urgency, \
+                f"Reason '{reason}' expected urgency '{expected_urgency}', got '{actual_urgency}'"

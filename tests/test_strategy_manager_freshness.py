@@ -92,8 +92,7 @@ class TestStrategyManagerFreshness:
         strategy_manager._on_price_update(symbol, 48000, 1234567890)
         strategy_manager.execution_engine.close_position.assert_called_with(
             symbol=symbol, 
-            reason="stop_loss_realtime", 
-            urgency='high'
+            reason="stop_loss_realtime"
         )
         
         # Reset mock
@@ -103,6 +102,5 @@ class TestStrategyManagerFreshness:
         strategy_manager._on_price_update(symbol, 52000, 1234567890)
         strategy_manager.execution_engine.close_position.assert_called_with(
             symbol=symbol, 
-            reason="take_profit_realtime", 
-            urgency='high'
+            reason="take_profit_realtime"
         )
