@@ -172,6 +172,7 @@ class StrategyManager:
         self.last_position_sync = 0
         self.last_position_monitoring = 0
         self.last_performance_report = 0
+        self._cycle_count = 0  # Trading loop cycle counter
         self.total_positions_closed = 0
         self.emergency_stops_triggered = 0
         self.last_emergency_check = 0
@@ -779,7 +780,7 @@ class StrategyManager:
                         strategy=pos.strategy,
                         side="multi_leg",
                         entry_price=avg_entry,
-                        exit_price=avg_entry,
+                        exit_price=avg_entry,  # Not meaningful for multi-leg, use pnl_override
                         size=total_size,
                         entry_time=pos.entry_time,
                         exit_time=datetime.now(),
@@ -1928,6 +1929,12 @@ class StrategyManager:
             else:
                 current_datetime = datetime.fromtimestamp(current_time)
 
+            self._cycle_count += 1
+            if self._cycle_count % 10 == 0:
+                self.logger.info(f"🫀 Trading cycle heartbeat: {current_datetime.strftime('%H:%M:%S')} (Cycle #{self._cycle_count})")
+            else:
+                self.logger.debug(f"🫀 Trading cycle heartbeat: {current_datetime.strftime('%H:%M:%S')} (Cycle #{self._cycle_count})")
+
             # Update regime and change-point gating from market proxy (once per cycle)
             self._maybe_update_regime_and_changepoint()
             
@@ -2026,8 +2033,6 @@ class StrategyManager:
                 if not self.is_running:
                     break
                 self._analyze_symbol(symbol, timestamp=current_datetime)
-
-            
 
             
             
@@ -2297,8 +2302,7 @@ class StrategyManager:
                     })
             
             # Resolve conflicts and execute the winning signal
-            if collected_signals:
-                winning_signal = self._resolve_signal_conflicts(symbol, collected_signals)
+            # Execute winning signal after conflict resolution
             if collected_signals:
                 winning_signal = self._resolve_signal_conflicts(symbol, collected_signals)
                 if winning_signal:
