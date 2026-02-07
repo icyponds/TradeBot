@@ -366,7 +366,7 @@ class ExecutionEngine:
         try:
             position = self.positions[symbol]
             close_side = 'sell' if position.side == 'long' else 'buy'
-            urgency = "high" if reason in ['stop_loss', 'liquidation_risk', 'emergency'] else "normal"
+            urgency = "high" if any(kw in reason for kw in ['stop_loss', 'liquidation_risk', 'emergency']) else "normal"
             
             # Determine market type from symbol
             market_type = 'spot' if symbol.endswith('_SPOT') else 'perp'

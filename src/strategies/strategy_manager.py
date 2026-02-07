@@ -2142,10 +2142,10 @@ class StrategyManager:
             self.logger.info(f"⚡ Real-time trigger for {symbol}: {exit_reason} (Price: {price})")
             # Close position immediately
             # Note: close_position is thread-safe enough (uses API lock + dict ops)
+            # Urgency is determined internally by close_position based on the reason
             self.execution_engine.close_position(
                 symbol=symbol, 
-                reason=exit_reason,
-                urgency='high' # Use aggressive closing for triggered exits
+                reason=exit_reason
             )
 
     def _on_price_update(self, symbol: str, price: float, timestamp: float):
