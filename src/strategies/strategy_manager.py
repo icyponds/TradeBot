@@ -278,7 +278,8 @@ class StrategyManager:
              # Check legs if available on position object
              if hasattr(pos, 'legs'):
                  for leg in pos.legs:
-                     leg_symbol = leg.get('symbol')
+                     # PositionLeg is a dataclass, not a dict
+                     leg_symbol = getattr(leg, 'symbol', None) or (leg.get('symbol') if isinstance(leg, dict) else None)
                      if leg_symbol:
                          exch_pos = self.market_api.get_position(leg_symbol)
                          if float((exch_pos or {}).get('size', 0.0)) != 0:
