@@ -343,7 +343,14 @@ class StatisticalArbitrageStrategy(BaseStrategy):
                 # Spread is random walk (0.5) or trending (>0.5) - NOT SAFE for mean reversion
                 return None
             
-            if z_score > z_entry:
+            # Entry Logic:
+            # 1. Must be above entry threshold (e.g. 2.0)
+            # 2. Must be BELOW regime break threshold (e.g. 4.0) to prevent immediate stop-loss loop
+            
+            is_valid_short_entry = (z_score > z_entry) and (z_score < self.regime_break_threshold)
+            is_valid_long_entry = (z_score < -z_entry) and (z_score > -self.regime_break_threshold)
+            
+            if is_valid_short_entry:
                 signal = 'sell'
                 reason = f'Stat Arb Entry: {pair_key} Z-Score {z_score:.2f} > {z_entry:.2f} (H={hurst:.2f}, regime={thresholds["regime"]}) (Short {symbol_a})'
                 self.active_spreads[pair_key] = {
@@ -354,7 +361,7 @@ class StatisticalArbitrageStrategy(BaseStrategy):
                     'max_adverse_z': z_score,
                     'current_z': z_score
                 }
-            elif z_score < -z_entry:
+            elif is_valid_long_entry:
                 signal = 'buy'
                 reason = f'Stat Arb Entry: {pair_key} Z-Score {z_score:.2f} < -{z_entry:.2f} (H={hurst:.2f}, regime={thresholds["regime"]}) (Long {symbol_a})'
                 self.active_spreads[pair_key] = {
@@ -365,6 +372,10 @@ class StatisticalArbitrageStrategy(BaseStrategy):
                     'max_adverse_z': z_score,
                     'current_z': z_score
                 }
+            elif abs(z_score) >= self.regime_break_threshold:
+                 # Log only occasionally to avoid spam, but useful to know we are skipping due to extreme divergence
+                 if self.strategy_manager and self.strategy_manager.logger.isEnabledFor(logging.DEBUG):
+                     self.logger.debug(f"Skipping StatArb Entry for {pair_key}: Z-score {z_score:.2f} exceeds regime break {self.regime_break_threshold}")
         
         if signal == 'hold':
             return None

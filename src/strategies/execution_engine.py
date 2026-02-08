@@ -979,6 +979,7 @@ class ExecutionEngine:
                     
                     # Delete from DB persistence
                     self.performance_tracker.db.delete_position(position.position_id)
+                    self.logger.info(f"Executed DB deletion for {position.position_id}")
                 except Exception as e:
                     self.logger.error(f"Failed to delete multi-leg position {position.position_id} from DB: {e}")
 
@@ -1483,7 +1484,8 @@ class ExecutionEngine:
             
             # Release margin
             if head_symbol and head_symbol != "UNKNOWN":
-                self.leverage_manager.release_position(head_symbol, 'multi_leg')
+                self.logger.info(f"Releasing margin for {head_symbol} due to ghost position cleanup.")
+                self.leverage_manager.close_position(head_symbol, 0.0)
             
         except Exception as e:
             self.logger.error(f"Error cleaning up ghost position {getattr(position, 'position_id', 'UNKNOWN')}: {e}")

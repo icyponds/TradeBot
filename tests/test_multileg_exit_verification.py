@@ -219,7 +219,7 @@ class TestMultiLegPreExitVerification:
         
         execution_engine._cleanup_ghost_position(sample_multi_leg_position, reason="Test")
         
-        execution_engine.leverage_manager.release_position.assert_called_with('ETH', 'multi_leg')
+        execution_engine.leverage_manager.close_position.assert_called_with('ETH', 0.0)
 
 
 class TestPositionLegSymbolMatching:
