@@ -152,7 +152,7 @@ def load_config() -> Dict[str, Any]:
             ],
             # Symbol blacklist per trade performance analysis
             "symbol_blacklist": {
-                "global": ["kBONK"],  # Worst performer: -$87.85 over 32 trades
+                "global": ["kBONK", "DASH", "UNI"],  # Worst performers
                 "stat_arb": ["BTC", "XRP", "ZEC", "AVAX", "ASTER"],  # Poor R/R ratio despite wins
             },
             "pair_penalties": {
@@ -233,7 +233,7 @@ def load_config() -> Dict[str, Any]:
                 # Breakout short TF
                 "vol_breakout_15m": {"min": 0.05, "max": 0.25},
                 "vol_breakout_1h": {"min": 0.05, "max": 0.30},
-                "vol_breakout_4h": {"min": 0.05, "max": 0.35},
+                "vol_breakout_4h": {"min": 0.05, "max": 0.50},
                 # Liquidation hunters short TF
                 "liquidation_hunter_5m": {"min": 0.05, "max": 0.20},
                 "liquidation_hunter_15m": {"min": 0.05, "max": 0.25},
@@ -248,7 +248,7 @@ def load_config() -> Dict[str, Any]:
                 "ou_mean_reversion_4h": {"min": 0.05, "max": 0.45},
                 "stat_arb_15m": {"min": 0.05, "max": 0.25},
                 "stat_arb_1h": {"min": 0.05, "max": 0.35},
-                "stat_arb_4h": {"min": 0.05, "max": 0.40},
+                "stat_arb_4h": {"min": 0.05, "max": 0.50},
                 # Top performer (budget ceiling higher)
                 "csm_4h": {"min": 0.10, "max": 1.00},
             },
@@ -300,7 +300,8 @@ def load_config() -> Dict[str, Any]:
                 # OU Mean Reversion (15m, 1h, 4h)
                 # ou_mean_reversion_15m DISABLED per trade analysis: -$88.50 over 505 trades (44% win rate)
                 # {"type": "ou_mean_reversion", "name": "ou_mean_reversion_15m", "timeframe": "15m"},
-                {"type": "ou_mean_reversion", "name": "ou_mean_reversion_1h",  "timeframe": "1h"},
+                # ou_mean_reversion_1h DISABLED per trade analysis: -$20.44 over 59 trades (34% win rate)
+                # {"type": "ou_mean_reversion", "name": "ou_mean_reversion_1h",  "timeframe": "1h"},
                 {"type": "ou_mean_reversion", "name": "ou_mean_reversion_4h",  "timeframe": "4h"},
                 
                 # Volatility Breakout (15m, 1h, 4h)
@@ -324,8 +325,9 @@ def load_config() -> Dict[str, Any]:
                 # Liquidation Hunter (5m, 15m, 1h)
                 # liquidation_hunter_5m disabled by user request (-$2k loss even with fix)
                 # {"type": "liquidation_hunter", "name": "liquidation_hunter_5m", "timeframe": "5m"},
-                {"type": "liquidation_hunter", "name": "liquidation_hunter_15m", "timeframe": "15m"},
-                {"type": "liquidation_hunter", "name": "liquidation_hunter_1h", "timeframe": "1h"},
+                # liquidation_hunter_15m DISABLED per trade analysis: -$55 over 74 trades (50% win rate but big losses)
+                # {"type": "liquidation_hunter", "name": "liquidation_hunter_15m", "timeframe": "15m"},
+                # {"type": "liquidation_hunter", "name": "liquidation_hunter_1h", "timeframe": "1h"},
 
                 # Cross-Sectional Momentum (1h, 4h)
                 # csm_1h disabled due to poor backtest performance (8.8% win rate, -$345 PnL)
