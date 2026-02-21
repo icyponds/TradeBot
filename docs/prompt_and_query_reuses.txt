@@ -1,0 +1,17 @@
+1.does this impact mockmarketapi and do any changes need to be made there
+2. do we need new/updated unit tests
+
+don't proceed, update plan accordingly
+
+
+SELECT timestamp 
+FROM market_data 
+WHERE 
+	symbol = 'BTC'
+	AND timeframe = '5m'
+	AND timestamp >= '2026-01-13'
+ORDER BY timestamp;
+
+
+SELECT timeframe, MAX(timestamp) FROM market_data WHERE symbol = 'BTC' GROUP BY 1;
+

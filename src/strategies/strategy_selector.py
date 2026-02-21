@@ -1175,6 +1175,24 @@ class StrategySelector:
             return ranking.weight
         return 0.0
 
+    def get_strategy_kelly_fraction(self, strategy_name: str) -> float:
+        """
+        Get the Kelly fraction for a strategy.
+        
+        Args:
+            strategy_name: Name of the strategy
+            
+        Returns:
+            Kelly fraction (e.g. 0.0 to 0.25)
+        """
+        if strategy_name not in self.strategy_rankings:
+            self.update_rankings()
+            
+        ranking = self.strategy_rankings.get(strategy_name)
+        if ranking and ranking.is_enabled:
+            return ranking.kelly_fraction
+        return 0.0
+
     def get_signal_strength_modifier(self, strategy_name: str) -> float:
         """
         Get performance-based modifier for signal strength.

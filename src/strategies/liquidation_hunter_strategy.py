@@ -151,13 +151,31 @@ class LiquidationHunterStrategy(BaseStrategy):
     def should_exit(self, position: Any, current_price: float, 
                    current_data: Dict[str, Any] = None) -> Tuple[bool, Optional[str]]:
         """
-        Exit if price returns to mean (Z-Score near 0).
+        Exit if price returns to mean (Z-Score near 0), or Time-Decay stop.
         """
-        # This requires re-calculating Z-Score which isn't passed in current_data generically.
-        # But we can assume if PnL is positive enough we exit.
-        # Or simplistic: Exit if we crossed the SMA?
-        
-        # For this implementation, we rely on TP or Trailing Stop provided by engine.
+        # Time-based stop: Liquidation cascades should resolve quickly.
+        # If we are holding for more than 1 hour without hitting TP, the premise is broken.
+        if hasattr(position, 'entry_time') and position.entry_time:
+            entry_time = position.entry_time
+            try:
+                if isinstance(entry_time, str):
+                    entry_time = pd.to_datetime(entry_time)
+                
+                from datetime import datetime, timedelta
+                now = datetime.now()
+                if entry_time.tzinfo and not now.tzinfo:
+                   now = now.astimezone()
+                elif not entry_time.tzinfo and now.tzinfo:
+                   entry_time = entry_time.replace(tzinfo=now.tzinfo)
+
+                time_held = now - entry_time
+                
+                if time_held > timedelta(hours=1):
+                     # Exit immediately if spinning wheels
+                     return True, f"time_decay_stop (held {time_held})"
+            except Exception as e:
+                self.logger.warning(f"Error checking time decay in liquidation hunter: {e}")
+                
         return False, None
 
     def get_trailing_stop_config(self) -> Dict[str, Any]:

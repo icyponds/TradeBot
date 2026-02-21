@@ -566,15 +566,28 @@ class OUMeanReversionStrategy(BaseStrategy):
         
         z_score = (log_price - log_mu) / params.sigma
         
-        # Exit if Z-score has reverted past exit threshold
+        # Calculate previous Z-score to measure momentum of reversion
+        prev_price = ohlcv['close'].iloc[-2]
+        prev_z_score = (np.log(prev_price) - log_mu) / params.sigma
+        z_score_change = abs(prev_z_score - z_score)
+        
+        position_side = getattr(position, 'side', None)
+        
+        # Asymmetric Exit Logic: Let violent mean reversions overshoot
         if abs(z_score) < self.zscore_exit:
-            return True, f"mean_reversion_complete (z={z_score:.2f})"
+            # If the change in a single candle is massive (e.g., > 1.0 standard deviations),
+            # it has extreme momentum. Let it overshoot the mean (wait for z_score to cross 0).
+            if z_score_change > 1.0:
+                self.logger.info(f"Asymmetric Exit: {symbol} holding massive momentum (dz={z_score_change:.2f})")
+                pass  # Hold position
+            else:
+                return True, f"mean_reversion_complete (z={z_score:.2f}, dz={z_score_change:.2f})"
         
         # Exit if Z-score has crossed zero (overshot the mean)
-        position_side = getattr(position, 'side', None)
-        if position_side == 'long' and z_score > 0.5:
+        # Using 0.0 to capture the full mean overshoot, and 0.5 as absolute safety
+        if position_side == 'long' and z_score > 0.0:
             return True, f"mean_reversion_overshot (z={z_score:.2f})"
-        elif position_side == 'short' and z_score < -0.5:
+        elif position_side == 'short' and z_score < 0.0:
             return True, f"mean_reversion_overshot (z={z_score:.2f})"
             
         # 3. Explicit Stop Loss

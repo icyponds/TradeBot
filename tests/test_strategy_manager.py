@@ -496,3 +496,36 @@ class TestStrategyManager:
         # 3. Verify logs
         # We can't easily check logs here without a log capture fixture, 
         # but the assertion on size proves the fix works.
+
+    def test_dynamic_kelly_sizing(self, strategy_manager):
+        """Test that Kelly Fraction scales available capital dynamically."""
+        strategy_manager.strategies["adaptive_grid_15m"] = MagicMock()
+        strategy_manager.strategies["adaptive_grid_15m"].calculate_signal_strength.return_value = 1.0
+        
+        # Setup Kelly Mocks - Kelly is 0.125 out of a max 0.25 (50% multiplier)
+        strategy_manager.strategy_selector.get_strategy_kelly_fraction = MagicMock(return_value=0.125)
+        strategy_manager.strategy_selector.kelly_fraction_cap = 0.25
+        strategy_manager.strategy_selector.get_signal_strength_modifier = MagicMock(return_value=1.0)
+        
+        # Disable reserve capital to make math clean
+        strategy_manager.config["risk_management"] = {"strategy_exploration": {"reserve_capital_pct": 0.0}}
+        
+        signal = {"signal": "buy"}
+        
+        # Portfolio returns 1000 available capital.
+        strategy_manager.portfolio_manager.calculate_available_capital_for_trading = MagicMock(return_value=1000.0)
+        
+        # Mock dependencies perfectly
+        with patch.object(strategy_manager, "_resolve_conflict", return_value="proceed"), \
+             patch.object(strategy_manager, "_calculate_market_volatility", return_value=0.2), \
+             patch.object(strategy_manager, "_should_execute_with_position_limit", return_value=True), \
+             patch.object(strategy_manager, "_count_positions_for_strategy", return_value=0), \
+             patch.object(strategy_manager.leverage_manager, "can_open_position", return_value=True):
+             
+             with patch.object(strategy_manager.leverage_manager, "calculate_leveraged_position_size", return_value=(1.0, 10.0, 1.0)) as mock_calc:
+                 strategy_manager._should_execute_signal("BTC", signal, 100.0, {}, "adaptive_grid_15m")
+                 
+                 # The capital passed should be 1000 * 0.5 = 500
+                 mock_calc.assert_called_once()
+                 args, _ = mock_calc.call_args
+                 assert args[2] == 500.0  # The trade_capital argument

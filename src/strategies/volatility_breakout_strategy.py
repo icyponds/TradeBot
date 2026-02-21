@@ -136,14 +136,20 @@ class VolatilityBreakoutStrategy(BaseStrategy):
     def calculate_take_profit(self, entry_price: float, side: str, ohlcv: Dict[str, pd.DataFrame] = None,
                              signal_strength: float = 1.0, market_volatility: float = 1.0) -> float:
         """
-        Calculate Take Profit.
-        Prefer letting winners run with trailing stop, but define a wide target.
+        Calculate Take Profit based on Average True Range (ATR).
+        Aligns reward expectations with the actual market volatility.
         """
-        # Default fallback (wide target)
-        tp_dist = entry_price * 0.10
+        tp_dist = entry_price * 0.10  # Default fallback
         
-        # If we have logic for risk:reward, we can use it here
-        # But this strategy relies heavily on trailing stops
+        if ohlcv is not None:
+            try:
+                tf_data = self._get_timeframe_data(ohlcv)
+                if tf_data is not None and len(tf_data) > self.atr_length:
+                    atr = calculate_atr(tf_data['high'], tf_data['low'], tf_data['close'], self.atr_length)
+                    current_atr = atr.iloc[-1]
+                    tp_dist = current_atr * self.atr_multiplier_tp
+            except Exception as e:
+                self.logger.error(f"Error calculating dynamic TP: {e}")
         
         if side == 'long':
             return entry_price + tp_dist
@@ -164,10 +170,44 @@ class VolatilityBreakoutStrategy(BaseStrategy):
     def should_exit(self, position: Any, current_price: float, 
                    current_data: Dict[str, Any] = None) -> Tuple[bool, Optional[str]]:
         """
-        Exit logic beyond stops:
-        Exit if price falls back inside the Bollinger Bands?
-        For now, rely on trailing stops.
+        Exit logic beyond stops: Time-based stop (Time Decay).
+        If a volatility breakout doesn't materialize into a trend quickly,
+        the premise of the trade is broken. Exit after 16 hours if not in profit.
         """
+        if hasattr(position, 'entry_time') and position.entry_time:
+            entry_time = position.entry_time
+            try:
+                if isinstance(entry_time, str):
+                    entry_time = pd.to_datetime(entry_time)
+                
+                from datetime import datetime, timedelta
+                now = datetime.now()
+                # Timezone awareness safety
+                if entry_time.tzinfo and not now.tzinfo:
+                   now = now.astimezone()
+                elif not entry_time.tzinfo and now.tzinfo:
+                   entry_time = entry_time.replace(tzinfo=now.tzinfo)
+
+                time_held = now - entry_time
+                
+                # Check Time Decay (e.g. breakout failed to trend)
+                if time_held > timedelta(hours=16):
+                    side = getattr(position, 'side', None)
+                    entry_price = getattr(position, 'entry_price', current_price)
+                    
+                    pnl_pct = 0.0
+                    if side == 'long':
+                         pnl_pct = (current_price - entry_price) / entry_price
+                    elif side == 'short':
+                         pnl_pct = (entry_price - current_price) / entry_price
+                         
+                    # Exit if stagnant (less than 1% profit after 16 hours)
+                    if pnl_pct < 0.01:
+                        return True, f"time_decay_stop (held {time_held}, pnl {pnl_pct*100:.2f}%)"
+                        
+            except Exception as e:
+                self.logger.warning(f"Error checking time decay in breakout: {e}")
+                
         return False, None
     def calculate_signal_strength(self, ohlcv: Dict[str, pd.DataFrame], symbol: str = None, signal_context: Dict[str, Any] = None) -> float:
         """

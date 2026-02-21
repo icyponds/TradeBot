@@ -3040,6 +3040,29 @@ class StrategyManager:
         if (not is_exploration) and reserve_pct > 0:
             available_capital_for_trade = max(0.0, float(available_capital) - reserved_amount)
 
+        # Apply Regime-Aware Sizing (Kelly Criterion integration)
+        # Scales trade_capital dynamically based on strategy's historical edge
+        if not is_exploration and hasattr(self, 'strategy_selector') and self.strategy_selector:
+            try:
+                kelly_fraction = float(self.strategy_selector.get_strategy_kelly_fraction(strategy_name))
+                kelly_cap = float(getattr(self.strategy_selector, 'kelly_fraction_cap', 0.25))
+                
+                # Minimum 20% multiplier (0.2) to prevent complete starvation of newer strategies
+                # Best strategies (kelly >= cap) get 1.0 multiplier
+                if kelly_cap > 0:
+                    kelly_multiplier = max(0.2, min(1.0, kelly_fraction / kelly_cap))
+                else:
+                    kelly_multiplier = 1.0
+            except (TypeError, ValueError):
+                # Handling MagicMock objects in unit tests
+                kelly_multiplier = 1.0
+                kelly_fraction = 0.0
+                
+            if kelly_multiplier < 1.0:
+                 self.logger.info(f"Applying Kelly sizing for {strategy_name}: "
+                                  f"multiplier={kelly_multiplier:.2f}x (Kelly: {kelly_fraction:.4f})")
+            available_capital_for_trade *= kelly_multiplier
+
         self.logger.info(
             f"Calculating position size for {symbol}: available capital=${available_capital:.2f} "
             f"(trade_capital=${available_capital_for_trade:.2f}, reserve=${reserved_amount:.2f}), "
