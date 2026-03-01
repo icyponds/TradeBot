@@ -62,7 +62,7 @@ def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None):
     
     # 5. Enable Backtest Mode for PairSelector (load all assets instantly)
     config['mode'] = 'backtest'
-    config['backtesting'] = {'enabled': True}
+    config['backtesting']['enabled'] = True
     
     # 2. Data
     from src.utils.trade_database import TradeDatabase
@@ -142,30 +142,27 @@ def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None):
         print("No data in DB. Loading from CSVs as fallback...")
         pass
 
-    # 3. Engine
-    # Initialize with None to trigger DB load
-    # 3. Engine
-    # Initialize with None to trigger DB load
-    # Persistence path is handled by BacktestEngine (uses prefix now)
-        
-    engine = BacktestEngine(config, historical_data=None)
-    
-    # Configure symbols
-    config['trading']['dynamic_pair_selection'] = True # Allow selector to pick from available
-    config['trading']['symbols'] = symbols # Limit to what we have
+    # Limit symbol count for performance (backtest with 231 symbols at 15min steps is very slow)
+    max_symbols = 20
+    if len(symbols) > max_symbols:
+        print(f"Limiting from {len(symbols)} to top {max_symbols} symbols for backtest performance")
+        symbols = symbols[:max_symbols]
+
+    # 3. Configure symbols and strategy overrides BEFORE engine init
+    config['trading']['dynamic_pair_selection'] = True
+    config['trading']['symbols'] = symbols
     
     # 3.1 Override Strategy Lookbacks for Short Data History
-    # Since we only have ~4-5 days of data in DB, standard 100-period lookbacks 
-    # (at 1h = 4 days) consume the entire dataset for warmup, leaving no trade window.
-    print("Overriding strategy lookbacks for short backtest window...")
+    # Standard 100-period lookbacks (at 1h = 4 days) consume the entire dataset
+    # for warmup, leaving no trade window. Reduce them.
+    print("Overriding strategy lookbacks for backtest window...")
     config['strategies']['stat_arb']['window_size'] = 24  # 1 day
     config['strategies']['stat_arb']['correlation_lookback'] = 24
     config['strategies']['ou_mean_reversion']['estimation_lookback'] = 24
     config['strategies']['cointegration']['lookback_period'] = 24
-    config['strategies']['volatility_breakout']['bb_length'] = 20 # Already low
-    config['strategies']['volatility_breakout']['bb_length'] = 20 # Already low
-    config['strategies']['liquidation_hunter']['window'] = 20 # Already low
-    config['strategies']['cross_sectional_momentum']['lookback_period'] = 6 # Shorten for backtest warmup
+    config['strategies']['volatility_breakout']['bb_length'] = 20
+    config['strategies']['liquidation_hunter']['window'] = 20
+    config['strategies']['cross_sectional_momentum']['lookback_period'] = 6
 
     # 3.2 Consolidate Strategies
     # - Disable SentimentML (Underperforming)
@@ -177,17 +174,82 @@ def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None):
             and not s['name'].startswith('sentiment_ml')
         ]
         print("Consolidated Strategies: Disabled SentimentML & LH 5m/1h.")
-    
 
+    # 3.3 CLEAN SLATE: Explicitly purge ALL stale backtest data before engine init
+    # BacktestEngine only clears trades, but ghost positions leak across runs
+    print("Clearing stale backtest data...")
+    from src.utils.trade_database import TradeDatabase as BtDb
+    bt_db = BtDb(table_prefix="backtest_")
+    bt_db.delete_all_trades()
+    bt_db.clear_open_positions()
+    try:
+        bt_db.conn.execute("DELETE FROM backtest_live_position_legs")
+        bt_db.conn.execute("DELETE FROM backtest_equity_snapshots")
+        bt_db.conn.execute("DELETE FROM backtest_daily_pnl")
+        bt_db.conn.commit()
+    except Exception as e:
+        print(f"  Warning: partial cleanup: {e}")
+    print("  Backtest tables cleared.")
+
+    # 3.4 Initialize BacktestEngine AFTER all config overrides
+    config['backtesting']['reset_results_db'] = False  # We already cleaned above
+    engine = BacktestEngine(config, historical_data=None)
+    
+    # 3.5 CRITICAL: Pre-populate PairSelector with available symbols
+    # The PairSelector's background fetcher (which populates selected_pairs/ready_pairs)
+    # does NOT run during backtests. Without this, get_ready_pairs() returns []
+    # and run_trading_cycle() skips all analysis with "No ready trading pairs".
+    pair_selector = engine.strategy_manager.pair_selector
+    # Use only the CAPPED symbols list, not all engine.historical_data keys
+    print(f"Injecting {len(symbols)} symbols into PairSelector ready set...")
+    with pair_selector._pairs_lock:
+        for sym in symbols:
+            if sym not in pair_selector.selected_pairs:
+                pair_selector.selected_pairs.append(sym)
+            pair_selector.ready_pairs.add(sym)
+    print(f"  Selected: {len(pair_selector.selected_pairs)}, Ready: {len(pair_selector.ready_pairs)}")
     
     # 4. Run
-    # Use 15m interval to match the primary strategy timeframe (StatArb 15m)
-    # This increases the chance of catching signals compared to the default 60m step
+    # Use 15m interval to match the primary strategy timeframe
     report = engine.run(start_date, end_date, interval_minutes=15)
     
-    print("\nTest Complete!")
-    print(f"Total Equity: {report['total_equity']}")
-    print(f"Orders: {report['total_orders']}")
+    # 5. Print Results Summary
+    print("\n" + "=" * 60)
+    print("BACKTEST RESULTS SUMMARY")
+    print("=" * 60)
+    print(f"Period: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
+    print(f"Final Equity: ${report['total_equity']:,.2f}")
+    
+    # Read actual trade stats from the backtest DB
+    bt_trades = report.get('backtest_trades', 0)
+    bt_pnl = report.get('backtest_total_pnl', 0)
+    bt_wr = report.get('backtest_win_rate', 0)
+    bt_pf = report.get('backtest_profit_factor', 0)
+    bt_mdd = report.get('backtest_max_drawdown_pct', 0)
+    
+    print(f"Total Trades: {bt_trades}")
+    print(f"Total PnL: ${bt_pnl:,.2f}")
+    print(f"Win Rate: {bt_wr:.1f}%")
+    print(f"Profit Factor: {bt_pf:.2f}")
+    print(f"Max Drawdown: {bt_mdd:.2f}%")
+    
+    # Per-strategy breakdown
+    try:
+        db = engine.prefixed_tracker.db
+        strategies = db.get_strategy_list()
+        if strategies:
+            print("\nPer-Strategy Breakdown:")
+            print("-" * 60)
+            for strat in strategies:
+                stats = db.get_strategy_stats(strat)
+                s_trades = int(stats.get('total_trades', 0) or 0)
+                s_pnl = float(stats.get('total_pnl', 0) or 0)
+                s_wr = float(stats.get('win_rate', 0) or 0)
+                print(f"  {strat:<30} | {s_trades:>3} trades | ${s_pnl:>10,.2f} | WR: {s_wr:.1f}%")
+    except Exception as e:
+        print(f"  (Could not read strategy breakdown: {e})")
+    
+    print("=" * 60)
 
 
 if __name__ == "__main__":
