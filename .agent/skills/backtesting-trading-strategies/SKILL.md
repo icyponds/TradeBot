@@ -44,7 +44,16 @@ python scripts/run_backtest.py --start 2025-12-01 --end 2026-02-01
 
 # Random window (pick N random days from available data)
 python scripts/run_backtest.py --random-window 14
+
+# Override strategy parameters for experimentation (repeatable)
+python scripts/run_backtest.py --days 14 \
+  --param stat_arb.z_score_threshold=2.5 \
+  --param ou_mean_reversion.zscore_entry=2.0 \
+  --param volatility_breakout.squeeze_threshold=0.08
 ```
+
+> [!IMPORTANT]
+> Use `--param` for experimental parameter testing. **Do NOT hardcode strategy parameters in `run_backtest.py`** — production defaults live in `src/config/settings.py` and the backtest should inherit them automatically.
 
 ### Analyzing Results
 

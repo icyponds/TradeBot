@@ -34,7 +34,7 @@ def generate_synthetic_data(symbol, start_date, end_date, freq='1h'):
 
 import random
 
-def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None):
+def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None, param_overrides=None):
     # Increase log level and setup file logging prior to ANY imports or logic
     import logging
     
@@ -164,13 +164,25 @@ def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None):
     config['strategies']['liquidation_hunter']['window'] = 20
     config['strategies']['cross_sectional_momentum']['lookback_period'] = 6
 
-    # 3.1b Strategy Parameter Tweaks (from live trade performance analysis)
-    # stat_arb: avg_win($1.74) < avg_loss($2.80) at z=2.0 → raise to 2.5
-    config['strategies']['stat_arb']['z_score_threshold'] = 2.5
-    # ou_mean_reversion: 505 trades churning at z=1.5 → raise to 2.0
-    config['strategies']['ou_mean_reversion']['zscore_entry'] = 2.0
-    # vol_breakout: 24.4% win rate, too many fakeouts at squeeze=0.15 → tighten to 0.08
-    config['strategies']['volatility_breakout']['squeeze_threshold'] = 0.08
+    # 3.1b Apply any --param overrides from CLI
+    if param_overrides:
+        print("Applying parameter overrides:")
+        for override in param_overrides:
+            try:
+                key_path, value = override.split('=')
+                strategy, param = key_path.split('.', 1)
+                # Auto-detect type: try float, then int, then string
+                try:
+                    typed_value = float(value)
+                    if typed_value == int(typed_value) and '.' not in value:
+                        typed_value = int(value)
+                except ValueError:
+                    typed_value = value
+                old_value = config['strategies'].get(strategy, {}).get(param, 'N/A')
+                config['strategies'][strategy][param] = typed_value
+                print(f"  {strategy}.{param}: {old_value} → {typed_value}")
+            except ValueError:
+                print(f"  ⚠ Invalid format '{override}' — expected strategy.param=value")
 
     # 3.2 Consolidate Strategies
     # - Disable SentimentML (Underperforming)
@@ -263,11 +275,16 @@ def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None):
 if __name__ == "__main__":
     import argparse
     
-    parser = argparse.ArgumentParser(description='Run Strategy Backtest')
+    parser = argparse.ArgumentParser(
+        description='Run Strategy Backtest',
+        epilog='Example: python run_backtest.py --days 14 --param stat_arb.z_score_threshold=2.5 --param ou_mean_reversion.zscore_entry=2.0'
+    )
     parser.add_argument('--days', type=int, help='Number of days to run (default: auto-detect)')
     parser.add_argument('--start', type=str, help='Start date (YYYY-MM-DD)')
     parser.add_argument('--end', type=str, help='End date (YYYY-MM-DD)')
     parser.add_argument('--random-window', type=int, help='Randomly select N days from available data')
+    parser.add_argument('--param', action='append', metavar='strategy.key=value',
+                        help='Override a strategy parameter (repeatable). E.g. --param stat_arb.z_score_threshold=2.5')
     
     args = parser.parse_args()
     
@@ -279,7 +296,8 @@ if __name__ == "__main__":
             days=args.days, 
             start_str=args.start, 
             end_str=args.end, 
-            random_window=args.random_window
+            random_window=args.random_window,
+            param_overrides=args.param
         )
     except KeyboardInterrupt:
         print("\nBacktest interrupted by user.")
