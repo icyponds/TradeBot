@@ -164,6 +164,14 @@ def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None):
     config['strategies']['liquidation_hunter']['window'] = 20
     config['strategies']['cross_sectional_momentum']['lookback_period'] = 6
 
+    # 3.1b Strategy Parameter Tweaks (from live trade performance analysis)
+    # stat_arb: avg_win($1.74) < avg_loss($2.80) at z=2.0 → raise to 2.5
+    config['strategies']['stat_arb']['z_score_threshold'] = 2.5
+    # ou_mean_reversion: 505 trades churning at z=1.5 → raise to 2.0
+    config['strategies']['ou_mean_reversion']['zscore_entry'] = 2.0
+    # vol_breakout: 24.4% win rate, too many fakeouts at squeeze=0.15 → tighten to 0.08
+    config['strategies']['volatility_breakout']['squeeze_threshold'] = 0.08
+
     # 3.2 Consolidate Strategies
     # - Disable SentimentML (Underperforming)
     # - Disable Liquidation Hunter 5m/1h (Underperforming)
