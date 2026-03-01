@@ -49,8 +49,15 @@ class VolatilityBreakoutStrategy(BaseStrategy):
         self.atr_multiplier_sl = vb_config.get('atr_multiplier_sl', 2.0)   # Initial Stop Loss
         self.atr_multiplier_tp = vb_config.get('atr_multiplier_tp', 4.0)   # Take Profit (optional)
         
+        # Regime filter: minimum Hurst exponent to enter (0.5 = random walk)
+        self.min_hurst = vb_config.get('min_hurst', 0.5)
+        
+        # Time decay: exit stagnant breakouts after N hours if not in profit
+        self.time_decay_hours = vb_config.get('time_decay_hours', 16)
+        
         self.logger.info(f"Initialized Volatility Breakout Strategy: "
-                        f"BB({self.bb_length},{self.bb_std}), Squeeze<{self.squeeze_threshold}")
+                        f"BB({self.bb_length},{self.bb_std}), Squeeze<{self.squeeze_threshold}, "
+                        f"Hurst>{self.min_hurst}, TimeDecay={self.time_decay_hours}h")
     
     def generate_signal(self, symbol: str, ohlcv: Dict[str, pd.DataFrame]) -> Optional[Dict[str, Any]]:
         """
@@ -101,7 +108,7 @@ class VolatilityBreakoutStrategy(BaseStrategy):
         # We only want to enter breakouts if the market is in a Trending Regime (H > 0.5)
         # Calculating on closing prices
         hurst = hurst_exponent(closes)
-        valid_regime = hurst > 0.5
+        valid_regime = hurst > self.min_hurst
         
         signal = 'hold'
         reason = ''
@@ -191,7 +198,7 @@ class VolatilityBreakoutStrategy(BaseStrategy):
                 time_held = now - entry_time
                 
                 # Check Time Decay (e.g. breakout failed to trend)
-                if time_held > timedelta(hours=16):
+                if time_held > timedelta(hours=self.time_decay_hours):
                     side = getattr(position, 'side', None)
                     entry_price = getattr(position, 'entry_price', current_price)
                     
