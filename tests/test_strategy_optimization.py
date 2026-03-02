@@ -42,8 +42,9 @@ def mock_config():
         'pair_selection': {'mode': 'sophisticated'}
     }
 
-def create_mock_ohlcv(length=100, trend=False):
-    """Create OHLCV data. If trend=True, creating a strong uptrend."""
+def create_mock_ohlcv(length=100, trend=False, end_time=None):
+    """Create OHLCV data with a DatetimeIndex. If trend=True, creating a strong uptrend."""
+    from datetime import datetime as dt
     base_price = 100.0
     prices = []
     for i in range(length):
@@ -55,13 +56,17 @@ def create_mock_ohlcv(length=100, trend=False):
             base_price += np.random.normal(0, 1.0)
         prices.append(base_price)
     
+    if end_time is None:
+        end_time = dt(2026, 2, 15, 12, 0, 0)
+    idx = pd.date_range(end=end_time, periods=length, freq='4h')
+    
     df = pd.DataFrame({
         'open': prices,
         'high': [p + 0.5 for p in prices],
         'low': [p - 0.5 for p in prices],
         'close': prices,
         'volume': [1000] * length
-    })
+    }, index=idx)
     return df
 
 class TestStrategyOptimizations:
@@ -82,20 +87,23 @@ class TestStrategyOptimizations:
         strategy._calculate_spread_zscore = MagicMock(return_value=4.2)
         strategy._get_hedge_ratio = MagicMock(return_value=(1.0, 1.0))
         
-        df_a = create_mock_ohlcv()
-        df_b = create_mock_ohlcv()
+        from datetime import datetime, timedelta
+        sim_time_1 = datetime(2026, 2, 15, 12, 0, 0)
+        df_a = create_mock_ohlcv(end_time=sim_time_1)
+        df_b = create_mock_ohlcv(end_time=sim_time_1)
         
         # First call starts grace period
         res = strategy.generate_pair_signal('A', df_a, 'B', df_b)
         assert res is None  # Grace period just started
         assert 'A/B' in strategy.regime_break_grace_periods
         
-        # Simulate grace period expired
-        from datetime import datetime, timedelta
-        strategy.regime_break_grace_periods['A/B'] = (datetime.now() - timedelta(seconds=400)).timestamp()
+        # Advance simulation time past grace period (400s > 300s default)
+        sim_time_2 = sim_time_1 + timedelta(seconds=400)
+        df_a2 = create_mock_ohlcv(end_time=sim_time_2)
+        df_b2 = create_mock_ohlcv(end_time=sim_time_2)
         
         # Second call triggers exit
-        res = strategy.generate_pair_signal('A', df_a, 'B', df_b)
+        res = strategy.generate_pair_signal('A', df_a2, 'B', df_b2)
         
         # Expect a 'buy' signal (closing short) with reason "Regime Break ... > 4.0"
         assert res is not None

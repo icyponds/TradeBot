@@ -34,7 +34,7 @@ def generate_synthetic_data(symbol, start_date, end_date, freq='1h'):
 
 import random
 
-def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None, param_overrides=None):
+def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None, param_overrides=None, disable_strategies=None):
     # Increase log level and setup file logging prior to ANY imports or logic
     import logging
     
@@ -193,7 +193,16 @@ def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None, 
             if s['name'] not in ['liquidation_hunter_5m', 'liquidation_hunter_1h']
             and not s['name'].startswith('sentiment_ml')
         ]
-        print("Consolidated Strategies: Disabled SentimentML & LH 5m/1h.")
+        # Apply --disable-strategy filters
+        if disable_strategies:
+            before = len(config['strategies']['instances'])
+            config['strategies']['instances'] = [
+                s for s in config['strategies']['instances']
+                if not any(s['name'].startswith(d) for d in disable_strategies)
+            ]
+            after = len(config['strategies']['instances'])
+            print(f"Disabled strategies: {disable_strategies} (removed {before - after} instances)")
+        print(f"Active Strategies: {[s['name'] for s in config['strategies']['instances']]}")
 
     # 3.3 CLEAN SLATE: Explicitly purge ALL stale backtest data before engine init
     # BacktestEngine only clears trades, but ghost positions leak across runs
@@ -228,6 +237,20 @@ def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None, 
                 pair_selector.selected_pairs.append(sym)
             pair_selector.ready_pairs.add(sym)
     print(f"  Selected: {len(pair_selector.selected_pairs)}, Ready: {len(pair_selector.ready_pairs)}")
+    
+    # 3.6 CRITICAL: Purge restored live positions from backtest
+    # StrategyManager._restore_statarb_state() loads live multi_leg_positions
+    # from the production DB on init. These get force-closed at teardown with
+    # massive losses (e.g. BCH -$1,087, SOL -$1,078 from 258h-old positions).
+    ee = engine.strategy_manager.execution_engine
+    if ee.multi_leg_positions:
+        print(f"  Purging {len(ee.multi_leg_positions)} restored live multi-leg positions...")
+        ee.multi_leg_positions.clear()
+    # Also clear stat_arb active_spreads (populated by restore_active_spreads)
+    for strat_name, strat in engine.strategy_manager.strategies.items():
+        if hasattr(strat, 'active_spreads') and strat.active_spreads:
+            print(f"  Purging {len(strat.active_spreads)} restored spreads from {strat_name}")
+            strat.active_spreads.clear()
     
     # 4. Run
     # Use 15m interval to match the primary strategy timeframe
@@ -285,6 +308,8 @@ if __name__ == "__main__":
     parser.add_argument('--random-window', type=int, help='Randomly select N days from available data')
     parser.add_argument('--param', action='append', metavar='strategy.key=value',
                         help='Override a strategy parameter (repeatable). E.g. --param stat_arb.z_score_threshold=2.5')
+    parser.add_argument('--disable-strategy', action='append', metavar='name',
+                        help='Disable a strategy by name prefix (repeatable). E.g. --disable-strategy stat_arb')
     
     args = parser.parse_args()
     
@@ -297,7 +322,8 @@ if __name__ == "__main__":
             start_str=args.start, 
             end_str=args.end, 
             random_window=args.random_window,
-            param_overrides=args.param
+            param_overrides=args.param,
+            disable_strategies=args.disable_strategy
         )
     except KeyboardInterrupt:
         print("\nBacktest interrupted by user.")

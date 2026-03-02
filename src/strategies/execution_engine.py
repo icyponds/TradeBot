@@ -1240,6 +1240,22 @@ class ExecutionEngine:
             position = conflict['position']
             conflict_symbol = conflict['symbol']
             
+            # CRITICAL: Never displace multi-leg positions from the same strategy family.
+            # Stat arb mean-reversion trades need time to complete. Displacing them
+            # locks in losses and is the #1 source of unprofitability.
+            if conflict_type == 'multi_leg' and hasattr(position, 'strategy'):
+                existing_strategy = position.strategy or ''
+                # Extract strategy family (e.g. 'stat_arb' from 'stat_arb_4h')
+                existing_family = existing_strategy.rsplit('_', 1)[0] if '_' in existing_strategy else existing_strategy
+                # We don't have the new strategy name here directly, but we can infer from
+                # the multi-leg nature — if the EXISTING position is multi-leg, it's likely
+                # stat_arb or funding_arb. Block displacement of multi-leg by multi-leg.
+                self.logger.info(
+                    f"🛡️ BLOCKING displacement of multi-leg {position.position_id} ({existing_strategy}) — "
+                    f"multi-leg positions should not be displaced by new multi-leg entries"
+                )
+                return False
+            
             if conflict_type == 'single_leg':
                 # Score single-leg position
                 existing_score = strategy_manager._get_position_profitability_score(

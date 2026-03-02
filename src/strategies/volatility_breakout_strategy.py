@@ -138,6 +138,26 @@ class VolatilityBreakoutStrategy(BaseStrategy):
             'hurst': hurst
         }
 
+    def calculate_stop_loss(self, entry_price: float, side: str, signal_context: Dict[str, Any] = None) -> float:
+        """
+        Calculate Stop Loss based on Average True Range (ATR).
+        Requires 'atr' to be passed in signal_context, or uses a default fallback.
+        """
+        atr = None
+        if signal_context and 'atr' in signal_context:
+            atr = signal_context['atr']
+        
+        # Fallback if ATR is missing from context
+        if atr is None or atr <= 0:
+            atr = entry_price * 0.02  # Default to 2% if missing
+            
+        sl_dist = atr * self.atr_multiplier_sl
+        
+        if side == 'long':
+            return entry_price - sl_dist
+        else:
+            return entry_price + sl_dist
+
 
 
     def calculate_take_profit(self, entry_price: float, side: str, ohlcv: Dict[str, pd.DataFrame] = None,
@@ -188,11 +208,16 @@ class VolatilityBreakoutStrategy(BaseStrategy):
                     entry_time = pd.to_datetime(entry_time)
                 
                 from datetime import datetime, timedelta
-                now = datetime.now()
+                
+                # CRITICAL: Use simulation time from current_data if available, else fallback to real time
+                now = current_data.get('timestamp') if current_data and 'timestamp' in current_data else datetime.now()
+                if isinstance(now, str):
+                    now = pd.to_datetime(now)
+                
                 # Timezone awareness safety
-                if entry_time.tzinfo and not now.tzinfo:
-                   now = now.astimezone()
-                elif not entry_time.tzinfo and now.tzinfo:
+                if entry_time.tzinfo and not getattr(now, 'tzinfo', None):
+                   now = now.astimezone() if hasattr(now, 'astimezone') else now.replace(tzinfo=entry_time.tzinfo)
+                elif not getattr(entry_time, 'tzinfo', None) and getattr(now, 'tzinfo', None):
                    entry_time = entry_time.replace(tzinfo=now.tzinfo)
 
                 time_held = now - entry_time

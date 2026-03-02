@@ -3978,9 +3978,9 @@ class StrategyManager:
                             leg_pnl = (leg['entry_price'] - leg['current_price']) * leg['size']
                     
                     leg_status = "🟢" if leg_pnl > 0 else ("🔴" if leg_pnl < 0 else "⚪")
-                entry_price_val = leg.get('entry_price') or 0
-                current_price_val = leg.get('current_price') or 0
-                self.logger.info(f"   └─ {leg['market_type']:<5} {leg['side']:<5} {leg['size']:>10.6f} {leg['symbol']:<12} @ ${float(entry_price_val or 0):.4f} → ${float(current_price_val or 0):.4f} | ${float(leg_pnl or 0):>8.2f} {leg_status}")
+                    entry_price_val = leg.get('entry_price') or 0
+                    current_price_val = leg.get('current_price') or 0
+                    self.logger.info(f"   └─ {leg['market_type']:<5} {leg['side']:<5} {leg['size']:>10.6f} {leg['symbol']:<12} @ ${float(entry_price_val or 0):.4f} → ${float(current_price_val or 0):.4f} | ${float(leg_pnl or 0):>8.2f} {leg_status}")
         
         self.logger.info("-" * 60)
         total_positions = len(positions_summary.get('positions', [])) + len(positions_summary.get('multi_leg_positions', []))
@@ -4038,7 +4038,7 @@ class StrategyManager:
                         self.logger.error(f"🚨 CRITICAL: Cannot price position {symbol} after retries!")
                         continue
                 
-                close_reason = self._should_close_position(position)
+                close_reason = self._should_close_position(position, timestamp=timestamp)
                 if close_reason:
                     positions_to_close.append((symbol, close_reason))
             
@@ -4046,6 +4046,44 @@ class StrategyManager:
             for symbol, reason in positions_to_close:
                 success, _ = self.close_position(symbol, reason, timestamp=timestamp)
                 if success:
+                    self.total_positions_closed += 1
+            
+            # Check for multi-leg positions that need to be closed
+            multi_leg_to_close = []
+            for pos_id, ml_pos in list(self.multi_leg_positions.items()):
+                close_reason = self._should_close_multi_leg_position(ml_pos, timestamp=timestamp)
+                if close_reason:
+                    multi_leg_to_close.append((pos_id, close_reason))
+                    
+            for pos_id, reason in multi_leg_to_close:
+                ml_pos = self.multi_leg_positions.get(pos_id) or self.execution_engine.multi_leg_positions.get(pos_id)
+                if not ml_pos:
+                    self.logger.warning(f"Multi-leg position {pos_id} not found for closure")
+                    continue
+                
+                try:
+                    self.execution_engine.execute_multi_leg_exit(
+                        symbol=ml_pos.primary_symbol,
+                        signal={'urgency': 'high', 'reason': reason},
+                        strategy_name=ml_pos.strategy,
+                        strategies_map=self.strategies,
+                        timestamp=timestamp
+                    )
+                    self.total_positions_closed += 1
+                    self.logger.info(f"✅ Multi-leg position {pos_id} closed: {reason}")
+                except Exception as e:
+                    self.logger.error(f"Error closing multi-leg position {pos_id}: {e}")
+                    # Fallback: close legs individually
+                    for leg in ml_pos.legs:
+                        try:
+                            self.execution_engine.close_position(leg.symbol, reason=reason, timestamp=timestamp)
+                        except Exception as leg_e:
+                            self.logger.error(f"  Error closing leg {leg.symbol}: {leg_e}")
+                    # Clean up from tracking
+                    if pos_id in self.multi_leg_positions:
+                        del self.multi_leg_positions[pos_id]
+                    if pos_id in getattr(self.execution_engine, 'multi_leg_positions', {}):
+                        del self.execution_engine.multi_leg_positions[pos_id]
                     self.total_positions_closed += 1
             
             # Emergency stop check (every 30 seconds)
@@ -4097,7 +4135,7 @@ class StrategyManager:
         return None
     
     
-    def _should_close_position(self, position: Position) -> Optional[str]:
+    def _should_close_position(self, position: Position, timestamp: datetime = None) -> Optional[str]:
         """
         Determine if a position should be closed.
         
@@ -4124,6 +4162,8 @@ class StrategyManager:
             
             # Build current_data for strategy exit check
             current_data = {}
+            if timestamp:
+                current_data['timestamp'] = timestamp
             try:
                 # Get OHLCV data for this symbol
                 ohlcv = self.market_api.get_ohlcv(position.symbol, strategy.timeframe, strategy.ohlcv_limit)
@@ -4205,6 +4245,101 @@ class StrategyManager:
                 return "take_profit"
             elif position.side == 'short' and position.current_price <= position.take_profit:
                 return "take_profit"
+        
+        return None
+    
+    def _should_close_multi_leg_position(self, position: Any, timestamp: datetime = None) -> Optional[str]:
+        """
+        Determine if a multi-leg position should be closed.
+        
+        Args:
+            position: MultiLegPosition to check
+            timestamp: the current simulation timestamp if backtesting
+            
+        Returns:
+            Reason for closure if should close, None otherwise
+        """
+        # =====================================================================
+        # DEFENSIVE: Max holding hours check BEFORE strategy-specific logic
+        # This catches zombie positions even if strategy.should_exit() fails.
+        # =====================================================================
+        if hasattr(position, 'entry_time') and position.entry_time:
+            try:
+                now = timestamp if timestamp else datetime.now()
+                entry_time = position.entry_time
+                if isinstance(entry_time, str):
+                    entry_time = datetime.fromisoformat(entry_time)
+                if isinstance(now, str):
+                    now = datetime.fromisoformat(now)
+                
+                # Strip timezone info for safe comparison
+                if hasattr(entry_time, 'tzinfo') and entry_time.tzinfo:
+                    entry_time = entry_time.replace(tzinfo=None)
+                if hasattr(now, 'tzinfo') and now.tzinfo:
+                    now = now.replace(tzinfo=None)
+                
+                time_held = now - entry_time
+                hours_held = time_held.total_seconds() / 3600
+                
+                # Use strategy-specific max_holding_hours if available, else 120h default
+                max_hours = 120  # 5 day default
+                strategy_name = position.strategy
+                if strategy_name and strategy_name in self.strategies:
+                    strategy = self.strategies[strategy_name]
+                    max_hours = getattr(strategy, 'max_holding_hours', max_hours)
+                
+                if hours_held > max_hours:
+                    self.logger.info(
+                        f"⏰ Multi-leg {getattr(position, 'position_id', '?')} exceeded max hold: "
+                        f"{hours_held:.1f}h > {max_hours}h"
+                    )
+                    return f"max_holding_time_exceeded ({hours_held:.0f}h > {max_hours}h)"
+            except Exception as e:
+                self.logger.warning(f"Error in defensive max_hold check for {getattr(position, 'position_id', '?')}: {e}")
+        
+        # =====================================================================
+        # Strategy-specific exit check (z-score convergence, regime break, etc.)
+        # =====================================================================
+        strategy_name = position.strategy
+        if strategy_name and strategy_name in self.strategies:
+            strategy = self.strategies[strategy_name]
+            
+            # Build current_data for strategy exit check
+            current_data = {}
+            if timestamp:
+                current_data['timestamp'] = timestamp
+            
+            # Retrieve entry z-score and hedge ratio from metadata if available
+            metadata = getattr(position, 'metadata', {})
+            if metadata:
+                if 'entry_z_score' in metadata:
+                    current_data['entry_z_score'] = metadata['entry_z_score']
+                elif 'entry_zscore' in metadata:
+                    current_data['entry_z_score'] = metadata['entry_zscore']
+                
+                # Fetch dynamically updated current_z if strategy makes it available via get_spread_status
+                if hasattr(strategy, 'get_spread_status') and hasattr(position, 'primary_symbol'):
+                    status = strategy.get_spread_status(position.primary_symbol)
+                    if status and status.get('current_z') is not None:
+                        current_data['z_score'] = status.get('current_z')
+            
+            try:
+                # Call strategy's should_exit method
+                should_exit, exit_reason = strategy.should_exit(
+                    position, current_price=None, current_data=current_data
+                )
+                
+                if should_exit and exit_reason:
+                    return f"strategy_exit:{exit_reason}"
+            except Exception as e:
+                self.logger.warning(f"Error checking exit for multi-leg {getattr(position, 'position_id', 'unknown')}: {e}")
+        else:
+            # Strategy not found — orphaned position, close it
+            self.logger.warning(
+                f"Strategy '{strategy_name}' not found for multi-leg position "
+                f"{getattr(position, 'position_id', '?')}. Closing as orphan."
+            )
+            return f"orphaned_strategy ({strategy_name})"
         
         return None
     

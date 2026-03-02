@@ -196,7 +196,7 @@ class TestMultiLegConflictResolution(unittest.TestCase):
         self.engine.close_position.assert_called_once_with('BTC', reason='leg_conflict_displacement')
     
     def test_resolve_multi_leg_displacement(self):
-        """Displace multi-leg position when new signal is stronger."""
+        """Multi-leg positions should be BLOCKED from displacement (protection)."""
         eth_arb = MockMultiLegPosition(
             position_id='eth_arb_123',
             primary_symbol='ETH',
@@ -209,13 +209,11 @@ class TestMultiLegConflictResolution(unittest.TestCase):
         
         self.engine.execute_multi_leg_exit = MagicMock()
         
+        # Multi-leg displacement is now BLOCKED — existing positions must complete
         result = self.engine._resolve_leg_conflicts(conflicts, 0.9, self.mock_strategy_manager)
         
-        self.assertTrue(result)
-        self.engine.execute_multi_leg_exit.assert_called_once()
-        call_args = self.engine.execute_multi_leg_exit.call_args
-        self.assertEqual(call_args.kwargs['symbol'], 'ETH')  # Primary symbol
-        self.assertEqual(call_args.kwargs['signal']['reason'], 'leg_conflict_displacement')
+        self.assertFalse(result)  # Blocked, not displaced
+        self.engine.execute_multi_leg_exit.assert_not_called()  # No exit triggered
     
     def test_resolve_all_or_nothing(self):
         """If any conflict blocks, the whole entry is blocked."""
@@ -226,30 +224,33 @@ class TestMultiLegConflictResolution(unittest.TestCase):
             legs=[MockLeg('ETH'), MockLeg('SOL')]
         )
         
+        # Multi-leg conflict comes first and is always blocked
         conflicts = [
+            {'type': 'multi_leg', 'symbol': 'SOL', 'position': eth_arb},
             {'type': 'single_leg', 'symbol': 'BTC', 'position': btc_position},
-            {'type': 'multi_leg', 'symbol': 'SOL', 'position': eth_arb}
         ]
-        
-        # BTC would be displaced, but SOL's arb is stronger
-        def displacement_side_effect(score, strength):
-            if score == 0.3:  # BTC score
-                return True  # Would displace BTC
-            else:  # SOL arb score = 0.8
-                return False  # Blocked by arb
-        
-        def score_side_effect(symbol, strength):
-            return 0.3  # BTC score
-        
-        self.mock_strategy_manager._get_position_profitability_score.side_effect = score_side_effect
-        self.mock_strategy_manager._get_multi_leg_profitability_score.return_value = 0.8
-        self.mock_strategy_manager._should_displace_position.side_effect = displacement_side_effect
         
         result = self.engine._resolve_leg_conflicts(conflicts, 0.6, self.mock_strategy_manager)
         
-        # Second conflict should block the whole thing
+        # Multi-leg conflict blocks the entire entry immediately
         self.assertFalse(result)
+    
+    def test_resolve_single_leg_displacement_still_works(self):
+        """Single-leg displacement should still work normally."""
+        btc_position = MockPosition('BTC')
+        conflicts = [{'type': 'single_leg', 'symbol': 'BTC', 'position': btc_position}]
+        
+        self.mock_strategy_manager._get_position_profitability_score.return_value = 0.3
+        self.mock_strategy_manager._should_displace_position.return_value = True
+        
+        self.engine.close_position = MagicMock(return_value=True)
+        
+        result = self.engine._resolve_leg_conflicts(conflicts, 0.8, self.mock_strategy_manager)
+        
+        self.assertTrue(result)  # Single-leg displacement still allowed
+        self.engine.close_position.assert_called_once()
 
 
 if __name__ == '__main__':
     unittest.main()
+

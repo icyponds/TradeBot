@@ -142,8 +142,12 @@ class TestStatArbMaxAdverse:
         strategy._get_hedge_ratio = MagicMock(return_value=(0.5, 0.5))
         strategy._calculate_spread_zscore = MagicMock(return_value=-4.1)
         
-        ohlcv_a = pd.DataFrame({'close': [50000.0] * 100})
-        ohlcv_b = pd.DataFrame({'close': [2000.0] * 100})
+        from datetime import datetime, timedelta
+        # Use a proper DatetimeIndex so ohlcv_a.index[-1].timestamp() works
+        sim_time_1 = datetime(2026, 2, 15, 12, 0, 0)
+        idx = pd.date_range(end=sim_time_1, periods=100, freq='4h')
+        ohlcv_a = pd.DataFrame({'close': [50000.0] * 100}, index=idx)
+        ohlcv_b = pd.DataFrame({'close': [2000.0] * 100}, index=idx)
         
         # First call: Starts grace period, should NOT exit yet
         res = strategy.generate_pair_signal(symbol_a, ohlcv_a, symbol_b, ohlcv_b)
@@ -151,12 +155,14 @@ class TestStatArbMaxAdverse:
         assert pair_key in strategy.active_spreads
         assert pair_key in strategy.regime_break_grace_periods  # Grace started
         
-        # Simulate grace period expired (set timestamp to past)
-        from datetime import datetime, timedelta
-        strategy.regime_break_grace_periods[pair_key] = (datetime.now() - timedelta(seconds=400)).timestamp()
+        # Simulate grace period expired by advancing the simulation time past grace_seconds
+        sim_time_2 = sim_time_1 + timedelta(seconds=400)
+        idx2 = pd.date_range(end=sim_time_2, periods=100, freq='4h')
+        ohlcv_a2 = pd.DataFrame({'close': [50000.0] * 100}, index=idx2)
+        ohlcv_b2 = pd.DataFrame({'close': [2000.0] * 100}, index=idx2)
         
         # Second call: Grace period expired, should trigger exit now
-        res = strategy.generate_pair_signal(symbol_a, ohlcv_a, symbol_b, ohlcv_b)
+        res = strategy.generate_pair_signal(symbol_a, ohlcv_a2, symbol_b, ohlcv_b2)
         
         assert res is not None
         assert res['signal'] == 'sell'  # Close Long

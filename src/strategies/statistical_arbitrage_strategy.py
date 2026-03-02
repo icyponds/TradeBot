@@ -188,6 +188,19 @@ class StatisticalArbitrageStrategy(BaseStrategy):
         # Logic migrated from generate_signal_with_symbol
         # Get correlated pair
         correlated_symbol = self.correlation_manager.get_correlated_symbol(symbol)
+        
+        # CRITICAL FIX: Keep tracking active positions even if correlation drops!
+        # Otherwise, z_score freezes and we never trigger max_adverse_z_delta or regime_break stops.
+        if not correlated_symbol:
+            for pair_key in list(self.active_spreads.keys()):
+                sym_a, sym_b = pair_key.split('/')
+                if symbol == sym_a:
+                    correlated_symbol = sym_b
+                    # Only log occasionally to avoid spam
+                    if hasattr(self, 'strategy_manager') and hasattr(self.strategy_manager, 'logger') and self.strategy_manager.logger.isEnabledFor(logging.DEBUG):
+                        self.logger.debug(f"Correlation lost for {pair_key}, but position open. Force-tracking.")
+                    break
+        
         if not correlated_symbol:
             return None
             
@@ -258,7 +271,7 @@ class StatisticalArbitrageStrategy(BaseStrategy):
                 # Stop Loss Handling: Regime Break with Grace Period
                 elif z_score > self.regime_break_threshold:
                     # Check grace period
-                    current_time = datetime.now().timestamp()
+                    current_time = ohlcv_a.index[-1].timestamp() if isinstance(ohlcv_a.index[-1], pd.Timestamp) else float(ohlcv_a.index[-1])
                     if pair_key not in self.regime_break_grace_periods:
                         # First breach - start grace period
                         self.regime_break_grace_periods[pair_key] = current_time
@@ -294,7 +307,7 @@ class StatisticalArbitrageStrategy(BaseStrategy):
                 # Stop Loss Handling: Regime Break with Grace Period
                 elif z_score < -self.regime_break_threshold:
                     # Check grace period
-                    current_time = datetime.now().timestamp()
+                    current_time = ohlcv_a.index[-1].timestamp() if isinstance(ohlcv_a.index[-1], pd.Timestamp) else float(ohlcv_a.index[-1])
                     if pair_key not in self.regime_break_grace_periods:
                         # First breach - start grace period
                         self.regime_break_grace_periods[pair_key] = current_time
@@ -537,10 +550,13 @@ class StatisticalArbitrageStrategy(BaseStrategy):
             # Simple datetime subtraction
             try:
                 # Ensure entry_time is timezone-aware if now() is (or both naive)
-                now = datetime.now()
-                if entry_time.tzinfo and not now.tzinfo:
-                   now = now.astimezone()
-                elif not entry_time.tzinfo and now.tzinfo:
+                now = current_data.get('timestamp') if current_data and 'timestamp' in current_data else datetime.now()
+                if isinstance(now, str):
+                    now = pd.to_datetime(now)
+                
+                if entry_time.tzinfo and not getattr(now, 'tzinfo', None):
+                   now = now.astimezone() if hasattr(now, 'astimezone') else now.replace(tzinfo=entry_time.tzinfo)
+                elif not getattr(entry_time, 'tzinfo', None) and getattr(now, 'tzinfo', None):
                    entry_time = entry_time.replace(tzinfo=now.tzinfo)
 
                 time_held = now - entry_time
@@ -592,9 +608,9 @@ class StatisticalArbitrageStrategy(BaseStrategy):
                 return True, f"spread_mean_reversion_complete (z={z_score:.2f})"
             
             # 2. Stop Loss: Regime Break / Divergence
-            # If Z-score expands beyond 4.0, the correlation is likely broken.
-            if abs(z_score) > 4.0:
-                return True, f"spread_regime_break_stop (z={z_score:.2f})"
+            # If Z-score expands beyond the threshold, the correlation is likely broken.
+            if abs(z_score) > self.regime_break_threshold:
+                return True, f"spread_regime_break_stop (z={z_score:.2f} > {self.regime_break_threshold})"
             
             # 3. Max Adverse Spread Stop (1.5σ from entry)
             entry_z = current_data.get('entry_z_score')
