@@ -25,8 +25,8 @@ class TestConfig:
             assert config['trading']['max_position_size_percentage'] == 15.0
             # Check instances list logic
             instances = config['strategies']['instances']
-            assert any(s['type'] == 'stat_arb' for s in instances)
-            assert any(s['type'] == 'ou_mean_reversion' for s in instances)
+            assert any(s['type'] == 'volatility_breakout' for s in instances)
+            assert any(s['type'] == 'adaptive_grid' for s in instances)
 
     def test_validate_config_success(self, mock_env):
         """Test validation with valid config."""

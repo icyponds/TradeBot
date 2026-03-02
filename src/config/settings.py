@@ -295,14 +295,16 @@ def load_config() -> Dict[str, Any]:
                 # {"type": "stat_arb", "name": "stat_arb_15m", "timeframe": "15m"},
                 # stat_arb_1h DISABLED per trade analysis: -$162.26 over 232 trades (47% win rate)
                 # {"type": "stat_arb", "name": "stat_arb_1h",  "timeframe": "1h"},
-                {"type": "stat_arb", "name": "stat_arb_4h",  "timeframe": "4h"},
+                # stat_arb_4h DISABLED per cointegration quality check: 3 trades, 0% WR, structurally unprofitable
+                # {"type": "stat_arb", "name": "stat_arb_4h",  "timeframe": "4h"},
 
                 # OU Mean Reversion (15m, 1h, 4h)
                 # ou_mean_reversion_15m DISABLED per trade analysis: -$88.50 over 505 trades (44% win rate)
                 # {"type": "ou_mean_reversion", "name": "ou_mean_reversion_15m", "timeframe": "15m"},
                 # ou_mean_reversion_1h DISABLED per trade analysis: -$20.44 over 59 trades (34% win rate)
                 # {"type": "ou_mean_reversion", "name": "ou_mean_reversion_1h",  "timeframe": "1h"},
-                {"type": "ou_mean_reversion", "name": "ou_mean_reversion_4h",  "timeframe": "4h"},
+                # ou_mean_reversion_4h DISABLED: 3 trades, -$43 PnL, structurally unprofitable
+                # {"type": "ou_mean_reversion", "name": "ou_mean_reversion_4h",  "timeframe": "4h"},
                 
                 # Volatility Breakout (15m, 1h, 4h)
                 # vol_breakout_15m disabled due to poor performance (-$3135) - too much chop
