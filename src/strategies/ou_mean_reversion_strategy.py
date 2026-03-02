@@ -534,11 +534,15 @@ class OUMeanReversionStrategy(BaseStrategy):
                 entry_time = pd.to_datetime(entry_time)
             
             try:
-                now = datetime.now()
+                # CRITICAL: Use simulation time from current_data if available, else fallback to real time
+                now = current_data.get('timestamp') if current_data and 'timestamp' in current_data else datetime.now()
+                if isinstance(now, str):
+                    now = pd.to_datetime(now)
+                
                 # Timezone awareness safety
-                if entry_time.tzinfo and not now.tzinfo:
-                   now = now.astimezone()
-                elif not entry_time.tzinfo and now.tzinfo:
+                if entry_time.tzinfo and not getattr(now, 'tzinfo', None):
+                   now = now.astimezone() if hasattr(now, 'astimezone') else now.replace(tzinfo=entry_time.tzinfo)
+                elif not getattr(entry_time, 'tzinfo', None) and getattr(now, 'tzinfo', None):
                    entry_time = entry_time.replace(tzinfo=now.tzinfo)
 
                 time_held = now - entry_time
