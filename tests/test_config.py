@@ -26,7 +26,7 @@ class TestConfig:
             # Check instances list logic
             instances = config['strategies']['instances']
             assert any(s['type'] == 'volatility_breakout' for s in instances)
-            assert any(s['type'] == 'adaptive_grid' for s in instances)
+            assert len([s for s in instances if s['type'] == 'volatility_breakout']) > 0
 
     def test_validate_config_success(self, mock_env):
         """Test validation with valid config."""

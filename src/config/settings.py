@@ -314,9 +314,9 @@ def load_config() -> Dict[str, Any]:
                 {"type": "volatility_breakout", "name": "vol_breakout_4h", "timeframe": "4h"},
                 
                 # Adaptive Grid (15m, 1h, 4h)
-                {"type": "adaptive_grid", "name": "adaptive_grid_15m", "timeframe": "15m"},
-                {"type": "adaptive_grid", "name": "adaptive_grid_1h", "timeframe": "1h"},
-                {"type": "adaptive_grid", "name": "adaptive_grid_4h", "timeframe": "4h"},
+                # {"type": "adaptive_grid", "name": "adaptive_grid_15m", "timeframe": "15m"},
+                # {"type": "adaptive_grid", "name": "adaptive_grid_1h", "timeframe": "1h"},
+                # {"type": "adaptive_grid", "name": "adaptive_grid_4h", "timeframe": "4h"},
                 
                 # Sentiment ML (15m, 1h, 4h)
                 # sentiment_ml_15m disabled due to poor backtest performance (-$49)
