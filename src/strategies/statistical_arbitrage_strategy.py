@@ -57,7 +57,7 @@ class StatisticalArbitrageStrategy(BaseStrategy):
         # Window sizes
         self.window_size = stat_arb_config.get('window_size', 100)
         self.zscore_lookback = coint_config.get('lookback_period', 20)
-        self.max_holding_hours = stat_arb_config.get('max_holding_hours', 120) # Default 5 days
+        self.max_holding_hours = stat_arb_config.get('max_holding_hours', 72) # Default 3 days (Z-score exits avg 19-41h)
         self.max_adverse_z_delta = stat_arb_config.get('max_adverse_z_delta', 1.0)  # Exit if z moves 1.0σ against entry (Tightened from 1.5)
         
         # Regime break detection (per trade analysis: 366+ premature exits at 3.0)
@@ -86,6 +86,10 @@ class StatisticalArbitrageStrategy(BaseStrategy):
         
         # Track active spreads
         self.active_spreads: Dict[str, Dict[str, Any]] = {}
+        
+        # Cointegration test cache: pair_key -> (result, timestamp)
+        self._coint_cache: Dict[str, tuple] = {}
+        self._coint_cache_ttl_hours = stat_arb_config.get('coint_cache_ttl_hours', 4)
         
         self.logger.info(f"Initialized Cointegration Stat Arb Strategy: "
                         f"z_entry={self.z_score_entry}, z_exit={self.z_score_exit}, "
@@ -352,9 +356,17 @@ class StatisticalArbitrageStrategy(BaseStrategy):
             # Check for entry signal
             # Additional Filter: Hurst Exponent Check
             hurst = hurst_exponent(spread)
-            if hurst >= 0.5:
-                # Spread is random walk (0.5) or trending (>0.5) - NOT SAFE for mean reversion
+            if hurst >= 0.45:
+                # Spread is random walk (~0.5) or trending (>0.5) - NOT SAFE for mean reversion
+                # Tightened from 0.5 to 0.45 to only trade truly mean-reverting spreads
                 return None
+            
+            # CRITICAL: Cointegration Quality Gate
+            # Only enter if the pair passes ADF/Engle-Granger cointegration test.
+            # Pairs selected by correlation alone often don't cointegrate and never converge.
+            if self.correlation_manager and hasattr(self.correlation_manager, 'test_cointegration'):
+                if not self._is_pair_cointegrated(pair_key, prices_a, prices_b, symbol_a, symbol_b):
+                    return None
             
             # Entry Logic:
             # 1. Must be above entry threshold (e.g. 2.0)
@@ -437,6 +449,67 @@ class StatisticalArbitrageStrategy(BaseStrategy):
             'metadata': {'symbol_a': symbol_a, 'symbol_b': symbol_b, 'entry_z_score': z_score, 'hedge_ratio': hedge_ratio},
         }
 
+    def _is_pair_cointegrated(self, pair_key: str, prices_a: pd.Series, 
+                              prices_b: pd.Series, symbol_a: str, symbol_b: str) -> bool:
+        """
+        Check if a pair is cointegrated using ADF/Engle-Granger test.
+        
+        Results are cached to avoid re-testing every candle.
+        
+        Args:
+            pair_key: e.g. "BTC/ETH"
+            prices_a, prices_b: Price series for both assets
+            symbol_a, symbol_b: Symbol names
+            
+        Returns:
+            True if pair passes cointegration test
+        """
+        from datetime import datetime
+        
+        # Check cache first
+        if pair_key in self._coint_cache:
+            cached_result, cache_time = self._coint_cache[pair_key]
+            age_hours = (datetime.now() - cache_time).total_seconds() / 3600
+            if age_hours < self._coint_cache_ttl_hours:
+                return cached_result
+        
+        try:
+            result = self.correlation_manager.test_cointegration(
+                prices_a, prices_b, symbol_a, symbol_b,
+                p_value_threshold=self.adf_pvalue_threshold
+            )
+            
+            is_valid = result.is_cointegrated
+            
+            # Additional filter: half-life must be reasonable
+            if is_valid and result.half_life is not None:
+                if result.half_life > self.half_life_max_hours or result.half_life <= 0:
+                    self.logger.info(
+                        f"Cointegration gate REJECTED {pair_key}: half_life={result.half_life:.1f}h "
+                        f"> max {self.half_life_max_hours}h"
+                    )
+                    is_valid = False
+            
+            if not is_valid:
+                self.logger.debug(
+                    f"Cointegration gate REJECTED {pair_key}: p={result.p_value:.4f}, "
+                    f"half_life={result.half_life}, cointegrated={result.is_cointegrated}"
+                )
+            else:
+                self.logger.info(
+                    f"Cointegration gate PASSED {pair_key}: p={result.p_value:.4f}, "
+                    f"half_life={result.half_life:.1f}h, hedge_ratio={result.hedge_ratio:.4f}"
+                )
+            
+            # Cache the result
+            self._coint_cache[pair_key] = (is_valid, datetime.now())
+            return is_valid
+            
+        except Exception as e:
+            self.logger.warning(f"Cointegration test failed for {pair_key}: {e}")
+            # On error, be conservative — reject
+            return False
+    
     def _get_hedge_ratio(self, symbol_a: str, symbol_b: str, 
                         prices_a: pd.Series, prices_b: pd.Series) -> Tuple[float, float]:
         """

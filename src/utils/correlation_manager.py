@@ -380,19 +380,27 @@ class CorrelationManager:
             if len(spread) < 10:
                 return float('inf')
             
+            # Ensure spread is a numpy array to avoid pandas index alignment bugs
+            # when doing array subtraction: spread[1:] - spread[:-1]
+            if isinstance(spread, pd.Series):
+                spread_val = spread.values
+            else:
+                spread_val = np.array(spread)
+                
             # Compute AR(1) coefficient using regression
-            spread_lag = spread[:-1]
-            spread_diff = spread[1:] - spread[:-1]
+            spread_lag = spread_val[:-1]
+            spread_diff = spread_val[1:] - spread_val[:-1]
             
-            # Regress spread_diff on spread_lag
-            X = add_constant(spread_lag)
-            model = OLS(spread_diff, X).fit()
-            
-            # AR(1) coefficient is 1 + regression coefficient
-            lambda_coef = model.params[1]
+            # Regress spread_diff on spread_lag using pure numpy (no scipy/statsmodels needed)
+            # np.polyfit returns (slope, intercept) for degree 1
+            if len(spread_lag) == 0 or len(spread_diff) == 0:
+                return float('inf')
+                
+            slope, intercept = np.polyfit(spread_lag, spread_diff, 1)
+            lambda_coef = slope
             
             if lambda_coef >= 0:
-                # Not mean-reverting
+                # Not mean-reverting (it's a random walk or explosive process)
                 return float('inf')
             
             # Half-life = -ln(2) / lambda
