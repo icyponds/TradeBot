@@ -168,6 +168,10 @@ class StrategyManager:
 
         self._initialize_regime_and_changepoint()
 
+        # Hurst exponent cache: {symbol: (value, timestamp)} with 5min TTL
+        self._hurst_cache: Dict[str, tuple] = {}
+        self._hurst_cache_ttl = 300  # 5 minutes
+
         # Cycle trackers for run_trading_cycle
         self.last_position_sync = 0
         self.last_position_monitoring = 0
@@ -463,6 +467,13 @@ class StrategyManager:
             exchange_map = {p['symbol']: p for p in exchange_positions if p.get('size', 0) != 0}
             exchange_symbols = set(exchange_map.keys())
             
+            # Pre-fetch fills ONCE for the entire sync cycle (shared across all ghost lookups)
+            # This avoids N separate get_user_fills(limit=1000) API calls per ghost position.
+            try:
+                _prefetched_fills = self.market_api.get_user_fills(limit=1000)
+            except Exception:
+                _prefetched_fills = None
+            
             # 2. Get local positions from DB (source of truth)
             local_positions = self.performance_tracker.db.get_all_live_position_symbols()
             
@@ -522,7 +533,7 @@ class StrategyManager:
                 if not pos: continue
                     
                 # Try to find the closing fill from recent fills
-                exit_price, exit_time, reason, fee = self._find_closing_fill(symbol, pos.side, pos.entry_time)
+                exit_price, exit_time, reason, fee = self._find_closing_fill(symbol, pos.side, pos.entry_time, prefetched_fills=_prefetched_fills)
                 if exit_price == 0.0:
                      exit_price = pos.entry_price # Fallback
                 
@@ -613,7 +624,7 @@ class StrategyManager:
                         # Use entry_price to avoid fake PnL spikes if unknown.
                         # Actually, better to check current price to reflect mark-to-market reality?
                         # Let's stick to safe defaults: try to find fill, else fallback.
-                        exit_price, exit_time, reason, fee = self._find_closing_fill(symbol, local_pos.side, local_pos.entry_time)
+                        exit_price, exit_time, reason, fee = self._find_closing_fill(symbol, local_pos.side, local_pos.entry_time, prefetched_fills=_prefetched_fills)
                         if exit_price == 0.0:
                             exit_price = local_pos.entry_price
                             reason = "External Partial Close"
@@ -829,7 +840,7 @@ class StrategyManager:
                     for leg in pos.legs:
                         # Get exit details for each leg from exchange fills
                         exit_price, leg_exit_time, leg_reason, leg_fee = self._find_closing_fill(
-                            leg.symbol, leg.side, pos.entry_time
+                            leg.symbol, leg.side, pos.entry_time, prefetched_fills=_prefetched_fills
                         )
                         
                         if exit_price == 0.0:
@@ -929,7 +940,7 @@ class StrategyManager:
             
             self.execution_engine._persist_multi_leg_position(pos)
 
-    def _find_closing_fill(self, symbol: str, side: str, entry_time: datetime) -> Tuple[float, datetime, str, float]:
+    def _find_closing_fill(self, symbol: str, side: str, entry_time: datetime, prefetched_fills: list = None) -> Tuple[float, datetime, str, float]:
         """
         Search for a fill that closed this position.
         
@@ -937,6 +948,7 @@ class StrategyManager:
             symbol: Trading pair
             side: 'long' or 'short' (Position side)
             entry_time: Time the position was opened (to filter newer fills)
+            prefetched_fills: Pre-fetched fills list (avoids redundant API calls during sync)
             
         Returns:
             Tuple: (Exit Price, Exit Time, Reason, Fee)
@@ -947,8 +959,8 @@ class StrategyManager:
         fee = 0.0
         
         try:
-            # Increase limit to look further back (Fix for ghost position not found if older than 100 trades)
-            fills = self.market_api.get_user_fills(limit=1000)
+            # Use pre-fetched fills if available, otherwise fetch (legacy single-call path)
+            fills = prefetched_fills if prefetched_fills is not None else self.market_api.get_user_fills(limit=1000)
             
             # Look for a fill that closed this position (opposite side, after entry)
             # Handle 'S'/'Sell' vs 'B'/'Buy' normalization
@@ -1468,24 +1480,19 @@ class StrategyManager:
         import time
         required_timeframes = self.get_required_timeframes()
         
-        # 1. Check historical data availability for all timeframes
+        # Check cache has sufficient data for all required timeframes.
+        # This replaces the previous dual-check pattern that called get_ohlcv() 
+        # (which is called again later in _analyze_symbol) AND checked cache.
+        # Direct cache inspection avoids redundant lock/backfill overhead.
         for tf in required_timeframes:
-            ohlcv = self.market_api.get_ohlcv(symbol, tf, limit=20)
-            if ohlcv is None or len(ohlcv) < 20:
-                self.logger.debug(f"[{symbol}] Insufficient historical data for {tf}")
-                return False
-        
-        # 2. Check cache exists for required timeframes
-        for tf in required_timeframes:
-            # Retrieve the inner dict for the symbol, then the specific timeframe DF
             symbol_cache = self.market_api.ohlcv_cache.cache.get(symbol)
             if not symbol_cache:
                 self.logger.debug(f"[{symbol}] No cache entry for symbol")
                 return False
                 
             cached_df = symbol_cache.get(tf)
-            if cached_df is None or len(cached_df) < 5:
-                self.logger.debug(f"[{symbol}] Insufficient cached data for {tf} (found {len(cached_df) if cached_df is not None else 0} rows)")
+            if cached_df is None or len(cached_df) < 20:
+                self.logger.debug(f"[{symbol}] Insufficient cached data for {tf} (found {len(cached_df) if cached_df is not None else 0} rows, need 20)")
                 return False
         
         # 3. Check WebSocket subscription active
@@ -2082,8 +2089,8 @@ class StrategyManager:
                 # Live Reconciliation: Check for config changes every 60s
                 self._reconcile_strategies_periodic()
             
-                # Update account balance periodically (every 5 minutes)
-                self._update_account_balance_periodic()
+                # NOTE: Account balance is updated inside run_trading_cycle() every 10 cycles.
+                # No need to call _update_account_balance_periodic() again here.
             
                 # Sync positions with exchange every 5 minutes
                 self._sync_positions_periodic()
@@ -2364,24 +2371,29 @@ class StrategyManager:
                             z = signal.get("z_score")
                         
                         if z is not None:
-                            # Calculate Hurst for the symbol to gauge efficiency
-                            # Use sufficient lookback (e.g., 100 periods)
+                            # Cached Hurst check (5-min TTL avoids recalculating every cycle)
                             try:
-                                ohlcv_df = ohlcv.get('15m')
-                                if ohlcv_df is None:
-                                    ohlcv_df = ohlcv.get('1h')
-                                if ohlcv_df is None and len(ohlcv) > 0:
-                                    ohlcv_df = list(ohlcv.values())[0]
+                                now_ts = time.time()
+                                cached = self._hurst_cache.get(symbol)
+                                if cached and (now_ts - cached[1]) < self._hurst_cache_ttl:
+                                    h_value = cached[0]
+                                else:
+                                    ohlcv_df = ohlcv.get('15m')
+                                    if ohlcv_df is None:
+                                        ohlcv_df = ohlcv.get('1h')
+                                    if ohlcv_df is None and len(ohlcv) > 0:
+                                        ohlcv_df = list(ohlcv.values())[0]
                                     
-                                if ohlcv_df is not None and len(ohlcv_df) > 50:
-                                    # Quick Hurst calculation on recent 100 candles
-                                    h_value = hurst_exponent(ohlcv_df['close'].iloc[-100:])
-                                    
-                                    # Threshold: 0.6 indicates persistent trend / efficiency
-                                    if h_value > 0.6:
-                                        if abs(z) < 3.0:
-                                            self.logger.info(f"Rejected signal for {strategy_name}/{symbol}: Efficiency Filter (H={h_value:.2f}), Z-Score {z:.2f} < 3.0")
-                                            return None
+                                    if ohlcv_df is not None and len(ohlcv_df) > 50:
+                                        h_value = hurst_exponent(ohlcv_df['close'].iloc[-100:])
+                                        self._hurst_cache[symbol] = (h_value, now_ts)
+                                    else:
+                                        h_value = None
+                                
+                                if h_value is not None and h_value > 0.6:
+                                    if abs(z) < 3.0:
+                                        self.logger.info(f"Rejected signal for {strategy_name}/{symbol}: Efficiency Filter (H={h_value:.2f}), Z-Score {z:.2f} < 3.0")
+                                        return None
                             except Exception as e:
                                 # Don't block on calculation error, fall through
                                 pass

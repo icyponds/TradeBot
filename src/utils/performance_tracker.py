@@ -249,7 +249,7 @@ class PerformanceTracker:
             
         self.db = TradeDatabase(str(db_path), table_prefix=table_prefix)
         
-        # In-memory cache for current session
+        # In-memory cache for current session (capped at 30 days)
         self.completed_trades: List[CompletedTrade] = []
         self._load_recent_trades_to_cache()
         
@@ -257,16 +257,9 @@ class PerformanceTracker:
         self.initial_equity: float = 0.0
         self.equity_curve: List[Dict[str, Any]] = []
         
-        # Per-strategy tracking (loaded on demand from DB)
-        self.strategy_trades: Dict[str, List[CompletedTrade]] = {}
-        
-        # Per-symbol tracking (loaded on demand from DB)
-        self.symbol_trades: Dict[str, List[CompletedTrade]] = {}
-        
-        # Daily/Weekly/Monthly PnL tracking (now from DB)
-        self.daily_pnl: Dict[str, float] = {}
-        self.weekly_pnl: Dict[str, float] = {}
-        self.monthly_pnl: Dict[str, float] = {}
+        # NOTE: Per-strategy and per-symbol tracking dicts were removed.
+        # All queries go through SQLite (get_strategy_stats, get_trades_by_symbol).
+        # Daily/weekly/monthly PnL also served from DB directly.
         
         trade_count = self.db.get_trade_count()
         self.logger.info(f"PerformanceTracker initialized with SQLite ({trade_count} trades in database)")
@@ -303,18 +296,9 @@ class PerformanceTracker:
         # Insert into SQLite database
         trade_id = self.db.insert_trade(trade.to_dict())
         
-        # Update in-memory cache
+        # Update in-memory cache (keep last 30 days only)
         self.completed_trades.append(trade)
-        
-        # Update strategy-specific tracking (in-memory)
-        if trade.strategy not in self.strategy_trades:
-            self.strategy_trades[trade.strategy] = []
-        self.strategy_trades[trade.strategy].append(trade)
-        
-        # Update symbol-specific tracking (in-memory)
-        if trade.symbol not in self.symbol_trades:
-            self.symbol_trades[trade.symbol] = []
-        self.symbol_trades[trade.symbol].append(trade)
+        self._trim_completed_trades_cache()
         
         # Update equity curve in database
         current_equity = self.initial_equity + sum(t.pnl for t in self.completed_trades)
@@ -880,16 +864,17 @@ class PerformanceTracker:
         
         self.logger.info("=" * 70)
     
+    def _trim_completed_trades_cache(self):
+        """Trim the in-memory completed_trades to only keep the last 30 days."""
+        if len(self.completed_trades) > 500:  # Only check periodically
+            cutoff = datetime.now() - timedelta(days=30)
+            self.completed_trades = [t for t in self.completed_trades if t.exit_time >= cutoff]
+
     def reset(self):
         """Reset all performance data."""
         # Clear in-memory cache
         self.completed_trades = []
-        self.strategy_trades = {}
-        self.symbol_trades = {}
         self.equity_curve = []
-        self.daily_pnl = {}
-        self.weekly_pnl = {}
-        self.monthly_pnl = {}
         
         # Clear database
         self.db.delete_all_trades()

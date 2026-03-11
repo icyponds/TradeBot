@@ -1,14 +1,7 @@
-"""
-SQLite database for trade history and performance metrics.
-
-Provides efficient storage and querying of trade data with:
-- Fast indexed queries by strategy, symbol, time
-- Aggregation queries for metrics calculation
-- Automatic schema migrations
-"""
-
 import sqlite3
 import logging
+import threading
+import time as _time
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional, Tuple
@@ -25,6 +18,8 @@ class TradeDatabase:
     - Calculating aggregate metrics (sum, avg, count)
     - Handling large numbers of trades (10K+)
     - Concurrent read access
+    
+    Uses persistent thread-local connections with WAL mode for performance.
     """
     
     SCHEMA_VERSION = 1
@@ -44,20 +39,39 @@ class TradeDatabase:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.table_prefix = table_prefix
         
+        # Thread-local storage for persistent connections
+        self._local = threading.local()
+        self._last_checkpoint = 0.0
+        self._checkpoint_interval = 60.0  # WAL checkpoint every 60 seconds
+        
         # Initialize database
         self._init_database()
         
         self.logger.info(f"TradeDatabase initialized at {self.db_path} (prefix='{self.table_prefix}')")
     
-    @contextmanager
-    def _get_connection(self):
-        """Context manager for database connections."""
+    def _create_connection(self) -> sqlite3.Connection:
+        """Create a new SQLite connection with optimized PRAGMAs (called once per thread)."""
         conn = sqlite3.connect(self.db_path, timeout=30.0)
-        conn.row_factory = sqlite3.Row  # Return rows as dict-like objects
+        conn.row_factory = sqlite3.Row
         
-        # Optimize performance and concurrency
+        # Set PRAGMAs once per connection (not per query)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
+        
+        return conn
+    
+    @contextmanager
+    def _get_connection(self):
+        """Context manager using persistent thread-local connections.
+        
+        Connections are reused across calls within the same thread.
+        WAL checkpointing happens periodically instead of on every call.
+        """
+        # Get or create a persistent connection for this thread
+        conn = getattr(self._local, 'conn', None)
+        if conn is None:
+            conn = self._create_connection()
+            self._local.conn = conn
         
         try:
             yield conn
@@ -66,13 +80,14 @@ class TradeDatabase:
             conn.rollback()
             raise e
         finally:
-            # Checkpoint WAL to ensure data persists to main database file
-            # PASSIVE mode: checkpoints without waiting, non-blocking
-            try:
-                conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-            except Exception:
-                pass  # Ignore checkpoint errors (e.g., if other connections exist)
-            conn.close()
+            # Periodic WAL checkpoint (not every call)
+            now = _time.monotonic()
+            if now - self._last_checkpoint > self._checkpoint_interval:
+                try:
+                    conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                    self._last_checkpoint = now
+                except Exception:
+                    pass
     
     def _init_database(self):
         """Initialize database schema."""
@@ -649,21 +664,21 @@ class TradeDatabase:
         if df.empty:
             return
 
-        # Prepare list of tuples for batch insert
+        # Prepare list of tuples for batch insert (itertuples is 10-50x faster than iterrows)
         data_to_insert = []
-        for timestamp, row in df.iterrows():
-            # Handle string or datetime timestamps
-            ts_str = timestamp.isoformat() if hasattr(timestamp, 'isoformat') else str(timestamp)
+        for row in df.itertuples():
+            # row.Index is the datetime index
+            ts_str = row.Index.isoformat() if hasattr(row.Index, 'isoformat') else str(row.Index)
             
             data_to_insert.append((
                 symbol,
                 timeframe,
                 ts_str,
-                float(row['open']),
-                float(row['high']),
-                float(row['low']),
-                float(row['close']),
-                float(row['volume'])
+                float(row.open),
+                float(row.high),
+                float(row.low),
+                float(row.close),
+                float(row.volume)
             ))
 
         with self._get_connection() as conn:
