@@ -80,9 +80,14 @@ class TestPairSelectorTimeframes:
         # Check get_ohlcv called for '1h' (from mock)
         # Should NOT be called for '5m', '15m', '4h' unless they're in the list
         
-        # Collect all timeframes passed to get_ohlcv
-        calls = api.get_ohlcv.call_args_list
-        fetch_tfs = [c.args[1] for c in calls if c.args[0] == 'TEST_ASSET']
+        # Collect all timeframes passed to warmup_cache
+        calls = api.warmup_cache.call_args_list
+        # warmup_cache expects (symbols: List[str], timeframes: List[str])
+        fetch_tfs = []
+        for c in calls:
+             args, _ = c
+             if 'TEST_ASSET' in args[0]: # symbols
+                 fetch_tfs.extend(args[1]) # timeframes
         
         assert '1h' in fetch_tfs, f"Should have fetched '1h'. Got: {fetch_tfs}"
         assert '5m' not in fetch_tfs, "Should NOT have fetched '5m' (not in requirements)"
@@ -116,8 +121,12 @@ class TestPairSelectorTimeframes:
             t.join(timeout=2)
             
         # Assert fallback calls
-        calls = api.get_ohlcv.call_args_list
-        fetch_tfs = [c.args[1] for c in calls if c.args[0] == 'DEFAULT_TEST']
+        calls = api.warmup_cache.call_args_list
+        fetch_tfs = []
+        for c in calls:
+             args, _ = c
+             if 'DEFAULT_TEST' in args[0]:
+                 fetch_tfs.extend(args[1])
         
         assert '15m' in fetch_tfs and '1h' in fetch_tfs
         assert '5m' not in fetch_tfs, f"Should NOT have fetched '5m'. Got: {set(fetch_tfs)}"

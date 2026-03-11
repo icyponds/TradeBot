@@ -848,6 +848,9 @@ class HyperliquidAPI(MarketInterface):
         self._pending_init_symbols: set = set()
         self._initializing_symbols: set = set() # Track in-flight async inits
         
+        # Flight Cache for Request Coalescing
+        self._flight_cache: Dict[Tuple[str, str], threading.Event] = {}
+        self._flight_lock = threading.Lock()
         # Async persistence worker
         # Async persistence worker (SINGLE worker to serialize API calls and prevent rate limit bursts)
         self._persistence_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="db_persist")
@@ -1813,9 +1816,12 @@ class HyperliquidAPI(MarketInterface):
                                 
                         # --- 2. Backward Gap Logic (New: Historical Backfill) ---
                         earliest_ts = df.index.min()
-                        # Calculate required start time based on limit
-                        # Calculate required start time based on limit
-                        required_duration_ms = limit * interval_ms
+                        # Optimization 1: Over-fetch (Minimum Fetch Limit) to seed cache efficiently
+                        MIN_FETCH_LIMIT = 500  # API limit is 5000 (1 wt per 60 items = ~8 weight for 500)
+                        actual_limit = max(limit, MIN_FETCH_LIMIT)
+                        
+                        # Calculate required start time based on actual_limit
+                        required_duration_ms = actual_limit * interval_ms
                         required_start_dt = (pd.Timestamp.utcnow().replace(tzinfo=None) - 
                                             pd.Timedelta(milliseconds=required_duration_ms))
                         
@@ -1897,7 +1903,9 @@ class HyperliquidAPI(MarketInterface):
                     self.logger.debug(f"Cache miss for {symbol} {timeframe}: {e}")
             
             # Full fetch (no cached data or cache error)
-            start_time = end_time - (limit * interval_ms)
+            MIN_FETCH_LIMIT = 500
+            actual_limit = max(limit, MIN_FETCH_LIMIT)
+            start_time = end_time - (actual_limit * interval_ms)
             
             # Try using SDK wrapper first, fallback to direct call if symbol unknown (common for HIP-3)
             candles = []
@@ -1977,16 +1985,52 @@ class HyperliquidAPI(MarketInterface):
             else:
                 self.logger.warning(f"STARTUP: Skipping persistence for {symbol} {timeframe} - DB not connected")
             
-            # Seed in-memory cache
             # Seed in-memory cache with ALL bars (including incomplete)
-            self.ohlcv_cache.seed(symbol, timeframe, bars_cache, maxlen=max(limit, 300))
+            self.ohlcv_cache.seed(symbol, timeframe, bars_cache, maxlen=max(actual_limit, 300))
             df = pd.DataFrame(bars_cache)
             df['timestamp'] = pd.to_datetime(df['time'], unit='s')
             df.set_index('timestamp', inplace=True)
             return df.tail(limit)
+        # Optimization 2: Request Coalescing (In-Flight Request Caching)
+        cache_key = (symbol, timeframe)
         
-        return self._rate_limited_call(_fetch)
-
+        with self._flight_lock:
+            if cache_key in self._flight_cache:
+                # Another thread is already fetching this exact data. Wait for it.
+                event = self._flight_cache[cache_key]
+                is_fetching = True
+            else:
+                # We are the first. Create an event to let others know we are fetching.
+                event = threading.Event()
+                self._flight_cache[cache_key] = event
+                is_fetching = False
+                
+        if is_fetching:
+            # Wait for the first thread to finish fetching
+            self.logger.debug(f"Coalescing request for {symbol} {timeframe} - waiting on flight cache")
+            event.wait(timeout=30.0)
+            
+            # Now that it's done, try hitting the OhlcvCache again
+            cached_bars = self.ohlcv_cache.get(symbol, timeframe)
+            if cached_bars and len(cached_bars) >= min(limit, self.ohlcv_cache.maxlen[symbol][timeframe]):
+                self.logger.debug(f"Coalesced request fulfilled from cache for {symbol} {timeframe}")
+                df = pd.DataFrame(cached_bars)
+                df['timestamp'] = pd.to_datetime(df['time'], unit='s')
+                df.set_index('timestamp', inplace=True)
+                return df.tail(limit)
+            
+            # If for some reason the cache is still empty, fallback locally (should be rare)
+            self.logger.warning(f"Coalesced request for {symbol} {timeframe} finished but cache misses. Falling back.")
+            return self._rate_limited_call(_fetch)
+            
+        # We are the fetching thread. Execute the fetch, then notify everyone else.
+        try:
+            return self._rate_limited_call(_fetch)
+        finally:
+            with self._flight_lock:
+                event.set()
+                if cache_key in self._flight_cache:
+                    del self._flight_cache[cache_key]
     def update_ohlcv_from_tick(self, symbol: str, price: float, volume: float = 0.0, ts: Optional[float] = None):
         """Update rolling OHLCV cache from a live tick."""
         if ts is None:
@@ -1998,6 +2042,29 @@ class HyperliquidAPI(MarketInterface):
             ts = ts / 1000.0
             
         self.ohlcv_cache.update_from_tick(symbol, price, volume, ts)
+    
+    def warmup_cache(self, symbols: List[str], timeframes: List[str], limit: int = 500):
+        """
+        Asynchronously warm up the OHLCV cache for multiple symbols and timeframes.
+        This submits fetch tasks to the background persistence executor to avoid blocking the main thread,
+        and uses request coalescing naturally via `get_ohlcv`.
+        """
+        if not symbols or not timeframes:
+            return
+
+        self.logger.info(f"Submitting cache warmup for {len(symbols)} symbols across {len(timeframes)} timeframes.")
+        
+        def _warm_task(sym, tf):
+            try:
+                # get_ohlcv will automatically handle limits, caching, and coalescing
+                self.get_ohlcv(sym, tf, limit=limit)
+            except Exception as e:
+                self.logger.debug(f"Warmup failed for {sym} {tf}: {e}")
+
+        # Submit tasks sequentially to the single worker pool so we don't burst the rate limiter
+        for symbol in symbols:
+            for tf in timeframes:
+                self._persistence_executor.submit(_warm_task, symbol, tf)
     
     
     def _on_bar_complete(self, symbol: str, timeframe: str, bar: dict):
@@ -3725,6 +3792,13 @@ class HyperliquidAPI(MarketInterface):
         Returns:
             API name (e.g., "@109") or None if not found
         """
+        if not hasattr(self, '_spot_api_name_cache'):
+            self._spot_api_name_cache = {}
+            
+        cache_key = f"{base_token}/{quote_token}"
+        if cache_key in self._spot_api_name_cache:
+            return self._spot_api_name_cache[cache_key]
+
         try:
             spot_meta = self.get_spot_meta()
             if not spot_meta:
@@ -3740,7 +3814,9 @@ class HyperliquidAPI(MarketInterface):
                         pair_base = token_list[base_idx].get('name', '')
                         pair_quote = token_list[quote_idx].get('name', '')
                         if pair_base == base_token and pair_quote == quote_token:
-                            return pair.get('name')  # Returns "@109" format
+                            api_name = pair.get('name')  # Returns "@109" format
+                            self._spot_api_name_cache[cache_key] = api_name
+                            return api_name
             
             return None
         except Exception as e:

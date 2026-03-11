@@ -87,13 +87,16 @@ class TestAPIBackfill:
         # We want to verify the BACKFILL happened.
         
         backfill_found = False
-        expected_backfill_start = int((now - timedelta(hours=100)).timestamp() * 1000)
+        # With MIN_FETCH_LIMIT=500 and 1h interval, we now ask for 500 hours back from NOW.
+        # But we also add the DB gap logic.
+        # Let's just find ANY call that requests a start time significantly before start_db_time
+        start_db_ts = int(start_db_time.timestamp() * 1000)
         
         for call in api_client.info.candles_snapshot.call_args_list:
             args, _ = call
             start_ts = args[2]
-            # Check if this call looks like the backfill (start time ~ T-100h)
-            if abs(start_ts - expected_backfill_start) < 60000:
+            # Check if this call starts before our DB data starts (it's a backfill)
+            if start_ts < start_db_ts:
                 backfill_found = True
                 break
                 
@@ -106,22 +109,22 @@ class TestAPIBackfill:
         assert len(result_df) >= 90, f"Expected ~100 rows, got {len(result_df)}"
         
     def test_get_ohlcv_no_backfill_needed(self, api_client):
-        """Test that no backfill occurs if DB has sufficient history."""
+        """Test that no backfill occurs if DB has sufficient history (>= MIN_FETCH_LIMIT)."""
         symbol = "BTC"
         interval = "1h"
         limit = 24
         
-        # Setup DB with 48h data (more than limit)
+        # Setup DB with 550h data (more than limit AND more than MIN_FETCH_LIMIT=500)
         now = datetime.now(timezone.utc)
-        dates = pd.date_range(end=now, periods=48, freq='1h', tz='UTC')
+        dates = pd.date_range(end=now, periods=550, freq='1h', tz='UTC')
         dates_naive = [d.replace(tzinfo=None) for d in dates]
         
         initial_df = pd.DataFrame({
-            'open': [100.0] * 48,
-            'high': [105.0] * 48,
-            'low': [95.0] * 48,
-            'close': [102.0] * 48,
-            'volume': [1000.0] * 48
+            'open': [100.0] * 550,
+            'high': [105.0] * 550,
+            'low': [95.0] * 550,
+            'close': [102.0] * 550,
+            'volume': [1000.0] * 550
         }, index=pd.DatetimeIndex(dates_naive, name='timestamp'))
         
         api_client.market_db.get_market_data.return_value = initial_df
@@ -132,21 +135,13 @@ class TestAPIBackfill:
             api_client.ohlcv_cache.cache.clear()
             result_df = api_client.get_ohlcv(symbol, interval, limit=limit)
             
-        # Should NOT have called API (except maybe for forward gap-fill if 'now' is ahead, 
-        # but here DB ends at 'now', so no gap fill technically needed if synced)
-        
-        # Note: If gap-fill logic sees end_time > DB_max, it calls API. 
-        # In this test setup, date_range ends at 'now'. 
-        # Depending on exactly how 'now' aligns with candle close, forward gap fill might trigger.
-        # But we specifically want to verify BACKWARD gap fill logic isn't triggered.
-        
         # We can inspect the call args if it IS called to ensure it wasn't a historical fetch.
         if api_client.info.candles_snapshot.called:
              args, _ = api_client.info.candles_snapshot.call_args
              fetch_start = args[2]
              db_min_ts = int(dates[0].timestamp() * 1000)
              # If fetch_start is >= db_min_ts, it's a forward fill. 
-             # If fetch_start < db_min_ts, it's a backfill (BAD for this test).
+             # If fetch_start < db_min_ts, it's a backfill (BAD for this test because DB had 550 candles).
              assert fetch_start >= db_min_ts, "Triggered historical backfill when not needed!"
 
     def test_backfill_loop_prevention(self, api_client):

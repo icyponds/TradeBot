@@ -1409,9 +1409,12 @@ class DynamicPairSelector:
                                 if hasattr(self.market_api, 'repairer') and self.market_api.repairer:
                                     self.market_api.repairer.process_asset(sym, timeframes=required_timeframes)
                                 
-                                # Fetch all timeframes
-                                for tf in required_timeframes:
-                                    self.market_api.get_ohlcv(sym, tf, market_type=market_type)
+                                # Fetch all timeframes (Asynchronously warming the cache)
+                                if hasattr(self.market_api, 'warmup_cache'):
+                                    self.market_api.warmup_cache([sym], required_timeframes)
+                                else:
+                                    for tf in required_timeframes:
+                                        self.market_api.get_ohlcv(sym, tf, market_type=market_type)
                                 
                                 # Mark as ready
                                 with self._pairs_lock:
@@ -1462,9 +1465,12 @@ class DynamicPairSelector:
                         if hasattr(self.market_api, 'repairer') and self.market_api.repairer:
                             self.market_api.repairer.process_asset(sym, timeframes=required_timeframes)
                         
-                        # Refresh all required timeframes
-                        for tf in required_timeframes:
-                            self.market_api.get_ohlcv(sym, tf, limit=10)
+                        # Refresh all required timeframes (Asynchronously warming the cache)
+                        if hasattr(self.market_api, 'warmup_cache'):
+                            self.market_api.warmup_cache([sym], required_timeframes, limit=10)
+                        else:
+                            for tf in required_timeframes:
+                                self.market_api.get_ohlcv(sym, tf, limit=10)
                         
                         # Ensure in ready_pairs
                         with self._pairs_lock:
