@@ -31,10 +31,12 @@ def load_config() -> Dict[str, Any]:
             "public_account_address": os.getenv("HYPERLIQUID_PUBLIC_ACCOUNT_ADDRESS", ""),
             "timeout": int(os.getenv("API_TIMEOUT", "30")),
             
-            # Rate limiting configuration
+            # Rate limiting configuration (Hyperliquid request-weight units:
+            # the API allows 1200 weight/min per IP; cheap info requests cost 2,
+            # most info requests cost 20). 15/s = 900/min leaves headroom.
             "rate_limit": {
-                "calls_per_second": float(os.getenv("API_RATE_LIMIT_CPS", "10")),
-                "burst_size": int(os.getenv("API_RATE_LIMIT_BURST", "20")),
+                "calls_per_second": float(os.getenv("API_RATE_LIMIT_CPS", "15")),
+                "burst_size": int(os.getenv("API_RATE_LIMIT_BURST", "60")),
             },
             
             # Circuit breaker configuration
@@ -44,9 +46,11 @@ def load_config() -> Dict[str, Any]:
             },
             
             # Cache configuration (TTL in seconds)
+            # market_data_ttl: the analysis cadence is 15s, so sub-second TTLs
+            # just multiply full-universe metaAndAssetCtxs fetches for nothing.
             "cache": {
                 "default_ttl": float(os.getenv("API_CACHE_DEFAULT_TTL", "1.0")),
-                "market_data_ttl": float(os.getenv("API_CACHE_MARKET_DATA_TTL", "0.5")),
+                "market_data_ttl": float(os.getenv("API_CACHE_MARKET_DATA_TTL", "5.0")),
                 "asset_info_ttl": float(os.getenv("API_CACHE_ASSET_INFO_TTL", "5.0")),
                 "positions_ttl": float(os.getenv("API_CACHE_POSITIONS_TTL", "1.0")),
             },
@@ -114,7 +118,10 @@ def load_config() -> Dict[str, Any]:
             # Order monitoring settings
             "order_timeout_minutes": float(os.getenv("ORDER_TIMEOUT_MINUTES", ".05")),
             "enable_stale_order_cleanup": os.getenv("ENABLE_STALE_ORDER_CLEANUP", "true").lower() == "true",
-            "position_sync_interval": int(os.getenv("POSITION_SYNC_INTERVAL", "1")),  # seconds
+            # Full exchange sync (user_state per DEX) cadence. Real-time position
+            # changes arrive via WebSocket; this is only a ghost-position safety
+            # net, so 60s is plenty (1s effectively meant "every single cycle").
+            "position_sync_interval": int(os.getenv("POSITION_SYNC_INTERVAL", "60")),  # seconds
             "enable_position_validation": os.getenv("ENABLE_POSITION_VALIDATION", "true").lower() == "true",
             
             # Position monitoring settings
@@ -139,6 +146,7 @@ def load_config() -> Dict[str, Any]:
                 "adaptive_grid_15m": int(os.getenv("COOLDOWN_ADAPTIVE_GRID_15M", "180")),
                 "vol_breakout_15m": int(os.getenv("COOLDOWN_VOL_BREAKOUT_15M", "180")),
                 "vol_breakout_1h": int(os.getenv("COOLDOWN_VOL_BREAKOUT_1H", "300")),
+                "vol_breakout_4h": int(os.getenv("COOLDOWN_VOL_BREAKOUT_4H", "600")),
                 "liquidation_hunter_5m": int(os.getenv("COOLDOWN_LH_5M", "120")),
                 "liquidation_hunter_15m": int(os.getenv("COOLDOWN_LH_15M", "180")),
                 "sentiment_ml_15m": int(os.getenv("COOLDOWN_SENTIMENT_15M", "180")),
@@ -205,8 +213,11 @@ def load_config() -> Dict[str, Any]:
             # Strategy exploration to ensure sufficient sample sizes.
             # When multiple strategies emit a same-direction entry signal for the same symbol,
             # we occasionally route execution to under-sampled strategies with smaller sizing.
+            # NOTE: defaults to disabled - with a single enabled strategy there is
+            # nothing to explore and the reserve just idles capital. Re-enable when
+            # multiple strategy instances are active.
             "strategy_exploration": {
-                "enabled": os.getenv("STRATEGY_EXPLORATION_ENABLED", "true").lower() == "true",
+                "enabled": os.getenv("STRATEGY_EXPLORATION_ENABLED", "false").lower() == "true",
                 # Chance to explore when eligible (0.0 - 1.0)
                 "epsilon": float(os.getenv("STRATEGY_EXPLORATION_EPSILON", "0.15")),
                 # Treat strategies with < N trades as "under-sampled"
@@ -258,6 +269,7 @@ def load_config() -> Dict[str, Any]:
                 "adaptive_grid_5m": float(os.getenv("COST_HURDLE_ADAPTIVE_GRID_5M", "5.0")),
                 "adaptive_grid_15m": float(os.getenv("COST_HURDLE_ADAPTIVE_GRID_15M", "5.0")),
                 "vol_breakout_15m": float(os.getenv("COST_HURDLE_VOL_BREAKOUT_15M", "6.0")),
+                "vol_breakout_4h": float(os.getenv("COST_HURDLE_VOL_BREAKOUT_4H", "6.0")),
                 "liquidation_hunter_5m": float(os.getenv("COST_HURDLE_LH_5M", "6.0")),
                 "liquidation_hunter_15m": float(os.getenv("COST_HURDLE_LH_15M", "6.0")),
                 "sentiment_ml_15m": float(os.getenv("COST_HURDLE_SENTIMENT_15M", "6.0")),
@@ -389,10 +401,21 @@ def load_config() -> Dict[str, Any]:
             "volatility_breakout": {
                 "bb_length": int(os.getenv("VB_BB_LENGTH", "20")),
                 "bb_std": float(os.getenv("VB_BB_STD", "2.0")),
+                # Percentile squeeze: bandwidth must be in the lowest X of its own
+                # trailing distribution (asset-relative, unlike the absolute threshold)
+                "squeeze_percentile": float(os.getenv("VB_SQUEEZE_PERCENTILE", "0.20")),
+                "squeeze_window": int(os.getenv("VB_SQUEEZE_WINDOW", "100")),
+                # Absolute fallback while bandwidth history is short
                 "squeeze_threshold": float(os.getenv("VB_SQUEEZE_THRESHOLD", "0.15")), # Increased from 0.10
+                # Volume confirmation on the breakout candle
+                "volume_mult": float(os.getenv("VB_VOLUME_MULT", "1.5")),
+                "volume_lookback": int(os.getenv("VB_VOLUME_LOOKBACK", "20")),
                 "atr_length": int(os.getenv("VB_ATR_LENGTH", "14")),
                 "atr_multiplier_sl": float(os.getenv("VB_ATR_MULT_SL", "1.5")), # Tighter stops (was 2.0)
                 "atr_multiplier_tp": float(os.getenv("VB_ATR_MULT_TP", "4.0")),
+                # Chandelier-style trailing stop (ATR units, converted to pct at entry)
+                "trail_atr_mult": float(os.getenv("VB_TRAIL_ATR_MULT", "2.5")),
+                "trail_activation_atr_mult": float(os.getenv("VB_TRAIL_ACTIVATION_ATR_MULT", "1.0")),
             },
             
             # Adaptive Grid Strategy

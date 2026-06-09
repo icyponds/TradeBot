@@ -39,10 +39,14 @@ class TestRateLimiting:
             "Executor should have max_workers=1 to serialize API calls"
     
     def test_rate_limiter_burst_size(self, api_client):
-        """Verify rate limiter has reduced burst size."""
-        # Default burst size should be 10 (lowered from 50)
-        assert api_client.rate_limiter.burst_size <= 20, \
-            f"Burst size should be low to prevent 429s, got {api_client.rate_limiter.burst_size}"
+        """Verify rate limiter burst capacity stays within Hyperliquid weight budget."""
+        # Burst is denominated in request-weight units (heavy info calls cost 20).
+        # Capacity must stay well under the 1200 weight/min IP budget.
+        assert api_client.rate_limiter.burst_size <= 120, \
+            f"Burst size should be modest to prevent 429s, got {api_client.rate_limiter.burst_size}"
+        # Sustained refill must stay under 20 weight/s (= 1200/min)
+        assert api_client.rate_limiter.calls_per_second <= 20, \
+            f"Refill rate should stay under the 1200 weight/min IP budget, got {api_client.rate_limiter.calls_per_second}"
 
     def test_spot_meta_uses_rate_limiter(self, api_client):
         """Verify get_spot_meta routes through _rate_limited_call."""

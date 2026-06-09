@@ -232,6 +232,74 @@ class TestGhostPositionSync(unittest.TestCase):
 
 
 
+class TestLazyFillsFetch(unittest.TestCase):
+    """userFills (weight 20) must only be fetched when ghost positions exist."""
+
+    def setUp(self):
+        self.mock_market_api = MagicMock()
+        self.mock_execution_engine = MagicMock()
+        self.mock_performance_tracker = MagicMock()
+
+    def _create_manager(self):
+        from src.strategies.strategy_manager import StrategyManager
+
+        with patch.object(StrategyManager, '__init__', lambda self, *args, **kwargs: None):
+            manager = StrategyManager.__new__(StrategyManager)
+            manager.market_api = self.mock_market_api
+            manager.execution_engine = self.mock_execution_engine
+            manager.performance_tracker = self.mock_performance_tracker
+            manager.logger = MagicMock()
+            manager.consecutive_errors = 0
+            manager.sync_positions_with_exchange = \
+                StrategyManager.sync_positions_with_exchange.__get__(manager, StrategyManager)
+            return manager
+
+    def _position(self, symbol):
+        return Position(
+            symbol=symbol, side='long', size=0.5, entry_price=42000.0,
+            entry_time=datetime.now(), strategy='csm_4h',
+            capital_at_risk=1000.0, leverage=5.0
+        )
+
+    def test_no_fills_fetch_when_no_ghosts(self):
+        """Happy path (exchange and DB agree) must cost zero userFills calls."""
+        manager = self._create_manager()
+
+        self.mock_market_api.get_positions.return_value = [
+            {'symbol': 'BTC', 'size': 0.5, 'side': 'long'}
+        ]
+        self.mock_execution_engine.positions = {'BTC': self._position('BTC')}
+        mock_db = MagicMock()
+        mock_db.get_all_live_position_symbols.return_value = ['BTC']
+        self.mock_performance_tracker.db = mock_db
+
+        manager.sync_positions_with_exchange()
+
+        self.mock_market_api.get_user_fills.assert_not_called()
+
+    def test_fills_fetched_once_for_multiple_ghosts(self):
+        """When ghosts exist, fills are prefetched exactly once and shared."""
+        manager = self._create_manager()
+
+        self.mock_market_api.get_positions.return_value = []
+        self.mock_market_api.get_user_fills.return_value = []
+        self.mock_execution_engine.positions = {
+            'BTC': self._position('BTC'),
+            'ETH': self._position('ETH'),
+        }
+        mock_db = MagicMock()
+        mock_db.get_all_live_position_symbols.return_value = ['BTC', 'ETH']
+        self.mock_performance_tracker.db = mock_db
+
+        manager.sync_positions_with_exchange()
+
+        self.mock_market_api.get_user_fills.assert_called_once()
+        # Both ghosts must still have been processed
+        self.assertEqual(
+            self.mock_performance_tracker.record_trade_from_position.call_count, 2
+        )
+
+
 class TestSyncPositionsPeriodic(unittest.TestCase):
     """Test _sync_positions_periodic throttling."""
     

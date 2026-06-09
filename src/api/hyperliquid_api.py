@@ -40,46 +40,60 @@ from .interface import MarketInterface
 # =============================================================================
 
 class RateLimiter:
-    """Token bucket rate limiter for API calls."""
-    
-    def __init__(self, calls_per_second: float = 10, burst_size: int = 20):
+    """
+    Token bucket rate limiter for API calls.
+
+    Tokens are denominated in Hyperliquid request-weight units. The REST API
+    allows 1200 weight/minute per IP (cheap info requests like allMids and
+    clearinghouseState cost 2, most other info requests cost 20).
+    `calls_per_second` is the refill rate in weight units per second and
+    `burst_size` is the bucket capacity in weight units.
+    """
+
+    def __init__(self, calls_per_second: float = 15, burst_size: int = 60):
         """
         Initialize rate limiter.
-        
+
         Args:
-            calls_per_second: Sustained rate limit
-            burst_size: Maximum burst capacity
+            calls_per_second: Sustained refill rate (weight units per second)
+            burst_size: Maximum burst capacity (weight units)
         """
         self.calls_per_second = calls_per_second
         self.burst_size = burst_size
         self.tokens = burst_size
         self.last_update = time.time()
         self._lock = threading.Lock()
-    
-    def acquire(self, timeout: float = 30.0) -> bool:
+
+    def acquire(self, timeout: float = 30.0, weight: float = 1.0) -> bool:
         """
-        Acquire a token, blocking if necessary.
-        
+        Acquire `weight` tokens, blocking if necessary.
+
         Args:
-            timeout: Maximum time to wait for a token
-            
+            timeout: Maximum time to wait for tokens
+            weight: Request weight to consume (Hyperliquid weight units)
+
         Returns:
-            True if token acquired, False if timeout
+            True if tokens acquired, False if timeout
         """
+        # A weight larger than the bucket could never be satisfied
+        weight = min(weight, self.burst_size)
         deadline = time.time() + timeout
-        
-        while time.time() < deadline:
+
+        while True:
             with self._lock:
                 self._refill()
-                if self.tokens >= 1:
-                    self.tokens -= 1
+                if self.tokens >= weight:
+                    self.tokens -= weight
                     return True
-            
-            # Wait a bit before retrying
-            time.sleep(0.05)
-        
-        return False
-    
+                # Time until enough tokens accumulate (other threads may consume
+                # in the meantime, so we re-check after sleeping)
+                wait = (weight - self.tokens) / self.calls_per_second
+
+            now = time.time()
+            if now >= deadline:
+                return False
+            time.sleep(min(wait, deadline - now, 0.5))
+
     def _refill(self):
         """Refill tokens based on elapsed time."""
         now = time.time()
@@ -634,6 +648,14 @@ class ConnectionHealthMonitor:
             except Exception as e:
                 self.logger.error(f"Health check error: {e}")
                 self._record_failure()
+
+            # Evict expired TTL cache entries (otherwise they linger until
+            # the next get() for the same key, which may never come)
+            try:
+                if self._api is not None:
+                    self._api.cache.cleanup()
+            except Exception:
+                pass
             
             # Sleep in small increments to allow quick shutdown
             sleep_remaining = self.check_interval
@@ -801,11 +823,12 @@ class HyperliquidAPI(MarketInterface):
         hip3_config = config.get('hip3', {})
         self.perp_dexs = hip3_config.get('perp_dexs', None)
         
-        # Rate limiter configuration
+        # Rate limiter configuration (weight units: Hyperliquid allows
+        # 1200 weight/min per IP; we default to 15/s = 900/min for headroom)
         rate_config = config.get('api', {}).get('rate_limit', {})
         self.rate_limiter = RateLimiter(
-            calls_per_second=rate_config.get('calls_per_second', 20),
-            burst_size=rate_config.get('burst_size', 10)  # Lowered to prevent burst-induced 429s
+            calls_per_second=rate_config.get('calls_per_second', 15),
+            burst_size=rate_config.get('burst_size', 60)
         )
         
         # Circuit breaker configuration
@@ -851,6 +874,10 @@ class HyperliquidAPI(MarketInterface):
         # Flight Cache for Request Coalescing
         self._flight_cache: Dict[Tuple[str, str], threading.Event] = {}
         self._flight_lock = threading.Lock()
+        # Reuse built OHLCV DataFrames while the underlying bars are unchanged
+        # (pd.DataFrame construction per symbol/timeframe/cycle is expensive)
+        self._ohlcv_df_cache: Dict[Tuple[str, str], Tuple[tuple, pd.DataFrame]] = {}
+        self._df_cache_lock = threading.Lock()
         # Async persistence worker
         # Async persistence worker (SINGLE worker to serialize API calls and prevent rate limit bursts)
         self._persistence_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="db_persist")
@@ -886,6 +913,33 @@ class HyperliquidAPI(MarketInterface):
         # Check API key expiration
         self.check_api_key_expiration()
     
+    def _apply_http_timeout(self, client) -> None:
+        """
+        Apply a default HTTP timeout to an SDK client's requests.Session.
+
+        The hyperliquid SDK calls session.post() without a timeout, so a hung
+        TCP connection would block the calling thread forever (and with it the
+        serial trading loop). requests has no session-level timeout setting,
+        so we wrap session.request to inject a default.
+        """
+        try:
+            session = getattr(client, 'session', None)
+            if session is None or getattr(session, '_default_timeout_applied', False):
+                return
+
+            read_timeout = float(self.config.get('api', {}).get('timeout', 30) or 30)
+            original_request = session.request
+
+            def request_with_timeout(*args, **kwargs):
+                kwargs.setdefault('timeout', (5, read_timeout))
+                return original_request(*args, **kwargs)
+
+            session.request = request_with_timeout
+            session._default_timeout_applied = True
+            self.logger.debug(f"Applied default HTTP timeout (5s connect, {read_timeout}s read) to SDK session")
+        except Exception as e:
+            self.logger.warning(f"Could not apply HTTP timeout to SDK session: {e}")
+
     def _init_sdk_clients(self):
         """Initialize SDK Info and Exchange clients."""
         # Lazy imports - these are expensive SDK modules
@@ -918,6 +972,7 @@ class HyperliquidAPI(MarketInterface):
                         skip_ws=True,  # Start without WebSocket for fast init
                         perp_dexs=self.perp_dexs
                     )
+                    self._apply_http_timeout(self.info)
                     break
                 except Exception as e:
                     if "429" in str(e) and attempt < max_retries - 1:
@@ -960,6 +1015,7 @@ class HyperliquidAPI(MarketInterface):
                             account_address=self.public_account_address,  # For position lookups
                             perp_dexs=self.perp_dexs if self.hip3_enabled else None
                         )
+                        self._apply_http_timeout(self.exchange)
                         self.logger.info(f"Exchange client initialized")
                         break
                     except Exception as e:
@@ -1085,6 +1141,7 @@ class HyperliquidAPI(MarketInterface):
         
         if ws_info[0]:
             self.info = ws_info[0]
+            self._apply_http_timeout(self.info)
             self._ws_enabled = True
             self._setup_websocket_subscriptions()
             self.logger.info("WebSocket enabled successfully")
@@ -1237,64 +1294,93 @@ class HyperliquidAPI(MarketInterface):
         except Exception as e:
             self.logger.error(f"Error handling allMids update: {e}")
     
-    def _rate_limited_call(self, func: Callable, *args, **kwargs) -> Any:
+    def _is_retryable_error(self, e: Exception) -> bool:
+        """
+        Classify whether an API error is transient and worth retrying.
+
+        Prefers the SDK's typed errors (which carry real HTTP status codes)
+        over string matching; falls back to substring checks for errors raised
+        by other layers (e.g. wrapped connection failures).
+        """
+        # 1. Typed SDK errors with real status codes
+        try:
+            from hyperliquid.utils.error import ClientError, ServerError
+            if isinstance(e, ClientError):
+                return getattr(e, 'status_code', None) == 429
+            if isinstance(e, ServerError):
+                # (500, 'null') typically means "Symbol not found" or invalid
+                # request - not transient, do not retry
+                return "(500, 'null')" not in str(e)
+        except ImportError:
+            pass
+
+        # 2. Typed requests-layer network errors
+        try:
+            import requests
+            if isinstance(e, (requests.exceptions.Timeout,
+                              requests.exceptions.ConnectionError)):
+                return True
+        except ImportError:
+            pass
+
+        # 3. Fallback: substring matching for errors from other layers
+        err_str = str(e)
+        if "429" in err_str:  # Rate Limit
+            return True
+        if "500" in err_str or "502" in err_str or "503" in err_str:  # Server Error
+            return "(500, 'null')" not in err_str
+        if any(pattern in err_str.lower() for pattern in [
+            "connectionerror", "connection refused", "connection reset",
+            "connection failed", "networkerror", "network unreachable",
+            "timeout", "timed out"
+        ]):
+            # Network errors - but NOT HTTP headers like "'Connection': 'keep-alive'"
+            return True
+        return False
+
+    def _rate_limited_call(self, func: Callable, *args, weight: float = 10.0, **kwargs) -> Any:
         """
         Execute a rate-limited API call with retry logic, circuit breaker and latency tracking.
         Retries on 429 (Too Many Requests) and 5xx (Server Errors).
+
+        Args:
+            weight: Hyperliquid request weight of this call (cheap info requests
+                    like allMids/user_state = 2, most info requests = 20).
+                    Consumed from the token bucket on every attempt.
         """
         # Check circuit breaker
         if not self.circuit_breaker.can_execute():
             raise RuntimeError("Circuit breaker is open - API temporarily unavailable")
-        
-        # Acquire rate limit token
-        if not self.rate_limiter.acquire(timeout=30.0):
-            raise RuntimeError("Rate limit timeout - too many requests")
-        
-        start_time = time.time()
+
         # Aggressive Backoff Strategy: 2s, 10s, 30s, 60s
         # This ensures we persist through temporary outages (total ~2 mins)
         backoff_steps = [2, 10, 30, 60]
         max_retries = len(backoff_steps)
-        
+
         for attempt in range(max_retries + 1):
+            # Acquire tokens on EVERY attempt so retry traffic is also throttled
+            # (retries are exactly when the API is telling us to slow down)
+            if not self.rate_limiter.acquire(timeout=30.0, weight=weight):
+                raise RuntimeError("Rate limit timeout - too many requests")
+
+            start_time = time.time()
             try:
                 result = func(*args, **kwargs)
-                
+
                 # Record latency for health monitoring
                 latency_ms = (time.time() - start_time) * 1000
                 self.health_monitor.record_rest_latency(latency_ms)
-                
+
                 self.circuit_breaker.record_success()
                 return result
-                
+
             except Exception as e:
-                # Check for retryable errors
-                is_retryable = False
-                err_str = str(e)
-                # self.logger.debug(f"DEBUG RETRY CHECK: {err_str[:100]}...")
-                
-                if "429" in err_str:  # Rate Limit
-                    is_retryable = True
-                elif "500" in err_str or "502" in err_str or "503" in err_str: # Server Error
-                    # (500, 'null') typically means "Symbol not found" or invalid request, do not retry
-                    if "(500, 'null')" in err_str:
-                        is_retryable = False
-                    else:
-                        is_retryable = True
-                elif any(pattern in err_str.lower() for pattern in [
-                    "connectionerror", "connection refused", "connection reset",
-                    "connection failed", "networkerror", "network unreachable",
-                    "timeout", "timed out"
-                ]):
-                    # Network errors - but NOT HTTP headers like "'Connection': 'keep-alive'"
-                    is_retryable = True
-                    
-                if is_retryable and attempt < max_retries:
+                if self._is_retryable_error(e) and attempt < max_retries:
                     wait_time = backoff_steps[attempt]
                     self.logger.warning(f"API Error (attempt {attempt+1}/{max_retries+1}): {e}. Retrying in {wait_time}s...")
                     time.sleep(wait_time)
                     continue
-                
+
                 # If not retryable or max retries reached:
                 self.circuit_breaker.record_failure()
                 self.logger.error(f"API Call Failed (attempt {attempt+1}/{max_retries+1}): {e}")
@@ -1406,7 +1492,7 @@ class HyperliquidAPI(MarketInterface):
             return self.info.meta()
         
         try:
-            meta = self._rate_limited_call(_fetch)
+            meta = self._rate_limited_call(_fetch, weight=20)
             if meta and 'universe' in meta:
                 self.logger.info("API connection test successful")
                 return True
@@ -1452,7 +1538,7 @@ class HyperliquidAPI(MarketInterface):
             return self.info.all_mids()
         
         try:
-            all_mids = self._rate_limited_call(_fetch)
+            all_mids = self._rate_limited_call(_fetch, weight=2)
             if clean_symbol in all_mids:
                 return float(all_mids[clean_symbol])
             if clean_symbol != symbol and symbol in all_mids:
@@ -1507,7 +1593,7 @@ class HyperliquidAPI(MarketInterface):
             
             return universe, asset_contexts
             
-        result = self._rate_limited_call(_fetch)
+        result = self._rate_limited_call(_fetch, weight=20)
         if result:
             self.cache.set(cache_key, result, ttl=5.0)  # Cache bulk data for 5 seconds
             
@@ -1544,56 +1630,64 @@ class HyperliquidAPI(MarketInterface):
         cached = self.cache.get(cache_key)
         if cached is not None:
             return cached
-        
-        def _fetch():
-            # 1. Check Native Universe
-            meta_and_ctxs = self.info.meta_and_asset_ctxs()
-            
-            if len(meta_and_ctxs) >= 2:
-                universe = meta_and_ctxs[0]['universe']
-                asset_contexts = meta_and_ctxs[1]
-                
+
+        result = None
+
+        # 1. Check Native Universe via the shared bulk snapshot.
+        # One metaAndAssetCtxs response covers ALL symbols, so we populate the
+        # cache for every symbol in it - iterating 50 pairs per cycle then
+        # costs one API call instead of one full-universe fetch per symbol.
+        try:
+            bulk = self._get_bulk_market_data()
+            if bulk:
+                universe, asset_contexts = bulk
                 for i, asset in enumerate(universe):
-                    if asset.get('name') == symbol:
-                        ctx = asset_contexts[i] if i < len(asset_contexts) else {}
-                        return self._parse_market_ctx(symbol, asset, ctx)
+                    name = asset.get('name')
+                    if not name:
+                        continue
+                    ctx = asset_contexts[i] if i < len(asset_contexts) else {}
+                    parsed = self._parse_market_ctx(name, asset, ctx)
+                    self.cache.set(f"market_data_{name}", parsed, ttl=self.cache_ttl_market_data)
+                    if name == symbol:
+                        result = parsed
+        except Exception as e:
+            self.logger.warning(f"Bulk market data lookup failed for {symbol}: {e}")
 
-            # 2. If not found and HIP-3 enabled, check other Dexes
-            if self.hip3_enabled:
-                try:
-                    dexs = self.info.perp_dexs()
-                    # Skip first (Native)
-                    for dex in dexs[1:]:
-                        dex_name = dex.get('name')
-                        if not dex_name: continue
-                        
-                        # Optimization: If symbol structure implies dex (e.g. hyna:BTC), maybe strictly check that dex?
-                        # But for now, simple iteration.
-                        
-                        try:
-                            # Note: This is expensive if we have many dexes.
-                            # Ideally we cache which symbol is on which dex.
-                            def _fetch_dex_ctx():
-                                return self.info.post("/info", {"type": "metaAndAssetCtxs", "dex": dex_name})
-                            res = self._rate_limited_call(_fetch_dex_ctx)
-                            if res and len(res) >= 2:
-                                u_hip3 = res[0]['universe']
-                                c_hip3 = res[1]
-                                
-                                for i, asset in enumerate(u_hip3):
-                                    if asset.get('name') == symbol:
-                                        ctx = c_hip3[i] if i < len(c_hip3) else {}
-                                        return self._parse_market_ctx(symbol, asset, ctx)
-                        except Exception:
-                            continue
-                except Exception as e:
-                    self.logger.warning(f"HIP-3 lookup failed in get_market_data: {e}")
+        # 2. If not found and HIP-3 enabled, check other Dexes
+        if result is None and self.hip3_enabled:
+            try:
+                dexs = self._rate_limited_call(self.info.perp_dexs, weight=20)
+                # Skip first (Native)
+                for dex in dexs[1:]:
+                    dex_name = dex.get('name')
+                    if not dex_name: continue
 
-            return None
-            
-        result = self._rate_limited_call(_fetch)
-        if result:
-            self.cache.set(cache_key, result, ttl=self.cache_ttl_market_data)
+                    try:
+                        def _fetch_dex_ctx():
+                            return self.info.post("/info", {"type": "metaAndAssetCtxs", "dex": dex_name})
+                        res = self._rate_limited_call(_fetch_dex_ctx, weight=20)
+                        if res and len(res) >= 2:
+                            u_hip3 = res[0]['universe']
+                            c_hip3 = res[1]
+
+                            # Cache every symbol on this dex so sibling HIP-3
+                            # lookups don't re-scan the same universe
+                            for i, asset in enumerate(u_hip3):
+                                name = asset.get('name')
+                                if not name:
+                                    continue
+                                ctx = c_hip3[i] if i < len(c_hip3) else {}
+                                parsed = self._parse_market_ctx(name, asset, ctx)
+                                self.cache.set(f"market_data_{name}", parsed, ttl=self.cache_ttl_market_data)
+                                if name == symbol:
+                                    result = parsed
+                            if result is not None:
+                                break
+                    except Exception:
+                        continue
+            except Exception as e:
+                self.logger.warning(f"HIP-3 lookup failed in get_market_data: {e}")
+
         return result
     
     def _parse_market_ctx(self, symbol: str, asset: dict, ctx: dict) -> Dict[str, Any]:
@@ -1691,7 +1785,7 @@ class HyperliquidAPI(MarketInterface):
                                 # Fetch DEX specific context
                                 def _fetch_hip3_dex():
                                     return self.info.post("/info", {"type": "metaAndAssetCtxs", "dex": dex_name})
-                                res = self._rate_limited_call(_fetch_hip3_dex)
+                                res = self._rate_limited_call(_fetch_hip3_dex, weight=20)
                                 if res and len(res) >= 2:
                                     _process_assets(res[0]['universe'], res[1], dex_name=dex_name)
                             except Exception as dex_err:
@@ -1706,7 +1800,7 @@ class HyperliquidAPI(MarketInterface):
                 self.logger.error(f"Error fetching asset info: {e}")
                 return None
             
-        result = self._rate_limited_call(_fetch)
+        result = self._rate_limited_call(_fetch, weight=20)
         if result:
              self.cache.set(cache_key, result, ttl=300.0)
              
@@ -1754,10 +1848,7 @@ class HyperliquidAPI(MarketInterface):
         # Try cache first (always use human-readable symbol for cache key)
         cached_bars = self.ohlcv_cache.get(symbol, timeframe)
         if cached_bars and len(cached_bars) >= min(limit, self.ohlcv_cache.maxlen[symbol][timeframe]):
-            df = pd.DataFrame(cached_bars)
-            df['timestamp'] = pd.to_datetime(df['time'], unit='s')
-            df.set_index('timestamp', inplace=True)
-            return df.tail(limit)
+            return self._bars_to_df(symbol, timeframe, cached_bars).tail(limit)
         
         # Otherwise fetch once, seed cache
         def _fetch():
@@ -1791,7 +1882,7 @@ class HyperliquidAPI(MarketInterface):
                             self.logger.debug(f"Gap-fill for {symbol} {timeframe}: fetching from {gap_start_dt}")
                             def _fetch_gap():
                                 return self.info.candles_snapshot(api_symbol, timeframe, gap_start_ms, end_time)
-                            candles = self._rate_limited_call(_fetch_gap)
+                            candles = self._rate_limited_call(_fetch_gap, weight=20)
                             if candles:
                                 # Filter for DB (Strictly Closed)
                                 candles_db = [c for c in candles if c['t'] + interval_ms <= end_time]
@@ -1848,7 +1939,7 @@ class HyperliquidAPI(MarketInterface):
                                         def _fetch_backfill():
                                             return self.info.candles_snapshot(api_symbol, timeframe, 
                                                                             backfill_start_ms, backfill_end_ms)
-                                        hist_candles = self._rate_limited_call(_fetch_backfill)
+                                        hist_candles = self._rate_limited_call(_fetch_backfill, weight=20)
                                         
                                         # Filter strictly before earliest_ts to avoid dupes
                                         valid_candles = []
@@ -1915,7 +2006,7 @@ class HyperliquidAPI(MarketInterface):
                 # This uses info.name_to_coin map which might miss new HIP-3 assets
                 def _fetch_candles():
                     return self.info.candles_snapshot(api_symbol, timeframe, start_time, end_time)
-                candles = self._rate_limited_call(_fetch_candles)
+                candles = self._rate_limited_call(_fetch_candles, weight=20)
             except KeyError:
                 # Fallback: Symbol not in SDK map, try raw API call
                 # HIP-3 assets are often queryable by their name directly
@@ -1928,7 +2019,7 @@ class HyperliquidAPI(MarketInterface):
                     }
                     def _fetch_hip3():
                         return self.info.post("/info", {"type": "candleSnapshot", "req": req})
-                    candles = self._rate_limited_call(_fetch_hip3)
+                    candles = self._rate_limited_call(_fetch_hip3, weight=20)
                 except Exception as e_raw:
                      # Phase 12: Enhanced logging to debug HIP-3 failures
                      error_details = str(e_raw)
@@ -2014,23 +2105,48 @@ class HyperliquidAPI(MarketInterface):
             cached_bars = self.ohlcv_cache.get(symbol, timeframe)
             if cached_bars and len(cached_bars) >= min(limit, self.ohlcv_cache.maxlen[symbol][timeframe]):
                 self.logger.debug(f"Coalesced request fulfilled from cache for {symbol} {timeframe}")
-                df = pd.DataFrame(cached_bars)
-                df['timestamp'] = pd.to_datetime(df['time'], unit='s')
-                df.set_index('timestamp', inplace=True)
-                return df.tail(limit)
-            
+                return self._bars_to_df(symbol, timeframe, cached_bars).tail(limit)
+
             # If for some reason the cache is still empty, fallback locally (should be rare)
             self.logger.warning(f"Coalesced request for {symbol} {timeframe} finished but cache misses. Falling back.")
-            return self._rate_limited_call(_fetch)
-            
+            return _fetch()
+
         # We are the fetching thread. Execute the fetch, then notify everyone else.
+        # NOTE: _fetch is called directly (not via _rate_limited_call): it is an
+        # orchestration of DB reads + network calls, and each network call inside
+        # it is already individually rate-limited. Wrapping the whole thing would
+        # double-consume tokens and multiply retries (inner ~102s backoff times
+        # outer 4 retries = minutes of blocking).
         try:
-            return self._rate_limited_call(_fetch)
+            return _fetch()
         finally:
             with self._flight_lock:
                 event.set()
                 if cache_key in self._flight_cache:
                     del self._flight_cache[cache_key]
+    def _bars_to_df(self, symbol: str, timeframe: str, bars: list) -> pd.DataFrame:
+        """
+        Build a DataFrame from cached OHLCV bars, reusing the previous build
+        when the underlying bars are unchanged (same length, last bar time,
+        close and volume). Callers must treat the returned frame as read-only.
+        """
+        last = bars[-1]
+        state_key = (len(bars), last.get('time'), last.get('close'), last.get('volume'))
+
+        cache_key = (symbol, timeframe)
+        with self._df_cache_lock:
+            cached = self._ohlcv_df_cache.get(cache_key)
+            if cached is not None and cached[0] == state_key:
+                return cached[1]
+
+        df = pd.DataFrame(bars)
+        df['timestamp'] = pd.to_datetime(df['time'], unit='s')
+        df.set_index('timestamp', inplace=True)
+
+        with self._df_cache_lock:
+            self._ohlcv_df_cache[cache_key] = (state_key, df)
+        return df
+
     def update_ohlcv_from_tick(self, symbol: str, price: float, volume: float = 0.0, ts: Optional[float] = None):
         """Update rolling OHLCV cache from a live tick."""
         if ts is None:
@@ -2140,7 +2256,7 @@ class HyperliquidAPI(MarketInterface):
             # Route through rate limiter to prevent 429 bursts
             def _fetch():
                 return self.info.candles_snapshot(api_symbol, timeframe, current_bar_start, now_ms)
-            candles = self._rate_limited_call(_fetch)
+            candles = self._rate_limited_call(_fetch, weight=20)
             if candles:
                 bar = {
                     'time': candles[-1]['t'] // 1000,
@@ -2496,7 +2612,8 @@ class HyperliquidAPI(MarketInterface):
             self.cache.set(cache_key, all_positions, ttl=self.cache_ttl_positions)
             return all_positions
         
-        return self._rate_limited_call(_fetch)
+        ndex = len(self.perp_dexs) if self.perp_dexs else 1
+        return self._rate_limited_call(_fetch, weight=2 * ndex)
     
     def get_position(self, symbol: str) -> Dict[str, Any]:
         """Get current position for a specific symbol."""
@@ -2532,7 +2649,7 @@ class HyperliquidAPI(MarketInterface):
                 self.logger.error(f"Error fetching user fills: {e}")
                 return []
         
-        return self._rate_limited_call(_fetch)
+        return self._rate_limited_call(_fetch, weight=20)
     
     # =========================================================================
     # FUND TRANSFERS & COLLATERAL MANAGEMENT
@@ -2544,7 +2661,7 @@ class HyperliquidAPI(MarketInterface):
             return self.info.spot_user_state(self.public_account_address)
         
         try:
-            spot_state = self._rate_limited_call(_fetch)
+            spot_state = self._rate_limited_call(_fetch, weight=2)
             for balance in spot_state.get('balances', []):
                 if balance.get('coin') == token:
                     return float(balance.get('total', 0))
@@ -2559,7 +2676,7 @@ class HyperliquidAPI(MarketInterface):
             return self.info.user_state(self.public_account_address)
         
         try:
-            user_state = self._rate_limited_call(_fetch)
+            user_state = self._rate_limited_call(_fetch, weight=2)
             margin_summary = user_state.get('marginSummary', {})
             
             return {
@@ -2700,7 +2817,8 @@ class HyperliquidAPI(MarketInterface):
         try:
             user_state = self._rate_limited_call(
                 self.info.user_state,
-                self.public_account_address
+                self.public_account_address,
+                weight=2
             )
             self._user_state_cache = user_state
             self._user_state_cache_time = time.time()
@@ -3054,7 +3172,7 @@ class HyperliquidAPI(MarketInterface):
                 try:
                     # For HIP-3 and other cases, get price from L2 order book and place aggressive order
                     # SDK's market_close doesn't work for HIP-3 (doesn't pass dex= to user_state)
-                    l2 = self._rate_limited_call(self.info.l2_snapshot, trading_symbol)
+                    l2 = self._rate_limited_call(self.info.l2_snapshot, trading_symbol, weight=2)
                     
                     if l2 and 'levels' in l2:
                         bids = l2['levels'][0]
@@ -4054,7 +4172,7 @@ class HyperliquidAPI(MarketInterface):
                             # Payload must match what verified script used: {"dex": "name"}
                             def _fetch_dex_meta():
                                 return self.info.post("/info", {"type": "metaAndAssetCtxs", "dex": dex_name})
-                            dex_meta_ctx = self._rate_limited_call(_fetch_dex_meta)
+                            dex_meta_ctx = self._rate_limited_call(_fetch_dex_meta, weight=20)
                             
                             if len(dex_meta_ctx) >= 2:
                                 d_universe = dex_meta_ctx[0].get('universe', [])

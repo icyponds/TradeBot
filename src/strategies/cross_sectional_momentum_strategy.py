@@ -205,7 +205,7 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
         """
         return 0.0 # Disabled
         
-    def get_trailing_stop_config(self) -> Dict[str, Any]:
+    def get_trailing_stop_config(self, entry_price: float = None, signal_context: Dict[str, Any] = None) -> Dict[str, Any]:
         """
         Trailing stop to capture trend collapses.
         """

@@ -192,7 +192,7 @@ class AdaptiveGridStrategy(BaseStrategy):
         else:
             return entry_price - tp_dist
 
-    def get_trailing_stop_config(self) -> Dict[str, Any]:
+    def get_trailing_stop_config(self, entry_price: float = None, signal_context: Dict[str, Any] = None) -> Dict[str, Any]:
         """
         Grid strategies typically take fixed profit at levels.
         But a tight trail can secure profit if it pumps.

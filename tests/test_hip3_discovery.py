@@ -74,7 +74,7 @@ class TestHIP3Discovery:
         api.info = mock_info # Inject mock
         
         # Bypass rate limiter for tests to ensure logic runs
-        api._rate_limited_call = lambda func, *args, **kwargs: func(*args, **kwargs)
+        api._rate_limited_call = lambda func, *args, weight=10, **kwargs: func(*args, **kwargs)
         
         return api
 

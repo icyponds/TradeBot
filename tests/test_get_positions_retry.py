@@ -40,7 +40,7 @@ def test_get_positions_bubbles_up_429_error(mock_config):
             api.public_account_address = '0x123'
             
             # Bypass rate limiter wrapper for this test
-            api._rate_limited_call = lambda fn: fn()
+            api._rate_limited_call = lambda fn, *args, **kwargs: fn(*args)
         
         # Should raise exception, NOT return partial data
         with pytest.raises(Exception) as exc_info:
@@ -68,7 +68,7 @@ def test_get_positions_returns_all_dex_positions(mock_config):
             api.perp_dexs = ['', 'xyz']
             api.hip3_enabled = True
             api.public_account_address = '0x123'
-            api._rate_limited_call = lambda fn: fn()
+            api._rate_limited_call = lambda fn, *args, **kwargs: fn(*args)
         
         positions = api.get_positions()
         

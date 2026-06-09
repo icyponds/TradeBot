@@ -8,6 +8,7 @@ import signal
 import sys
 import json
 import random
+import threading
 from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime, timedelta
 import pandas as pd
@@ -171,6 +172,14 @@ class StrategyManager:
         # Hurst exponent cache: {symbol: (value, timestamp)} with 5min TTL
         self._hurst_cache: Dict[str, tuple] = {}
         self._hurst_cache_ttl = 300  # 5 minutes
+
+        # Dedicated exit-monitor thread (live mode only): keeps trailing stops
+        # and exit checks running even when the main loop is busy fetching data
+        self._exit_monitor_thread: Optional[threading.Thread] = None
+        self._position_monitor_lock = threading.RLock()
+
+        # Once-per-closed-bar signal gating: {(symbol, strategy_name): bar_ts}
+        self._last_signal_bar: Dict[Tuple[str, str], float] = {}
 
         # Cycle trackers for run_trading_cycle
         self.last_position_sync = 0
@@ -466,14 +475,7 @@ class StrategyManager:
             # Map symbol -> position dict for easy lookup
             exchange_map = {p['symbol']: p for p in exchange_positions if p.get('size', 0) != 0}
             exchange_symbols = set(exchange_map.keys())
-            
-            # Pre-fetch fills ONCE for the entire sync cycle (shared across all ghost lookups)
-            # This avoids N separate get_user_fills(limit=1000) API calls per ghost position.
-            try:
-                _prefetched_fills = self.market_api.get_user_fills(limit=1000)
-            except Exception:
-                _prefetched_fills = None
-            
+
             # 2. Get local positions from DB (source of truth)
             local_positions = self.performance_tracker.db.get_all_live_position_symbols()
             
@@ -523,10 +525,17 @@ class StrategyManager:
             # ----------------------------------------------------
             ghost_symbols = [s for s in local_positions if s not in exchange_symbols]
             changes_made = False
-            
+            _prefetched_fills = None
+
             if ghost_symbols:
                 changes_made = True
                 self.logger.warning(f"Ghost positions detected: {ghost_symbols}")
+                # Fetch fills ONCE, and only when ghosts actually exist - the
+                # happy path (no ghosts) costs no userFills API call at all.
+                try:
+                    _prefetched_fills = self.market_api.get_user_fills(limit=1000)
+                except Exception:
+                    _prefetched_fills = None
             
             for symbol in ghost_symbols:
                 pos = self.execution_engine.positions.get(symbol)
@@ -1733,8 +1742,53 @@ class StrategyManager:
         
         # Start trading loop
         self.is_running = True
+
+        # Start dedicated exit monitor so trailing stops / exit checks keep
+        # running even when the main loop is busy analyzing other symbols
+        self._exit_monitor_thread = threading.Thread(
+            target=self._run_exit_monitor_loop,
+            name="exit-monitor",
+            daemon=True
+        )
+        self._exit_monitor_thread.start()
+
         self._run_trading_loop()
-    
+
+    def _exit_monitor_active(self) -> bool:
+        """Whether the dedicated exit-monitor thread is running."""
+        return self._exit_monitor_thread is not None and self._exit_monitor_thread.is_alive()
+
+    def _run_exit_monitor_loop(self):
+        """
+        Dedicated position-exit monitoring loop (live mode only).
+
+        Runs trailing-stop updates, strategy exit checks and emergency-stop
+        evaluation on a fixed cadence, independent of the main trading loop -
+        a slow data fetch for one symbol can no longer delay exits for others.
+        Prices come from the WebSocket-first get_current_price path, so this
+        loop is cheap in API weight.
+        """
+        interval = self.config['trading'].get('position_monitoring_interval', 10)
+        emergency_pct = self.config.get('risk_management', {}).get('emergency_portfolio_loss_pct', 10.0)
+        self.logger.info(f"Exit monitor thread started (interval: {interval}s)")
+
+        while self.is_running:
+            try:
+                if self.positions or self.multi_leg_positions:
+                    with self._position_monitor_lock:
+                        self.update_position_prices()
+                        self._monitor_and_close_positions(emergency_pct)
+            except Exception as e:
+                self.logger.error(f"Error in exit monitor loop: {e}")
+
+            # Interruptible sleep
+            slept = 0.0
+            while slept < interval and self.is_running:
+                time.sleep(min(1.0, interval - slept))
+                slept += 1.0
+
+        self.logger.info("Exit monitor thread stopped")
+
     def _update_account_balance_periodic(self):
         """Periodically update account balance."""
         try:
@@ -1764,7 +1818,11 @@ class StrategyManager:
         
         self.logger.info("Stopping strategy manager...")
         self.is_running = False
-        
+
+        # Stop the exit monitor thread before closing positions to avoid races
+        if self._exit_monitor_thread is not None and self._exit_monitor_thread.is_alive():
+            self._exit_monitor_thread.join(timeout=5.0)
+
         if close_positions:
             self.logger.warning("Closing all positions before stopping...")
             try:
@@ -1979,16 +2037,20 @@ class StrategyManager:
             # Update position prices immediately to ensure latest data for monitoring
             self.update_position_prices()
 
-            # Continuous position monitoring and auto-closure
+            # Continuous position monitoring and auto-closure.
+            # In live mode this runs in the dedicated exit-monitor thread; the
+            # in-cycle path remains for backtesting (where the thread is not started).
             position_monitoring_interval = self.config['trading']['position_monitoring_interval']
             emergency_portfolio_loss_pct = self.config.get('risk_management', {}).get('emergency_portfolio_loss_pct', 10.0)
-            
-            if current_time - self.last_position_monitoring >= position_monitoring_interval:
+
+            if not self._exit_monitor_active() and \
+               current_time - self.last_position_monitoring >= position_monitoring_interval:
                 self.logger.debug(f"Running position monitoring check ({len(self.positions)} positions)")
-                self._monitor_and_close_positions(
-                    emergency_portfolio_loss_pct, 
-                    timestamp=current_datetime
-                )
+                with self._position_monitor_lock:
+                    self._monitor_and_close_positions(
+                        emergency_portfolio_loss_pct,
+                        timestamp=current_datetime
+                    )
                 self.last_position_monitoring = current_time
             
             # Validate position integrity (if enabled)
@@ -2331,6 +2393,43 @@ class StrategyManager:
         except Exception as e:
             self.logger.error(f"Error analyzing {symbol}: {e}")
     
+    def _symbol_has_open_position(self, symbol: str) -> bool:
+        """Check whether the symbol is part of any open position (single or multi-leg)."""
+        if symbol in self.positions:
+            return True
+        return self._get_multi_leg_position_for_symbol(symbol) is not None
+
+    def _has_new_closed_bar(self, symbol: str, strategy_name: str, strategy, ohlcv: Dict[str, pd.DataFrame]) -> bool:
+        """
+        Whether a new closed candle has appeared on the strategy's timeframe
+        since the last signal evaluation for (symbol, strategy).
+
+        Signals are computed from closed candles, so re-evaluating every 15s
+        cycle between bar closes only burns CPU (e.g. Hurst over 300 bars for
+        50 symbols). Returns True when in doubt (missing data) to fail open.
+        """
+        tf = getattr(strategy, 'timeframe', None)
+        df = ohlcv.get(tf) if tf else None
+        if df is None or len(df) == 0:
+            return True
+
+        try:
+            interval_s = strategy.TIMEFRAME_MINUTES.get(tf, 15) * 60
+            last_ts = df.index[-1].timestamp()
+            # The last bar may still be forming (live cache includes it)
+            if last_ts + interval_s > time.time() and len(df) >= 2:
+                last_closed_ts = df.index[-2].timestamp()
+            else:
+                last_closed_ts = last_ts
+        except Exception:
+            return True
+
+        key = (symbol, strategy_name)
+        if self._last_signal_bar.get(key) == last_closed_ts:
+            return False
+        self._last_signal_bar[key] = last_closed_ts
+        return True
+
     def _generate_signal_for_strategy(self, symbol: str, strategy_name: str, strategy, ohlcv: Dict[str, pd.DataFrame], current_price: float) -> Optional[Dict[str, Any]]:
         """Generate a signal from a strategy without executing it."""
         try:
@@ -2350,7 +2449,14 @@ class StrategyManager:
             # Skip strategies that handle their own signal generation differently
             if strategy_name in ['funding_rate_arbitrage', 'momentum_factor']:
                 return None
-            
+
+            # Only evaluate ENTRY signals once per closed candle on the
+            # strategy's timeframe. Symbols with open positions are always
+            # evaluated, since some strategies emit exit signals here too.
+            if not self._symbol_has_open_position(symbol):
+                if not self._has_new_closed_bar(symbol, strategy_name, strategy, ohlcv):
+                    return None
+
             # Generate the signal based on strategy type
             if strategy_name == 'ou_mean_reversion':
                 signal = strategy.generate_signal_for_symbol(symbol, ohlcv)

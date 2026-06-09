@@ -698,7 +698,7 @@ class StatisticalArbitrageStrategy(BaseStrategy):
 
         return False, None
 
-    def get_trailing_stop_config(self) -> Dict[str, Any]:
+    def get_trailing_stop_config(self, entry_price: float = None, signal_context: Dict[str, Any] = None) -> Dict[str, Any]:
         """Trailing stop config."""
         return {
             'enabled': True,

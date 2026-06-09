@@ -167,12 +167,18 @@ class BaseStrategy(ABC):
         else:
             return entry_price * (1 - adjusted_percentage)
     
-    def get_trailing_stop_config(self) -> Dict[str, Any]:
+    def get_trailing_stop_config(self, entry_price: float = None, signal_context: Dict[str, Any] = None) -> Dict[str, Any]:
         """
         Get trailing stop configuration for this strategy.
-        
+
         Override this method in subclasses to enable trailing stops.
-        
+
+        Args:
+            entry_price: Actual fill price (lets strategies scale the trail
+                         to volatility units, e.g. ATR, at entry time)
+            signal_context: The signal dict that triggered the entry (may
+                            carry indicator values such as 'atr')
+
         Returns:
             Dictionary with:
                 - enabled: bool - Whether trailing stop is enabled

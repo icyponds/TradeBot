@@ -300,8 +300,11 @@ class ExecutionEngine:
                     order_id=order_id,
                 )
                 
-                # Get trailing stop config
-                trailing_config = strategy.get_trailing_stop_config()
+                # Get trailing stop config (pass fill price + signal so
+                # strategies can scale the trail to entry-time volatility)
+                trailing_config = strategy.get_trailing_stop_config(
+                    entry_price=fill_price, signal_context=signal
+                )
                 
                 # RE-CALCULATE CAPITAL AT RISK based on ACTUAL execution
                 # Original margin_required was based on intended size.

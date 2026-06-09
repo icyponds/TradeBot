@@ -6,13 +6,17 @@ It identifies periods of market consolidation ("squeezes") and enters when price
 with expanding volatility.
 
 Logic:
-1. Identify Squeeze: Bollinger Band Width < Threshold (low volatility).
-2. Signal Breakout: Price closes above Upper Band (Long) or below Lower Band (Short).
-3. Confirmation: Volume expansion (optional but recommended).
-4. Exit: ATR-based trailing stop or mean reversion to Moving Average.
+1. Identify Squeeze: Bollinger Band Width in the lowest percentile of its own
+   trailing distribution (falls back to an absolute threshold with short history).
+2. Signal Breakout: Last CLOSED candle closes above Upper Band (Long) or below
+   Lower Band (Short). The currently forming candle is never used - intrabar
+   spikes that fade before the close would otherwise cause churn entries.
+3. Confirmation: Volume expansion on the breakout candle.
+4. Exit: ATR-based (chandelier-style) trailing stop, TP, or time decay.
 """
 
 import logging
+import time
 from typing import Dict, Any, Optional, Tuple, List
 import pandas as pd
 import numpy as np
@@ -39,25 +43,41 @@ class VolatilityBreakoutStrategy(BaseStrategy):
         self.bb_length = vb_config.get('bb_length', 20)
         self.bb_std = vb_config.get('bb_std', 2.0)
         
-        # Squeeze detection: Bandwidth must be below this threshold to qualify as "squeeze"
-        # Bandwidth = (Upper - Lower) / Middle
-        # Low value (e.g., 0.05 or 0.10) implies tight consolidation
+        # Squeeze detection (percentile-based, asset-relative):
+        # squeeze = bandwidth in the lowest `squeeze_percentile` of its own
+        # trailing `squeeze_window` distribution. An absolute threshold means
+        # completely different things for BTC vs a high-vol small cap, which
+        # biases which pairs can ever signal; the percentile rule does not.
+        self.squeeze_percentile = vb_config.get('squeeze_percentile', 0.20)
+        self.squeeze_window = vb_config.get('squeeze_window', 100)
+        # Absolute fallback used while bandwidth history is shorter than squeeze_window
         self.squeeze_threshold = vb_config.get('squeeze_threshold', 0.10)
-        
+
+        # Volume confirmation: breakout candle volume must exceed
+        # `volume_mult` x the trailing median. Skipped when volume data is
+        # unavailable (e.g. tick-built bars carry zero volume).
+        self.volume_mult = vb_config.get('volume_mult', 1.5)
+        self.volume_lookback = vb_config.get('volume_lookback', 20)
+
         # ATR Trailing Stop settings
         self.atr_length = vb_config.get('atr_length', 14)
         self.atr_multiplier_sl = vb_config.get('atr_multiplier_sl', 2.0)   # Initial Stop Loss
         self.atr_multiplier_tp = vb_config.get('atr_multiplier_tp', 4.0)   # Take Profit (optional)
-        
+        # Chandelier-style trail: distances in ATR units (converted to pct at entry)
+        self.trail_atr_mult = vb_config.get('trail_atr_mult', 2.5)
+        self.trail_activation_atr_mult = vb_config.get('trail_activation_atr_mult', 1.0)
+
         # Regime filter: minimum Hurst exponent to enter (0.5 = random walk)
         self.min_hurst = vb_config.get('min_hurst', 0.5)
-        
+
         # Time decay: exit stagnant breakouts after N hours if not in profit
         self.time_decay_hours = vb_config.get('time_decay_hours', 16)
-        
+
         self.logger.info(f"Initialized Volatility Breakout Strategy: "
-                        f"BB({self.bb_length},{self.bb_std}), Squeeze<{self.squeeze_threshold}, "
-                        f"Hurst>{self.min_hurst}, TimeDecay={self.time_decay_hours}h")
+                        f"BB({self.bb_length},{self.bb_std}), "
+                        f"Squeeze<p{self.squeeze_percentile*100:.0f} (fallback<{self.squeeze_threshold}), "
+                        f"Vol>{self.volume_mult}x, Hurst>{self.min_hurst}, "
+                        f"TimeDecay={self.time_decay_hours}h")
     
     def generate_signal(self, symbol: str, ohlcv: Dict[str, pd.DataFrame]) -> Optional[Dict[str, Any]]:
         """
@@ -69,69 +89,113 @@ class VolatilityBreakoutStrategy(BaseStrategy):
         
         return self._generate_signal_internal(tf_data, symbol)
     
+    def _drop_forming_bar(self, ohlcv: pd.DataFrame) -> pd.DataFrame:
+        """
+        Return only closed candles.
+
+        The live OHLCV cache includes the currently forming bar as the last
+        row. Evaluating breakouts on it causes intrabar flip-flops (spikes
+        that fade before the close) and contaminates the Bollinger Bands with
+        the current price itself.
+        """
+        if len(ohlcv) < 2:
+            return ohlcv
+        try:
+            interval_s = self.TIMEFRAME_MINUTES.get(self.timeframe, 60) * 60
+            last_ts = ohlcv.index[-1].timestamp()
+            if last_ts + interval_s > time.time():
+                return ohlcv.iloc[:-1]
+        except Exception:
+            pass
+        return ohlcv
+
+    def _is_squeeze_at(self, bandwidth: pd.Series, idx: int) -> bool:
+        """
+        Squeeze check for the bar at position `idx` (negative index).
+
+        Uses the percentile rule against the bar's own trailing distribution;
+        falls back to the absolute threshold when history is too short.
+        """
+        bw = bandwidth.iloc[idx]
+        if pd.isna(bw):
+            return False
+
+        # Trailing window strictly BEFORE the bar being evaluated
+        end = idx if idx != -1 else None
+        history = bandwidth.iloc[:end].dropna().tail(self.squeeze_window) if end is not None \
+            else bandwidth.iloc[:-1].dropna().tail(self.squeeze_window)
+
+        if len(history) >= self.squeeze_window // 2:
+            return bool(bw <= history.quantile(self.squeeze_percentile))
+        return bool(bw < self.squeeze_threshold)
+
     def _generate_signal_internal(self, ohlcv: pd.DataFrame, symbol: str) -> Optional[Dict[str, Any]]:
-        """Internal signal generation logic."""
-        
-        if len(ohlcv) < max(self.bb_length, self.atr_length) + 5:
+        """Internal signal generation logic. Evaluates the last CLOSED candle."""
+
+        bars = self._drop_forming_bar(ohlcv)
+        if len(bars) < max(self.bb_length, self.atr_length) + 5:
             return None
-        
-        closes = ohlcv['close']
-        highs = ohlcv['high']
-        lows = ohlcv['low']
-        current_price = closes.iloc[-1]
-        
+
+        closes = bars['close']
+        highs = bars['high']
+        lows = bars['low']
+        breakout_close = closes.iloc[-1]  # close of the last CLOSED candle
+
         # 1. Calculate Bollinger Bands
         bb_upper, bb_middle, bb_lower = calculate_bollinger_bands(closes, self.bb_length, self.bb_std)
-        
-        # 2. Calculate Bandwidth
-        # Bandwidth = (Upper - Lower) / Middle
+
+        # 2. Calculate Bandwidth = (Upper - Lower) / Middle
         bandwidth = (bb_upper - bb_lower) / bb_middle
         current_bandwidth = bandwidth.iloc[-1]
-        
-        # 3. Check for Squeeze (Consolidation)
-        is_squeeze = current_bandwidth < self.squeeze_threshold
-        
-        # Update state (we allow breakout if squeeze is active OR was active very recently)
-        #Ideally we want entrance exactly when squeeze "fires" (expands)
-        prev_is_squeeze = bandwidth.iloc[-2] < self.squeeze_threshold
-        
-        # 4. Check for Breakout
-        # Breakout LONG: Close > Upper Band
-        # Breakout SHORT: Close < Lower Band
-        
-        # We only take the trade if:
-        # A) We were in a squeeze recently (expansion phase)
-        # B) The breakout is fresh (occurred on this candle)
-        valid_setup = is_squeeze or prev_is_squeeze
-        
-        # 5. Regime Filter: Hurst Exponent (Trend Checking)
+
+        # 3. Check for Squeeze on the bars BEFORE the breakout candle
+        # (the breakout itself expands the bands, so we look at -2 / -3)
+        valid_setup = self._is_squeeze_at(bandwidth, -2) or self._is_squeeze_at(bandwidth, -3)
+
+        # 4. Regime Filter: Hurst Exponent (Trend Checking)
         # We only want to enter breakouts if the market is in a Trending Regime (H > 0.5)
-        # Calculating on closing prices
         hurst = hurst_exponent(closes)
         valid_regime = hurst > self.min_hurst
-        
+
         signal = 'hold'
         reason = ''
-        
+
         if valid_setup and valid_regime:
-            if current_price > bb_upper.iloc[-1]:
+            # Fresh breakout only: this candle closed outside the band while
+            # the previous one closed inside (prevents re-signaling the same move)
+            if breakout_close > bb_upper.iloc[-1] and closes.iloc[-2] <= bb_upper.iloc[-2]:
                 signal = 'buy'
-                reason = f"Volatility Breakout: Price {current_price} > Upper BB (BW={current_bandwidth:.3f}, H={hurst:.2f})"
-            elif current_price < bb_lower.iloc[-1]:
+                reason = (f"Volatility Breakout: Close {breakout_close} > Upper BB "
+                          f"(BW={current_bandwidth:.3f}, H={hurst:.2f})")
+            elif breakout_close < bb_lower.iloc[-1] and closes.iloc[-2] >= bb_lower.iloc[-2]:
                 signal = 'sell'
-                reason = f"Volatility Breakout: Price {current_price} < Lower BB (BW={current_bandwidth:.3f}, H={hurst:.2f})"
-        
+                reason = (f"Volatility Breakout: Close {breakout_close} < Lower BB "
+                          f"(BW={current_bandwidth:.3f}, H={hurst:.2f})")
+
         if signal == 'hold':
             return None
-            
+
+        # 5. Volume confirmation: breakout candle must show expansion vs the
+        # trailing median. Skipped when bars carry no volume data (tick-built).
+        volumes = bars.get('volume')
+        if volumes is not None and len(volumes) > self.volume_lookback:
+            ref_volume = volumes.iloc[-(self.volume_lookback + 1):-1].median()
+            breakout_volume = volumes.iloc[-1]
+            if ref_volume > 0 and breakout_volume < self.volume_mult * ref_volume:
+                self.logger.debug(
+                    f"[{symbol}] Breakout rejected: no volume expansion "
+                    f"({breakout_volume:.0f} < {self.volume_mult}x median {ref_volume:.0f})"
+                )
+                return None
+
         # Calculate ATR for dynamic stops
         atr = calculate_atr(highs, lows, closes, self.atr_length)
         current_atr = atr.iloc[-1]
-        
+
         return {
             'signal': signal,
             'reason': reason,
-            'price': current_price,
+            'price': breakout_close,
             'strategy': 'volatility_breakout',
             'atr': current_atr,
             'bandwidth': current_bandwidth,
@@ -183,11 +247,29 @@ class VolatilityBreakoutStrategy(BaseStrategy):
         else:
             return entry_price - tp_dist
             
-    def get_trailing_stop_config(self) -> Dict[str, Any]:
+    def get_trailing_stop_config(self, entry_price: float = None, signal_context: Dict[str, Any] = None) -> Dict[str, Any]:
         """
-        Get trailing stop configuration.
-        Breakout strategies need to lock in profits once the move extends.
+        Get trailing stop configuration (chandelier-style).
+
+        Distances are derived from the ATR at entry so the trail uses the same
+        volatility units as the SL/TP stack - a fixed 3% trail on a 4h
+        timeframe can sit INSIDE the 1.5x ATR initial stop and silently
+        override the designed risk geometry.
         """
+        atr = signal_context.get('atr') if signal_context else None
+
+        if entry_price and atr and atr > 0:
+            atr_pct = atr / entry_price
+            # Clamp to sane bounds so a corrupt ATR can't disable the trail
+            trail_pct = min(0.15, max(0.005, self.trail_atr_mult * atr_pct))
+            activation_pct = min(0.10, max(0.003, self.trail_activation_atr_mult * atr_pct))
+            return {
+                'enabled': True,
+                'trail_pct': trail_pct,
+                'activation_pct': activation_pct,
+            }
+
+        # Fallback when ATR is unavailable: previous fixed-percentage behavior
         return {
             'enabled': True,
             'trail_pct': 0.03,         # 3% trailing stop (tight-ish for breakouts)
