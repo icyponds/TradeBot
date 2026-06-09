@@ -34,7 +34,7 @@ def generate_synthetic_data(symbol, start_date, end_date, freq='1h'):
 
 import random
 
-def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None, param_overrides=None, disable_strategies=None):
+def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None, param_overrides=None, disable_strategies=None, enable_instances=None, max_symbols=None):
     # Increase log level and setup file logging prior to ANY imports or logic
     import logging
     
@@ -143,7 +143,7 @@ def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None, 
         pass
 
     # Limit symbol count for performance (backtest with 231 symbols at 15min steps is very slow)
-    max_symbols = 20
+    max_symbols = max_symbols or 20
     if len(symbols) > max_symbols:
         print(f"Limiting from {len(symbols)} to top {max_symbols} symbols for backtest performance")
         symbols = symbols[:max_symbols]
@@ -193,6 +193,20 @@ def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None, 
             if s['name'] not in ['liquidation_hunter_5m', 'liquidation_hunter_1h']
             and not s['name'].startswith('sentiment_ml')
         ]
+        # Apply --enable-instance additions (re-test disabled strategies)
+        # Format: type:name:timeframe, e.g. cross_sectional_momentum:csm_4h:4h
+        if enable_instances:
+            existing = {s['name'] for s in config['strategies']['instances']}
+            for spec in enable_instances:
+                try:
+                    stype, name, tf = spec.split(':')
+                except ValueError:
+                    print(f"  ⚠ Invalid format '{spec}' — expected type:name:timeframe")
+                    continue
+                if name not in existing:
+                    config['strategies']['instances'].append(
+                        {"type": stype, "name": name, "timeframe": tf})
+                    print(f"  Enabled instance: {name} ({stype} @ {tf})")
         # Apply --disable-strategy filters
         if disable_strategies:
             before = len(config['strategies']['instances'])
@@ -212,10 +226,11 @@ def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None, 
     bt_db.delete_all_trades()
     bt_db.clear_open_positions()
     try:
-        bt_db.conn.execute("DELETE FROM backtest_live_position_legs")
-        bt_db.conn.execute("DELETE FROM backtest_equity_snapshots")
-        bt_db.conn.execute("DELETE FROM backtest_daily_pnl")
-        bt_db.conn.commit()
+        with bt_db._get_connection() as conn:
+            conn.execute("DELETE FROM backtest_live_position_legs")
+            conn.execute("DELETE FROM backtest_equity_snapshots")
+            conn.execute("DELETE FROM backtest_daily_pnl")
+            conn.commit()
     except Exception as e:
         print(f"  Warning: partial cleanup: {e}")
     print("  Backtest tables cleared.")
@@ -275,11 +290,12 @@ def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None, 
     print(f"Win Rate: {bt_wr:.1f}%")
     print(f"Profit Factor: {bt_pf:.2f}")
     print(f"Max Drawdown: {bt_mdd:.2f}%")
+    print(f"Funding Paid: ${report.get('funding_paid', 0):,.2f}")
     
     # Per-strategy breakdown
     try:
         db = engine.prefixed_tracker.db
-        strategies = db.get_strategy_list()
+        strategies = sorted(db.get_all_strategy_stats().keys())
         if strategies:
             print("\nPer-Strategy Breakdown:")
             print("-" * 60)
@@ -310,7 +326,12 @@ if __name__ == "__main__":
                         help='Override a strategy parameter (repeatable). E.g. --param stat_arb.z_score_threshold=2.5')
     parser.add_argument('--disable-strategy', action='append', metavar='name',
                         help='Disable a strategy by name prefix (repeatable). E.g. --disable-strategy stat_arb')
-    
+    parser.add_argument('--enable-instance', action='append', metavar='type:name:timeframe',
+                        help='Add a strategy instance not in settings.py (repeatable). '
+                             'E.g. --enable-instance cross_sectional_momentum:csm_4h:4h')
+    parser.add_argument('--max-symbols', type=int, default=None,
+                        help='Cap on number of symbols to simulate (default: 20)')
+
     args = parser.parse_args()
     
     # Ensure DB directory exists
@@ -318,12 +339,14 @@ if __name__ == "__main__":
     
     try:
         run_smoke_test(
-            days=args.days, 
-            start_str=args.start, 
-            end_str=args.end, 
+            days=args.days,
+            start_str=args.start,
+            end_str=args.end,
             random_window=args.random_window,
             param_overrides=args.param,
-            disable_strategies=args.disable_strategy
+            disable_strategies=args.disable_strategy,
+            enable_instances=args.enable_instance,
+            max_symbols=args.max_symbols
         )
     except KeyboardInterrupt:
         print("\nBacktest interrupted by user.")

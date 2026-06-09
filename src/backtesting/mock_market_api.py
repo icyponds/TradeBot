@@ -24,7 +24,18 @@ class MockMarketAPI(MarketInterface):
     Mock implementation of HyperliquidAPI for backtesting.
     Intercepts API calls and serves historical data/simulated execution.
     """
-    
+
+    # Bar durations - used to determine when a candle is CLOSED at sim time.
+    # DB rows are completed candles keyed by bar START time, so a bar that has
+    # merely started is not yet observable without leaking the future.
+    TIMEFRAME_SECONDS = {
+        '1m': 60, '5m': 300, '15m': 900, '30m': 1800,
+        '1h': 3600, '4h': 14400, '1d': 86400,
+    }
+
+    # Preference order for price lookups: finest first to minimize staleness
+    PRICE_TIMEFRAME_PREFERENCE = ['1m', '5m', '15m', '1h', '4h', '1d']
+
     def __init__(self, config: Dict[str, Any], historical_data: Dict[str, Dict[str, pd.DataFrame]]):
         self.config = config
         self.logger = logging.getLogger(__name__)
@@ -48,7 +59,10 @@ class MockMarketAPI(MarketInterface):
         self.perp_balance = {'withdrawable': 50000.0, 'margin_used': 0.0} # Perp wallet
         
         self.order_id_counter = 0
-        
+
+        # Cumulative funding paid by open positions (negative = received)
+        self.total_funding_paid = 0.0
+
         # WebSocket Subscription State (Mock)
         self._subscribed_symbols = set()
         
@@ -74,6 +88,7 @@ class MockMarketAPI(MarketInterface):
         self.perp_balance = {'withdrawable': initial_perp, 'margin_used': 0.0}
         
         self.order_id_counter = 0
+        self.total_funding_paid = 0.0
         self._subscribed_symbols = set()
         self.logger.info(f"MockMarketAPI state reset (Perp: ${initial_perp:,.2f}, Spot: ${initial_spot:,.2f})")
 
@@ -93,8 +108,44 @@ class MockMarketAPI(MarketInterface):
         self.logger.info("MockMarketAPI stopped")
         
     def set_time(self, timestamp: datetime):
-        """Update the simulation time."""
+        """Update the simulation time and accrue funding on hour boundaries."""
+        previous_time = self.current_time
         self.current_time = timestamp
+        try:
+            self._apply_funding(previous_time, timestamp)
+        except Exception as e:
+            self.logger.error(f"Funding accrual error: {e}")
+
+    def _apply_funding(self, previous_time, now):
+        """
+        Apply hourly funding payments to open perp positions.
+
+        Hyperliquid pays funding every hour: longs pay when the rate is
+        positive, shorts receive (and vice versa). Without this, multi-day
+        directional holds look systematically better than reality.
+        """
+        if previous_time is None or not self.positions or not self.historical_funding:
+            return
+
+        prev_hour = pd.Timestamp(previous_time).floor('h')
+        now_hour = pd.Timestamp(now).floor('h')
+        if now_hour <= prev_hour:
+            return
+        hours_crossed = int((now_hour - prev_hour) / pd.Timedelta(hours=1))
+
+        for symbol, pos in self.positions.items():
+            size = float(pos.get('size', 0) or 0)
+            if size == 0:
+                continue
+            rate = self.get_funding_rate(symbol)
+            if not rate:
+                continue
+            mark = self.get_current_price(symbol) or pos.get('mark_price') or pos.get('entry_price') or 0
+            notional = abs(size) * float(mark)
+            # Positive rate: longs pay, shorts receive
+            payment = rate * notional * hours_crossed * (1 if size > 0 else -1)
+            self.perp_balance['withdrawable'] -= payment
+            self.total_funding_paid += payment
     
     def _initialize_default_time(self):
         """
@@ -130,44 +181,66 @@ class MockMarketAPI(MarketInterface):
                 return spot_sym
         return symbol
 
+    def _closed_bars_end_idx(self, df: pd.DataFrame, timeframe: str) -> int:
+        """
+        Index i such that df.iloc[:i] contains only candles fully CLOSED at
+        sim time (bar_start + interval <= current_time).
+
+        DB rows hold the candle's final OHLC, so including a bar that has only
+        started leaks up to one full interval of future data (e.g. at 12:15
+        the 12:00 4h candle's close is the 16:00 price).
+        """
+        interval = pd.Timedelta(seconds=self.TIMEFRAME_SECONDS.get(timeframe, 3600))
+        cutoff = self.current_time - interval
+        # side='right': all bars with start <= cutoff, i.e. closed by current_time
+        return int(df.index.searchsorted(cutoff, side='right'))
+
     def get_current_price(self, symbol: str) -> Optional[float]:
-        """Get 'current' price from historical data (uses 1h data by default)."""
+        """
+        Get 'current' price from historical data.
+
+        Uses the close of the most recent CLOSED candle on the finest
+        available timeframe (no look-ahead). Falls back through coarser
+        timeframes when the fine data is missing or stale at sim time.
+        """
         if not self.current_time:
             raise ValueError("Simulation time not set")
-            
+
         # Resolve symbol (handle Spot mapping)
         target_symbol = self._resolve_symbol(symbol)
-            
-        # Default to 1h for price check, fallback to any available
+
         symbol_data = self.historical_data.get(target_symbol)
         if not symbol_data:
             # Only warn if it's not a spot mapping that might not exist
             if not symbol.endswith('/USDC'):
                 self.logger.warning(f"No historical data for {target_symbol}")
             return None
-            
-        # Try 1h first, then others
-        df = symbol_data.get('1h')
-        if df is None:
-            # Fallback to first available timeframe
-            if not symbol_data: # Check again in case symbol_data was empty
-                self.logger.warning(f"No historical data for {symbol} in any timeframe.")
-                return None
-            df = next(iter(symbol_data.values()))
-            
-        # Find row at or before current_time
-        # Assumes df is indexed by datetime
+
         try:
-            # Efficient lookup: Binary search for index
-            # side='left' returns index i such that all df.index[:i] < self.current_time
-            idx = df.index.searchsorted(self.current_time, side='left')
-            
-            if idx == 0:
-                return None
-                
-            # The row strictly before current_time is at idx - 1
-            last_valid_idx = idx - 1
-            return float(df.iloc[last_valid_idx]['close'])
+            stale_fallback = None
+            preference = [tf for tf in self.PRICE_TIMEFRAME_PREFERENCE if tf in symbol_data]
+            preference += [tf for tf in symbol_data if tf not in preference]
+
+            for tf in preference:
+                df = symbol_data[tf]
+                if df is None or len(df) == 0:
+                    continue
+                end_idx = self._closed_bars_end_idx(df, tf)
+                if end_idx == 0:
+                    continue
+
+                bar_start = df.index[end_idx - 1]
+                interval = pd.Timedelta(seconds=self.TIMEFRAME_SECONDS.get(tf, 3600))
+                price = float(df.iloc[end_idx - 1]['close'])
+
+                # Fresh = bar closed within the last 2 intervals; otherwise
+                # remember it as fallback and try a coarser timeframe
+                if self.current_time - (bar_start + interval) <= interval:
+                    return price
+                if stale_fallback is None:
+                    stale_fallback = price
+
+            return stale_fallback
         except Exception as e:
             self.logger.error(f"Error getting price for {symbol}: {e}")
             return None
@@ -190,15 +263,14 @@ class MockMarketAPI(MarketInterface):
             # If requested timeframe missing, maybe warn? using None for now
             return None
             
-        # Filter data strictly before current_time to avoid look-ahead bias
-        # Optimization: Use binary search for slicing instead of boolean mask O(N)
-        
-        # Get insertion index for current_time
-        idx = df.index.searchsorted(self.current_time, side='left')
-        
-        # We want everything before this index
+        # Filter to candles fully CLOSED at sim time to avoid look-ahead bias.
+        # Bars are keyed by START time but contain the final OHLC: including a
+        # bar that has only started would leak up to one interval of future
+        # data into indicators (fatal for close-based breakout signals).
+        idx = self._closed_bars_end_idx(df, timeframe)
+
         if idx == 0:
-            self.logger.debug(f"get_ohlcv: Current time {self.current_time} before data start {df.index[0]}")
+            self.logger.debug(f"get_ohlcv: No closed {timeframe} bars for {symbol} at {self.current_time}")
             return None
             
         # Slice the last 'limit' rows up to 'idx'
@@ -516,13 +588,24 @@ class MockMarketAPI(MarketInterface):
         return {'universe': universe, 'meta': {'universe': universe}}
         
     def subscribe_symbol(self, symbol, required_timeframes=None):
-        """Mock subscription."""
+        """
+        Mock subscription. Also warms the OHLCV cache for the required
+        timeframes - parity with the live pipeline, where the background
+        fetcher loads data after subscription. Without this,
+        _is_data_ready_for_symbol sees an empty cache (deque of 0 bars),
+        never passes, and the backtest silently analyzes nothing.
+        """
         self._subscribed_symbols.add(symbol)
-        
+
         # Parity with HyperliquidAPI: Initialize required timeframes (defaults to empty/safe if None)
         target_timeframes = required_timeframes if required_timeframes else ['15m', '1h', '1d']
         for tf in target_timeframes:
             self.ohlcv_cache.ensure_timeframe(symbol, tf, maxlen=1000)
+            try:
+                # get_ohlcv populates ohlcv_cache with the closed-bar slice
+                self.get_ohlcv(symbol, tf, limit=300)
+            except Exception:
+                pass
         
     def unsubscribe_symbol(self, symbol):
         """Mock unsubscription."""

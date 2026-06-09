@@ -260,7 +260,9 @@ def load_config() -> Dict[str, Any]:
                 "stat_arb_15m": {"min": 0.05, "max": 0.25},
                 "stat_arb_1h": {"min": 0.05, "max": 0.35},
                 "stat_arb_4h": {"min": 0.05, "max": 0.50},
-                # Top performer (budget ceiling higher)
+                # csm_4h: disabled; clean-engine re-test (2026-06) showed it was
+                # a look-ahead artifact, NOT a top performer. Cap kept for the
+                # entry's sake should it ever be re-tested.
                 "csm_4h": {"min": 0.10, "max": 1.00},
             },
             # Cost hurdle (net edge in bps) per strategy; if a signal provides expected_edge_bps/edge_bps,
@@ -346,7 +348,14 @@ def load_config() -> Dict[str, Any]:
                 # Cross-Sectional Momentum (1h, 4h)
                 # csm_1h disabled due to poor backtest performance (8.8% win rate, -$345 PnL)
                 # {"type": "cross_sectional_momentum", "name": "csm_1h", "timeframe": "1h"},
+                # csm_4h CONFIRMED BAD on look-ahead-free engine (2026-06 re-test):
+                # Dec -$6,555 / 27% DD, Jan -$2,286 / 13% DD. Earlier "top performer"
+                # label came from the biased engine. Keep disabled.
                 # {"type": "cross_sectional_momentum", "name": "csm_4h", "timeframe": "4h"},
+
+                # NOTE (2026-06 clean-engine re-test of vol_breakout_1h): only
+                # profitable in the Dec-2025 crash regime (+$6k, concentrated in
+                # one ANZ short); Nov/Jan/Feb all negative (PF 0.5-0.8). Keep off.
             ],
             # Note: timeframe is now auto-selected per strategy instance
             "ohlcv_limit": int(os.getenv("OHLCV_LIMIT", "300")), # Increased for EMA200

@@ -300,7 +300,7 @@ class TestStartupExitCheck:
         strategy_manager.check_startup_exits()
         
         # Should have closed the position
-        strategy_manager.close_position.assert_called_with('TAO', 'take_profit')
+        strategy_manager.close_position.assert_called_with('TAO', 'take_profit', timestamp=None)
         assert position.current_price == 225.0
     
     def test_check_startup_exits_skips_healthy_positions(self, strategy_manager):

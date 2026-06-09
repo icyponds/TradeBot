@@ -1994,6 +1994,11 @@ class StrategyManager:
             else:
                 current_datetime = datetime.fromtimestamp(current_time)
 
+            # Remember the cycle's (possibly simulated) time so mid-cycle close
+            # paths (rotation, displacement) stamp trades with sim time in
+            # backtests instead of wall-clock time
+            self._cycle_timestamp = current_datetime
+
             self._cycle_count += 1
             if self._cycle_count % 10 == 0:
                 self.logger.info(f"🫀 Trading cycle heartbeat: {current_datetime.strftime('%H:%M:%S')} (Cycle #{self._cycle_count})")
@@ -3028,7 +3033,7 @@ class StrategyManager:
         # Check Single Leg
         if symbol in self.positions:
             self.logger.warning(f"☢️ EXECUTING NUCLEAR DISPLACEMENT on Single Leg {symbol}")
-            self.close_position(symbol, reason='nuclear_displacement')
+            self.close_position(symbol, reason='nuclear_displacement', timestamp=getattr(self, '_cycle_timestamp', None))
 
     def _should_execute_signal(self, symbol: str, signal: Dict[str, Any], current_price: float, 
                                ohlcv: Dict[str, pd.DataFrame], strategy_name: str) -> bool:
@@ -3067,7 +3072,7 @@ class StrategyManager:
             # SO returning True is CORRECT.
             
         elif resolution in ['flip', 'upgrade']:
-            self.close_position(symbol, reason=f'conflict_{resolution}')
+            self.close_position(symbol, reason=f'conflict_{resolution}', timestamp=getattr(self, '_cycle_timestamp', None))
             # Proceed to open new trade
 
         # ---------------------------------------------------------
@@ -3618,7 +3623,7 @@ class StrategyManager:
                 f"for new trade [strength={float(new_signal_strength or 0):.3f}] "
                 f"(diff={float(score_difference or 0):.3f} > threshold={float(threshold or 0):.2f})"
             )
-            self.close_position(least_profitable_symbol, reason)
+            self.close_position(least_profitable_symbol, reason, timestamp=getattr(self, '_cycle_timestamp', None))
             return True
         else:
             self.logger.info(
@@ -3904,7 +3909,7 @@ class StrategyManager:
                 close_reason = self._should_close_position(position)
                 if close_reason:
                     self.logger.warning(f"🚨 Position {symbol} meets {close_reason} on startup (price=${price:.2f}), closing immediately...")
-                    self.close_position(symbol, close_reason)
+                    self.close_position(symbol, close_reason, timestamp=getattr(self, '_cycle_timestamp', None))
                     
             except Exception as e:
                 self.logger.error(f"Error checking startup exit for {symbol}: {e}")

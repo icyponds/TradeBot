@@ -2,7 +2,7 @@
 import logging
 import pandas as pd
 from datetime import datetime
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import time
 
 from src.strategies.strategy_manager import StrategyManager
@@ -100,6 +100,38 @@ class BacktestEngine:
             'status': 'idx'
         }
 
+    @staticmethod
+    def _sanitize_ohlcv(df: pd.DataFrame) -> Tuple[pd.DataFrame, int]:
+        """
+        Drop corrupted candles before simulation.
+
+        The market_data table contains stretches of placeholder bars (e.g.
+        BERA flat at $0.00072 with zero volume while the real price was
+        ~$0.88). One such bar produced a fictional 1200x backtest gain. Two
+        rules, both far outside any real crypto move:
+        1. Zero-volume bars priced >50x away from the series median
+        2. Bars jumping >20x (or <1/20) vs the previous surviving close
+        """
+        if df.empty:
+            return df, 0
+
+        original_len = len(df)
+
+        # Rule 1: scale corruption (flat placeholder runs carry zero volume)
+        med = df['close'].median()
+        if med and med > 0:
+            bad_scale = (df['volume'] <= 0) & ((df['close'] < med / 50) | (df['close'] > med * 50))
+            df = df[~bad_scale]
+
+        # Rule 2: isolated absurd jumps vs previous close (applied post rule 1
+        # so the recovery bar after a dropped run is not falsely flagged)
+        if len(df) > 1:
+            ratio = df['close'] / df['close'].shift(1)
+            bad_jump = (ratio > 20) | (ratio < 0.05)
+            df = df[~bad_jump.fillna(False)]
+
+        return df, original_len - len(df)
+
     def _load_data_from_db(self) -> Dict[str, Dict[str, pd.DataFrame]]:
         """
         Load all available market data from database per symbol and timeframe.
@@ -107,22 +139,30 @@ class BacktestEngine:
         """
         data = {}
         total_rows = 0
-        
+        total_dropped = 0
+
         # Timeframes we care about for now
         timeframes = ['5m', '15m', '1h', '4h', '1d']
-        
+
         # Get all distinct symbols from DB (simplification: assume if 1h exists, others might too)
         symbols = self.db.get_market_data_symbols('1h')
-        
+
         for symbol in symbols:
             data[symbol] = {}
             for tf in timeframes:
                 df = self.db.get_market_data(symbol, tf)
                 if not df.empty:
+                    df, dropped = self._sanitize_ohlcv(df)
+                    if dropped:
+                        total_dropped += dropped
+                        self.logger.warning(f"Sanitized {symbol} {tf}: dropped {dropped} corrupted candles")
+                    if df.empty:
+                        continue
                     data[symbol][tf] = df
                     total_rows += len(df)
-        
-        self.logger.info(f"Loaded data for {len(data)} symbols across {timeframes} ({total_rows} total candles from DB)")
+
+        self.logger.info(f"Loaded data for {len(data)} symbols across {timeframes} "
+                         f"({total_rows} candles, {total_dropped} corrupted dropped)")
         return data
 
     def _load_funding_from_db(self) -> Dict[str, pd.DataFrame]:
@@ -211,6 +251,7 @@ class BacktestEngine:
             'perp_balance': perp_balance,
             'positions_open': len(positions),
             'total_orders': len(trades),
+            'funding_paid': float(getattr(self.mock_api, 'total_funding_paid', 0.0)),
         }
 
         # Backtest analysis should read performance from the backtest results DB (`trades` table).
