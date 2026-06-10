@@ -230,3 +230,19 @@ class TestTrendFilter:
         # outcome must differ from the enabled case OR be a sell signal.
         signal = strategy.generate_signal('TEST', {'4h': df})
         assert signal is None or signal['signal'] == 'sell'
+
+
+class TestDirectionRestriction:
+
+    def test_long_only_blocks_shorts(self):
+        strategy = make_strategy(direction='long_only')
+        df = make_breakout_df(direction='down')
+
+        assert strategy.generate_signal('TEST', {'4h': df}) is None
+
+    def test_long_only_allows_longs(self):
+        strategy = make_strategy(direction='long_only')
+        df = make_breakout_df(direction='up')
+
+        signal = strategy.generate_signal('TEST', {'4h': df})
+        assert signal is not None and signal['signal'] == 'buy'

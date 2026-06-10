@@ -87,6 +87,39 @@ def get_native_perp_names():
     return {a['name'] for a in data['universe'] if not a.get('isDelisted')}
 
 
+def build_spot_coin_map(db):
+    """
+    Map DB spot symbols (e.g. BTC_SPOT) to their API pair ids (e.g. @142).
+
+    Spot candles are addressed by pair id, resolved via spotMeta:
+    DB symbol -> token name (SPOT_INTERNAL_TO_API) -> token index ->
+    USDC-quoted pair in the universe.
+    """
+    from src.api.hyperliquid_api import HyperliquidAPI
+    token_map = HyperliquidAPI.SPOT_INTERNAL_TO_API
+
+    meta = _post({"type": "spotMeta"})
+    token_index = {t['name']: t['index'] for t in meta.get('tokens', [])}
+    usdc_idx = token_index.get('USDC', 0)
+    pair_by_base = {}
+    for pair in meta.get('universe', []):
+        toks = pair.get('tokens', [])
+        if len(toks) == 2 and toks[1] == usdc_idx:
+            pair_by_base[toks[0]] = pair['name']
+
+    out = {}
+    for db_sym in db.get_market_data_symbols('1h'):
+        if not db_sym.endswith('_SPOT'):
+            continue
+        token_name = token_map.get(db_sym, db_sym.replace('_SPOT', ''))
+        idx = token_index.get(token_name)
+        if idx is None or idx not in pair_by_base:
+            logger.warning(f"Cannot resolve spot pair for {db_sym} (token {token_name})")
+            continue
+        out[db_sym] = pair_by_base[idx]
+    return out
+
+
 def candles_to_df(candles, interval_s, now_ms):
     """Convert API candles to the DB DataFrame format, closed bars only."""
     rows = []
@@ -107,7 +140,10 @@ def candles_to_df(candles, interval_s, now_ms):
     return df.drop(columns=['time'])
 
 
-def refresh_candles(db, symbol, timeframe, genesis_ms):
+def refresh_candles(db, symbol, timeframe, genesis_ms, coin=None):
+    """`coin` is the API identifier when it differs from the DB symbol
+    (spot pairs: BTC_SPOT is stored under that name but fetched as @N)."""
+    coin = coin or symbol
     interval_s = TIMEFRAMES[timeframe]
     now_ms = int(time.time() * 1000)
 
@@ -121,7 +157,7 @@ def refresh_candles(db, symbol, timeframe, genesis_ms):
     while start_ms + interval_s * 1000 <= now_ms:
         end_ms = min(start_ms + MAX_CANDLES_PER_REQ * interval_s * 1000, now_ms)
         candles = _post({"type": "candleSnapshot",
-                         "req": {"coin": symbol, "interval": timeframe,
+                         "req": {"coin": coin, "interval": timeframe,
                                  "startTime": start_ms, "endTime": end_ms}})
         if not candles:
             break
@@ -151,7 +187,7 @@ def refresh_funding(db, symbol, genesis_ms):
         if not records:
             break
         rows = [{'timestamp': pd.to_datetime(r['time'], unit='ms'),
-                 'funding_rate': float(r['fundingRate'])} for r in records]
+                 'funding': float(r['fundingRate'])} for r in records]
         df = pd.DataFrame(rows).set_index('timestamp')
         db.insert_funding_rates(df, symbol)
         inserted += len(df)
@@ -169,6 +205,9 @@ def main():
     parser.add_argument('--genesis', default='2025-11-01',
                         help='Start date for symbols with no stored data (YYYY-MM-DD)')
     parser.add_argument('--no-funding', action='store_true')
+    parser.add_argument('--funding-only', action='store_true')
+    parser.add_argument('--spot-only', action='store_true',
+                        help='Only refresh spot pairs already tracked in the DB')
     parser.add_argument('--symbols', help='Comma-separated override of symbols to refresh')
     args = parser.parse_args()
 
@@ -176,6 +215,23 @@ def main():
                      .replace(tzinfo=timezone.utc).timestamp() * 1000)
 
     db = TradeDatabase()
+
+    if args.spot_only:
+        spot_map = build_spot_coin_map(db)
+        logger.info(f"Refreshing {len(spot_map)} spot pairs: {sorted(spot_map)}")
+        total = 0
+        for db_sym, coin in sorted(spot_map.items()):
+            for tf in TIMEFRAMES:
+                try:
+                    n = refresh_candles(db, db_sym, tf, genesis_ms, coin=coin)
+                    total += n
+                    if n:
+                        logger.info(f"{db_sym} ({coin}) {tf}: +{n} candles")
+                except Exception as e:
+                    logger.error(f"{db_sym} {tf}: {e}")
+        logger.info(f"Spot refresh complete: +{total} candles")
+        logger.info("REFRESH COMPLETE")
+        return
 
     if args.symbols:
         symbols = [s.strip() for s in args.symbols.split(',') if s.strip()]
@@ -198,6 +254,8 @@ def main():
 
     total = 0
     for i, symbol in enumerate(symbols, 1):
+        if args.funding_only:
+            break
         for tf in TIMEFRAMES:
             try:
                 n = refresh_candles(db, symbol, tf, genesis_ms)

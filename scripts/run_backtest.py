@@ -47,6 +47,11 @@ def select_universe(db, symbols, start, end, max_n):
     window_seconds = max(1.0, (end - start).total_seconds())
     expected_bars = max(1, int(window_seconds // (4 * 3600)))
 
+    # Spot listings are hedge legs, not analysis targets: strategies trade
+    # perps, and a _SPOT symbol winning the dedupe (e.g. HYPE_SPOT over HYPE)
+    # silently knocks the tradeable perp out of the universe.
+    symbols = [s for s in symbols if not s.endswith('_SPOT')]
+
     for sym in symbols:
         try:
             df = db.get_market_data(sym, '4h')
@@ -81,7 +86,7 @@ def select_universe(db, symbols, start, end, max_n):
     return selected
 
 
-def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None, param_overrides=None, disable_strategies=None, enable_instances=None, max_symbols=None):
+def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None, param_overrides=None, disable_strategies=None, enable_instances=None, max_symbols=None, universe='all'):
     # Increase log level and setup file logging prior to ANY imports or logic
     import logging
     
@@ -189,11 +194,33 @@ def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None, 
         print("No data in DB. Loading from CSVs as fallback...")
         pass
 
+    # Optional asset-class restriction (hip3 = builder-dex assets, crypto = native perps)
+    if universe == 'hip3':
+        symbols = [s for s in symbols if ':' in s]
+    elif universe == 'crypto':
+        symbols = [s for s in symbols if ':' not in s and not s.endswith('_SPOT')]
+    if universe != 'all':
+        print(f"Universe restricted to {universe}: {len(symbols)} candidates")
+
     # Limit symbol count for performance (backtest with 231 symbols at 15min steps is very slow)
     # Selection is liquidity-ranked with HIP-3 dedupe, NOT alphabetical (see select_universe)
     max_symbols = max_symbols or 20
     if len(symbols) > max_symbols:
         symbols = select_universe(db, symbols, start_date, end_date, max_symbols)
+
+    # Funding-rate arbitrage needs its spot-hedgeable perps in the analyzed
+    # universe regardless of volume rank (the strategy is gated to them anyway)
+    active_names = {s['name'] for s in config['strategies']['instances']}
+    if enable_instances:
+        active_names |= {spec.split(':')[1] for spec in enable_instances if spec.count(':') == 2}
+    if any('funding_rate_arbitrage' in n for n in active_names):
+        from src.api.hyperliquid_api import HyperliquidAPI
+        hedgeable = [s.replace('_SPOT', '') for s in HyperliquidAPI.SPOT_INTERNAL_TO_API]
+        available = set(db.get_market_data_symbols('1h'))
+        added = [s for s in hedgeable if s in available and s not in symbols]
+        if added:
+            symbols = symbols + added
+            print(f"Funding-arb: added spot-hedgeable perps to universe: {added}")
 
     # 3. Configure symbols and strategy overrides BEFORE engine init
     config['trading']['dynamic_pair_selection'] = True
@@ -364,6 +391,8 @@ if __name__ == "__main__":
                              'E.g. --enable-instance cross_sectional_momentum:csm_4h:4h')
     parser.add_argument('--max-symbols', type=int, default=None,
                         help='Cap on number of symbols to simulate (default: 20)')
+    parser.add_argument('--universe', choices=['all', 'crypto', 'hip3'], default='all',
+                        help='Restrict the asset universe (default: all)')
 
     args = parser.parse_args()
     
@@ -379,7 +408,8 @@ if __name__ == "__main__":
             param_overrides=args.param,
             disable_strategies=args.disable_strategy,
             enable_instances=args.enable_instance,
-            max_symbols=args.max_symbols
+            max_symbols=args.max_symbols,
+            universe=args.universe
         )
     except KeyboardInterrupt:
         print("\nBacktest interrupted by user.")

@@ -77,6 +77,11 @@ class VolatilityBreakoutStrategy(BaseStrategy):
         self.trend_filter_enabled = vb_config.get('trend_filter_enabled', True)
         self.trend_ema_period = vb_config.get('trend_ema_period', 200)
 
+        # Direction restriction: 'both' | 'long_only' | 'short_only'.
+        # Equities/indices drift upward structurally - the short side is
+        # where breakouts on those books died in testing.
+        self.direction = vb_config.get('direction', 'both')
+
         # Time decay: exit stagnant breakouts after N hours if not in profit
         self.time_decay_hours = vb_config.get('time_decay_hours', 16)
 
@@ -180,6 +185,11 @@ class VolatilityBreakoutStrategy(BaseStrategy):
                           f"(BW={current_bandwidth:.3f}, H={hurst:.2f})")
 
         if signal == 'hold':
+            return None
+
+        # Direction restriction (e.g. long-only on upward-drifting equities)
+        if (self.direction == 'long_only' and signal == 'sell') or \
+           (self.direction == 'short_only' and signal == 'buy'):
             return None
 
         # Macro trend filter: breakouts against the long EMA fail far more

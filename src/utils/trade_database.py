@@ -795,8 +795,13 @@ class TradeDatabase:
                 # Timestamp is the index
                 ts = timestamp.strftime('%Y-%m-%d %H:%M:%S') if isinstance(timestamp, pd.Timestamp) else str(timestamp)
                 
-                # Check for funding rate column
-                rate = row.get('funding') or row.get('fundingRate')
+                # Accept any of the column spellings in use ('funding_rate' is
+                # what get_funding_rates returns - keep insert/read symmetric)
+                rate = row.get('funding')
+                if rate is None:
+                    rate = row.get('fundingRate')
+                if rate is None:
+                    rate = row.get('funding_rate')
                 if rate is not None:
                      data_to_insert.append((symbol, ts, float(rate)))
             
