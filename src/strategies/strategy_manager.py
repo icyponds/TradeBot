@@ -41,6 +41,7 @@ STRATEGY_CLASSES = {
     'sentiment_ml': ('sentiment_ml_strategy', 'SentimentMLStrategy'),
     'liquidation_hunter': ('liquidation_hunter_strategy', 'LiquidationHunterStrategy'),
     'cross_sectional_momentum': ('cross_sectional_momentum_strategy', 'CrossSectionalMomentumStrategy'),
+    'trend_following': ('trend_following_strategy', 'TrendFollowingStrategy'),
 }
 
 

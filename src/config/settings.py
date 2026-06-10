@@ -264,6 +264,8 @@ def load_config() -> Dict[str, Any]:
                 # a look-ahead artifact, NOT a top performer. Cap kept for the
                 # entry's sake should it ever be re-tested.
                 "csm_4h": {"min": 0.10, "max": 1.00},
+                # Trend following (low churn by design)
+                "tsmom_4h": {"min": 0.05, "max": 0.50},
             },
             # Cost hurdle (net edge in bps) per strategy; if a signal provides expected_edge_bps/edge_bps,
             # it must exceed this to trade. Missing edge values are ignored to stay backward compatible.
@@ -324,6 +326,12 @@ def load_config() -> Dict[str, Any]:
                 # vol_breakout_15m disabled due to poor performance (-$3135) - too much chop
                 # {"type": "volatility_breakout", "name": "vol_breakout_15m", "timeframe": "15m"},
                 # vol_breakout_1h disabled due to poor performance (23.8% win rate, -$36 PnL, -0.6% ROC)
+                # 2026-06-10 re-test WITH macro trend filter, 7 windows (Nov'25-Jun'26):
+                # nov -$2,469 / dec +$2,353 (single ANZ short +$4,839 carries it) /
+                # jan -$1,780 / feb -$1,738 / mar +$3,110 / apr -$796 / may +$1,938.
+                # Total +$618 ~ break-even; positive months broad-based but losing
+                # months outnumber them. Better than vb_4h on overlapping windows,
+                # still no edge. Keep off.
                 # {"type": "volatility_breakout", "name": "vol_breakout_1h", "timeframe": "1h"},
                 # ⚠ 2026-06 in/out-of-sample matrix (look-ahead-free engine, liquidity-
                 # ranked crypto+HIP-3 universe): vol_breakout_4h is NET NEGATIVE on the
@@ -360,6 +368,16 @@ def load_config() -> Dict[str, Any]:
                 # Dec -$6,555 / 27% DD, Jan -$2,286 / 13% DD. Earlier "top performer"
                 # label came from the biased engine. Keep disabled.
                 # {"type": "cross_sectional_momentum", "name": "csm_4h", "timeframe": "4h"},
+                # 2026-06-10: absolute-momentum gate (require_absolute_momentum=1)
+                # improves csm_4h by ~+$6k/month (Dec -$14.6k -> -$8.5k, Feb -$3.6k
+                # -> +$0.9k) but December remains structurally negative. Gate kept
+                # in code (default off) for any future re-test; instance stays off.
+
+                # Trend Following (Donchian / time-series momentum)
+                # 2026-06-10 IS test, top-30 universe: 60/30 bars Dec -$6.1k Feb -$2.8k;
+                # 90/45 bars Dec -$11.9k Feb -$2.5k. Both sides lose (Dec shorts -$4.7k,
+                # longs -$1.4k) -> no edge at either speed, long-only would not save it.
+                # {"type": "trend_following", "name": "tsmom_4h", "timeframe": "4h"},
 
                 # NOTE (2026-06 clean-engine re-test of vol_breakout_1h): only
                 # profitable in the Dec-2025 crash regime (+$6k, concentrated in
@@ -465,6 +483,24 @@ def load_config() -> Dict[str, Any]:
                 "top_n_percent": 0.15,
                 "bottom_n_percent": 0.15,
                 "rebalance_interval": 4,   # Rebalance every 4 hours
+                "adx_threshold": 25,
+                # Dual-momentum gate: rank alone can long assets that are merely
+                # falling slowest (Dec-2025: -$14.6k, 32% DD). 1 = require the
+                # asset's own return to point the same way as the trade.
+                "require_absolute_momentum": 0,
+                "min_abs_momentum": 0.0,
+                "stop_loss_pct": 0.05,
+            },
+
+            # Trend Following (Donchian / time-series momentum)
+            "trend_following": {
+                "entry_lookback": int(os.getenv("TF_ENTRY_LOOKBACK", "60")),   # 60 x 4h = 10 days
+                "exit_lookback": int(os.getenv("TF_EXIT_LOOKBACK", "30")),     # 30 x 4h = 5 days
+                "atr_length": int(os.getenv("TF_ATR_LENGTH", "14")),
+                "atr_multiplier_sl": float(os.getenv("TF_ATR_MULT_SL", "2.0")),
+                "trail_atr_mult": float(os.getenv("TF_TRAIL_ATR_MULT", "3.0")),
+                "trail_activation_atr_mult": float(os.getenv("TF_TRAIL_ACTIVATION_ATR_MULT", "1.5")),
+                "direction": os.getenv("TF_DIRECTION", "both"),
             },
         },
         

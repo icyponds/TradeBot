@@ -45,9 +45,19 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
         self.top_n_percent = csm_config.get('top_n_percent', 0.10)   # Top 10%
         self.bottom_n_percent = csm_config.get('bottom_n_percent', 0.10) # Bottom 10%
         self.rebalance_interval_hours = csm_config.get('rebalance_interval', 4)
-        
+
         # Market Regime Filter
         self.adx_threshold = csm_config.get('adx_threshold', 25)
+
+        # Absolute-momentum gate (dual momentum): a top-decile RANK can still
+        # have a negative own-return when the whole universe is falling
+        # (Dec-2025 failure mode: longing "winners" that were merely falling
+        # slowest). Gate longs on return > +min_abs_momentum and shorts on
+        # return < -min_abs_momentum. Int 0/1 so --param can toggle it.
+        self.require_absolute_momentum = bool(int(csm_config.get('require_absolute_momentum', 0)))
+        self.min_abs_momentum = float(csm_config.get('min_abs_momentum', 0.0))
+
+        self.stop_loss_pct = float(csm_config.get('stop_loss_pct', 0.05))
 
         self.logger.info(f"Initialized Cross-Sectional Momentum: "
                         f"Lookback={self.lookback_period}h, "
@@ -158,7 +168,18 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
         if signal == 'hold':
             return None
 
-            
+        # 5b. Absolute-momentum gate: relative rank is not enough — the asset's
+        # own return must point the same way as the trade.
+        if self.require_absolute_momentum:
+            if signal == 'buy' and my_return <= self.min_abs_momentum:
+                self.logger.debug(f"{symbol}: Long rejected by abs-momentum gate "
+                                  f"(return {my_return:.2%} <= {self.min_abs_momentum:.2%})")
+                return None
+            if signal == 'sell' and my_return >= -self.min_abs_momentum:
+                self.logger.debug(f"{symbol}: Short rejected by abs-momentum gate "
+                                  f"(return {my_return:.2%} >= {-self.min_abs_momentum:.2%})")
+                return None
+
         # 6. Trend Filter Implementation (EMA 200)
         # Only take LONG signals if Price > EMA200
         # Only take SHORT signals if Price < EMA200
@@ -229,11 +250,11 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
 
     def calculate_stop_loss(self, entry_price: float, side: str, signal_context: Dict[str, Any] = None) -> float:
         """
-        Fixed 5% Stop Loss for Momentum (Increased from 3%).
+        Fixed Stop Loss for Momentum (config: stop_loss_pct, default 5%).
         The ExecutionEngine will clamp this if it exceeds Max Account Risk.
         """
-        sl_pct = 0.05
-        
+        sl_pct = self.stop_loss_pct
+
         if side == 'long':
             return entry_price * (1 - sl_pct)
         else:
