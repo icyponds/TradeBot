@@ -545,6 +545,15 @@ def load_config() -> Dict[str, Any]:
             # BACKTEST_FEE_BPS=1.5 BACKTEST_SLIPPAGE_BPS=0
             "fee_bps": float(os.getenv("BACKTEST_FEE_BPS", "5.0")),
             "slippage_bps": float(os.getenv("BACKTEST_SLIPPAGE_BPS", "5.0")),
+            # Post-only entry model (see MockMarketAPI): entries fill with
+            # fill_prob at the limit (maker fee, no slippage) or are missed;
+            # exits always pay taker. Deterministic via seed.
+            "maker_execution": {
+                "enabled": os.getenv("BACKTEST_MAKER_EXECUTION", "false").lower() == "true",
+                "fill_prob": float(os.getenv("BACKTEST_MAKER_FILL_PROB", "0.75")),
+                "maker_fee_bps": float(os.getenv("BACKTEST_MAKER_FEE_BPS", "1.5")),
+                "seed": int(os.getenv("BACKTEST_MAKER_SEED", "42")),
+            },
         },
         
         # Order Management Configuration

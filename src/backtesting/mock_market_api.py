@@ -73,6 +73,24 @@ class MockMarketAPI(MarketInterface):
         self.fee_rate = float(bt_cfg.get('fee_bps', 5.0)) / 10000.0
         self.slippage_rate = float(bt_cfg.get('slippage_bps', 5.0)) / 10000.0
 
+        # Maker (post-only) execution model for ENTRIES: a resting limit at
+        # the touch fills with probability `fill_prob` at the limit price
+        # (no slippage, maker fee); otherwise the order is REJECTED and the
+        # entry is missed — the live analogue is an ALO order cancelled on
+        # timeout. Exits (reduce_only) always fill at taker cost: live you
+        # cross the spread rather than fail to exit. Uniform fill probability
+        # is a fair model for re-signalling rebalance flows (csm); it
+        # UNDERSTATES adverse selection for run-away breakout entries.
+        # NOT applied to multi-leg flows in any validated test yet — legs
+        # could fill asymmetrically.
+        mk_cfg = (bt_cfg.get('maker_execution', {}) or {})
+        self.maker_enabled = bool(mk_cfg.get('enabled', False))
+        self.maker_fill_prob = float(mk_cfg.get('fill_prob', 0.75))
+        self.maker_fee_rate = float(mk_cfg.get('maker_fee_bps', 1.5)) / 10000.0
+        import numpy as _np
+        self._maker_rng = _np.random.default_rng(int(mk_cfg.get('seed', 42)))
+        self.maker_stats = {'attempted': 0, 'filled': 0, 'rejected': 0}
+
         # WebSocket Subscription State (Mock)
         self._subscribed_symbols = set()
         
@@ -349,12 +367,23 @@ class MockMarketAPI(MarketInterface):
             self.logger.error(f"Cannot execute: no price for {symbol}")
             return {'status': 'rejected', 'reason': 'No Price'}
             
-        # Slippage simulation (configurable, default 5bps)
-        slippage = self.slippage_rate
-        if side.lower() == 'buy':
-            fill_price = price * (1 + slippage)
+        # Maker entry attempt (see __init__): fill at the limit or miss.
+        is_maker_fill = self.maker_enabled and not reduce_only
+        if is_maker_fill:
+            self.maker_stats['attempted'] += 1
+            if self._maker_rng.random() > self.maker_fill_prob:
+                self.maker_stats['rejected'] += 1
+                return {'status': 'rejected',
+                        'reason': 'maker_unfilled (post-only limit not reached)'}
+            self.maker_stats['filled'] += 1
+            fill_price = price  # resting limit at the touch: no slippage
         else:
-            fill_price = price * (1 - slippage)
+            # Taker: slippage simulation (configurable, default 5bps)
+            slippage = self.slippage_rate
+            if side.lower() == 'buy':
+                fill_price = price * (1 + slippage)
+            else:
+                fill_price = price * (1 - slippage)
             
         # Checking limits (simplified)
         cost = size * fill_price
@@ -474,8 +503,8 @@ class MockMarketAPI(MarketInterface):
             elif current_pos['size'] == 0 and new_size != 0:
                  self.positions[pos_key]['entry_price'] = fill_price
             
-        # Calculate Fee (configurable, default 5bps taker)
-        fee_rate = self.fee_rate
+        # Calculate Fee (maker for post-only entries, taker otherwise)
+        fee_rate = self.maker_fee_rate if is_maker_fill else self.fee_rate
         fee = cost * fee_rate
         
         # Deduct fee from USDC/Balances
