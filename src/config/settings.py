@@ -325,6 +325,14 @@ def load_config() -> Dict[str, Any]:
                 # {"type": "volatility_breakout", "name": "vol_breakout_15m", "timeframe": "15m"},
                 # vol_breakout_1h disabled due to poor performance (23.8% win rate, -$36 PnL, -0.6% ROC)
                 # {"type": "volatility_breakout", "name": "vol_breakout_1h", "timeframe": "1h"},
+                # ⚠ 2026-06 in/out-of-sample matrix (look-ahead-free engine, liquidity-
+                # ranked crypto+HIP-3 universe): vol_breakout_4h is NET NEGATIVE on the
+                # liquid universe even with the macro trend filter (IS -$2.8k, OOS -$2.7k;
+                # filter halves the bleed but creates no edge). Its earlier +$5.2k came
+                # from an accidental alphabetical mid-cap universe. Kept enabled as the
+                # least-bad configuration, but DO NOT relaunch live expecting profit -
+                # no strategy in the codebase currently passes IS+OOS validation.
+                # Full numbers: reports/oos_matrix/SUMMARY.md
                 {"type": "volatility_breakout", "name": "vol_breakout_4h", "timeframe": "4h"},
                 
                 # Adaptive Grid (15m, 1h, 4h)
@@ -425,6 +433,11 @@ def load_config() -> Dict[str, Any]:
                 # Chandelier-style trailing stop (ATR units, converted to pct at entry)
                 "trail_atr_mult": float(os.getenv("VB_TRAIL_ATR_MULT", "2.5")),
                 "trail_activation_atr_mult": float(os.getenv("VB_TRAIL_ACTIVATION_ATR_MULT", "1.0")),
+                # Macro trend filter: no shorts above / longs below the long EMA.
+                # Counter-trend breakouts were the dominant loss source on
+                # liquid symbols (2026-06 OOS matrix).
+                "trend_filter_enabled": os.getenv("VB_TREND_FILTER", "true").lower() == "true",
+                "trend_ema_period": int(os.getenv("VB_TREND_EMA_PERIOD", "200")),
             },
             
             # Adaptive Grid Strategy

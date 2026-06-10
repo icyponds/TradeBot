@@ -70,6 +70,13 @@ class VolatilityBreakoutStrategy(BaseStrategy):
         # Regime filter: minimum Hurst exponent to enter (0.5 = random walk)
         self.min_hurst = vb_config.get('min_hurst', 0.5)
 
+        # Macro trend filter: only take breakouts in the direction of the
+        # long EMA (no shorts above it, no longs below it). Counter-trend
+        # breakouts were the dominant loss source on liquid symbols
+        # (2026-06 backtest: rally-month shorts stopped out en masse).
+        self.trend_filter_enabled = vb_config.get('trend_filter_enabled', True)
+        self.trend_ema_period = vb_config.get('trend_ema_period', 200)
+
         # Time decay: exit stagnant breakouts after N hours if not in profit
         self.time_decay_hours = vb_config.get('time_decay_hours', 16)
 
@@ -174,6 +181,19 @@ class VolatilityBreakoutStrategy(BaseStrategy):
 
         if signal == 'hold':
             return None
+
+        # Macro trend filter: breakouts against the long EMA fail far more
+        # often than they follow through. Applied only when enough history
+        # exists to compute the EMA.
+        if self.trend_filter_enabled and len(closes) >= self.trend_ema_period:
+            trend_ema = closes.ewm(span=self.trend_ema_period, adjust=False).mean().iloc[-1]
+            if (signal == 'sell' and breakout_close > trend_ema) or \
+               (signal == 'buy' and breakout_close < trend_ema):
+                self.logger.debug(
+                    f"[{symbol}] Breakout rejected: counter-trend vs EMA{self.trend_ema_period} "
+                    f"(close={breakout_close:.4f}, ema={trend_ema:.4f})"
+                )
+                return None
 
         # 5. Volume confirmation: breakout candle must show expansion vs the
         # trailing median. Skipped when bars carry no volume data (tick-built).

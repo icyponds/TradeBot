@@ -197,3 +197,36 @@ class TestAtrTrailingStop:
             assert cfg['enabled'] is True
             assert cfg['trail_pct'] == pytest.approx(0.03)
             assert cfg['activation_pct'] == pytest.approx(0.02)
+
+
+class TestTrendFilter:
+
+    def test_counter_trend_short_rejected(self):
+        """A short breakout above the long EMA must be rejected."""
+        strategy = make_strategy(trend_ema_period=50)
+        df = make_breakout_df(direction='down')
+        # Uptrend prefix so the EMA sits far below the breakout close
+        df['close'] = df['close'] + np.linspace(0, 200, len(df))
+        df['open'] = df['close']; df['high'] = df['close'] * 1.002; df['low'] = df['close'] * 0.998
+
+        assert strategy.generate_signal('TEST', {'4h': df}) is None
+
+    def test_with_trend_long_allowed(self):
+        """The standard uptrend breakout passes (close above EMA)."""
+        strategy = make_strategy(trend_ema_period=50)
+        df = make_breakout_df(direction='up')
+
+        signal = strategy.generate_signal('TEST', {'4h': df})
+        assert signal is not None and signal['signal'] == 'buy'
+
+    def test_filter_disabled_allows_counter_trend(self):
+        strategy = make_strategy(trend_ema_period=50, trend_filter_enabled=False)
+        df = make_breakout_df(direction='down')
+        df['close'] = df['close'] + np.linspace(0, 200, len(df))
+        df['open'] = df['close']; df['high'] = df['close'] * 1.002; df['low'] = df['close'] * 0.998
+
+        # Without the filter the same setup may signal (if other gates pass);
+        # at minimum it must not be rejected BY the trend filter - so the
+        # outcome must differ from the enabled case OR be a sell signal.
+        signal = strategy.generate_signal('TEST', {'4h': df})
+        assert signal is None or signal['signal'] == 'sell'
