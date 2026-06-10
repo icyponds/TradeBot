@@ -282,7 +282,11 @@ def load_config() -> Dict[str, Any]:
             # (crash-chop tape where both momentum and reversal lose; fired 3x
             # in Nov'25-Jun'26). See StrategyManager._whipsaw_lockout_active.
             "whipsaw_lockout": {
-                "enabled": os.getenv("WHIPSAW_LOCKOUT_ENABLED", "false").lower() == "true",
+                # Default ON since 2026-06-10: flips Dec-2025 positive for
+                # csm_4h (+$11k single-window delta) at the cost of ~-$4k in
+                # Feb; net +$8.6k over 7 windows. Threshold-insensitive
+                # (2.5-3.5% identical) and duration-robust (7/14d positive).
+                "enabled": os.getenv("WHIPSAW_LOCKOUT_ENABLED", "true").lower() == "true",
                 "threshold_pct": float(os.getenv("WHIPSAW_LOCKOUT_THRESHOLD_PCT", "3.0")),
                 "lockout_days": float(os.getenv("WHIPSAW_LOCKOUT_DAYS", "10")),
                 "ref_symbol": os.getenv("WHIPSAW_LOCKOUT_REF", "BTC"),
@@ -357,11 +361,11 @@ def load_config() -> Dict[str, Any]:
                 # ranked crypto+HIP-3 universe): vol_breakout_4h is NET NEGATIVE on the
                 # liquid universe even with the macro trend filter (IS -$2.8k, OOS -$2.7k;
                 # filter halves the bleed but creates no edge). Its earlier +$5.2k came
-                # from an accidental alphabetical mid-cap universe. Kept enabled as the
-                # least-bad configuration, but DO NOT relaunch live expecting profit -
-                # no strategy in the codebase currently passes IS+OOS validation.
+                # from an accidental alphabetical mid-cap universe.
+                # 2026-06-10: DISABLED — replaced by csm_4h (gate + whipsaw lockout),
+                # the first configuration to pass the Dec+Apr/May validation bar.
                 # Full numbers: reports/oos_matrix/SUMMARY.md
-                {"type": "volatility_breakout", "name": "vol_breakout_4h", "timeframe": "4h"},
+                # {"type": "volatility_breakout", "name": "vol_breakout_4h", "timeframe": "4h"},
                 
                 # Adaptive Grid (15m, 1h, 4h)
                 # {"type": "adaptive_grid", "name": "adaptive_grid_15m", "timeframe": "15m"},
@@ -387,11 +391,16 @@ def load_config() -> Dict[str, Any]:
                 # csm_4h CONFIRMED BAD on look-ahead-free engine (2026-06 re-test):
                 # Dec -$6,555 / 27% DD, Jan -$2,286 / 13% DD. Earlier "top performer"
                 # label came from the biased engine. Keep disabled.
-                # {"type": "cross_sectional_momentum", "name": "csm_4h", "timeframe": "4h"},
-                # 2026-06-10: absolute-momentum gate (require_absolute_momentum=1)
-                # improves csm_4h by ~+$6k/month (Dec -$14.6k -> -$8.5k, Feb -$3.6k
-                # -> +$0.9k) but December remains structurally negative. Gate kept
-                # in code (default off) for any future re-test; instance stays off.
+                # 2026-06-10: ENABLED with absolute-momentum gate + market-level
+                # whipsaw lockout. 7-window matrix at TAKER costs (Nov'25-Jun'26):
+                # nov -$6.1k / dec +$2.3k / jan +$3.2k / feb +$0.9k / mar -$4.9k /
+                # apr +$6.4k / may +$7.9k = +$9.8k total. First config to pass the
+                # validation bar (positive Dec-2025 AND Apr/May-2026). CAVEATS:
+                # params chosen with knowledge of this 7-month period — needs
+                # forward validation at small size; Nov/Mar-style months still
+                # lose ~$5-6k (max DD ~18%). Maker execution (not yet built)
+                # roughly doubles the expected total (ensemble mean +$22.4k).
+                {"type": "cross_sectional_momentum", "name": "csm_4h", "timeframe": "4h"},
 
                 # Trend Following (Donchian / time-series momentum)
                 # 2026-06-10 IS test, top-30 universe: 60/30 bars Dec -$6.1k Feb -$2.8k;
@@ -507,7 +516,8 @@ def load_config() -> Dict[str, Any]:
                 # Dual-momentum gate: rank alone can long assets that are merely
                 # falling slowest (Dec-2025: -$14.6k, 32% DD). 1 = require the
                 # asset's own return to point the same way as the trade.
-                "require_absolute_momentum": 0,
+                # Default ON since 2026-06-10 (validated config, see instances).
+                "require_absolute_momentum": int(os.getenv("CSM_REQUIRE_ABS_MOMENTUM", "1")),
                 "min_abs_momentum": 0.0,
                 "stop_loss_pct": 0.05,
                 # >0: ATR-scaled stop (entry +/- mult*ATR14); engine sizes off

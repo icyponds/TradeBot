@@ -23,10 +23,12 @@ class TestConfig:
             
             assert config['api']['base_url'] == "https://api.hyperliquid.xyz"
             assert config['trading']['max_position_size_percentage'] == 15.0
-            # Check instances list logic
+            # Check instances list logic: csm_4h (gate + whipsaw lockout) is
+            # the enabled instance since 2026-06-10 (validated config)
             instances = config['strategies']['instances']
-            assert any(s['type'] == 'volatility_breakout' for s in instances)
-            assert len([s for s in instances if s['type'] == 'volatility_breakout']) > 0
+            assert any(s['name'] == 'csm_4h' for s in instances)
+            assert config['strategies']['cross_sectional_momentum']['require_absolute_momentum'] == 1
+            assert config['risk_management']['whipsaw_lockout']['enabled'] is True
 
     def test_validate_config_success(self, mock_env):
         """Test validation with valid config."""
