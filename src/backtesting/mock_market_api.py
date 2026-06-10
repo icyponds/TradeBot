@@ -99,8 +99,11 @@ class MockMarketAPI(MarketInterface):
 
     def get_spot_price(self, token: str, quote: str = 'USDC') -> Optional[float]:
         """Get spot price for token/quote."""
-        # Construct expected spot symbol key in historical data
-        spot_symbol = f"{token}_SPOT"
+        # Construct expected spot symbol key in historical data. Callers may
+        # pass either the base token ('PURR') or an already-suffixed symbol
+        # ('PURR_SPOT', e.g. via get_spot_token_for_perp) - appending blindly
+        # produced 'PURR_SPOT_SPOT' and broke every multi-leg fund allocation.
+        spot_symbol = token if token.endswith('_SPOT') else f"{token}_SPOT"
         return self.get_current_price(spot_symbol)
             
     def stop(self):

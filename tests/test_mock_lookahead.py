@@ -198,3 +198,27 @@ class TestOhlcvSanitization:
         df, dropped = BacktestEngine._sanitize_ohlcv(self._df(closes, volumes))
 
         assert 500.0 not in df['close'].values
+
+
+class TestSpotPriceResolution:
+
+    def _api(self):
+        idx = pd.date_range('2026-01-01', periods=30, freq='15min')
+        df = pd.DataFrame({'open': 1.0, 'high': 1.0, 'low': 1.0,
+                           'close': 2.5, 'volume': 1.0}, index=idx)
+        api = MockMarketAPI({'backtesting': {'initial_capital': 1000.0}},
+                            {'PURR': {'15m': df}, 'PURR_SPOT': {'15m': df * 0.99}})
+        api.reset_state()
+        api.set_time(pd.Timestamp('2026-01-01 05:00'))
+        return api
+
+    def test_base_token_resolves(self):
+        api = self._api()
+        assert api.get_spot_price('PURR') is not None
+
+    def test_suffixed_token_resolves(self):
+        """Regression: get_spot_token_for_perp returns 'X_SPOT'; get_spot_price
+        used to append _SPOT again ('X_SPOT_SPOT'), killing multi-leg entries."""
+        api = self._api()
+        token = api.get_spot_token_for_perp('PURR')
+        assert api.get_spot_price(token) is not None
