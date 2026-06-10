@@ -106,6 +106,46 @@ class TestAbsoluteMomentumGate:
         assert sig is None
 
 
+class TestReversalMode:
+    """invert=1: buy the bottom decile, fade the top; gate flips with it."""
+
+    def test_reversal_buys_the_dip(self):
+        # Bottom-ranked asset with a NEGATIVE recent return -> reversal long.
+        strat = make_strategy(require_absolute_momentum=1, invert=1,
+                              trend_filter_enabled=0)
+        sig = seed_universe(strat, 'BTC',
+                            make_two_phase_df('down', recent_return=-0.05),
+                            other_score=+1000.0)
+        assert sig is not None and sig['signal'] == 'buy'
+
+    def test_reversal_fades_the_rip(self):
+        # Top-ranked asset with a POSITIVE recent return -> reversal short.
+        strat = make_strategy(require_absolute_momentum=1, invert=1,
+                              trend_filter_enabled=0)
+        sig = seed_universe(strat, 'BTC',
+                            make_two_phase_df('up', recent_return=+0.05),
+                            other_score=-1000.0)
+        assert sig is not None and sig['signal'] == 'sell'
+
+    def test_reversal_gate_blocks_buying_strength(self):
+        # Bottom-ranked but rising: not a dip -> no reversal long.
+        strat = make_strategy(require_absolute_momentum=1, invert=1,
+                              trend_filter_enabled=0)
+        sig = seed_universe(strat, 'BTC',
+                            make_two_phase_df('down', recent_return=+0.03),
+                            other_score=+1000.0)
+        assert sig is None
+
+    def test_trend_filter_off_allows_counter_ema_entry(self):
+        # Reversal long below the EMA200 (blocked in momentum mode).
+        strat = make_strategy(require_absolute_momentum=0, invert=1,
+                              trend_filter_enabled=0)
+        sig = seed_universe(strat, 'BTC',
+                            make_two_phase_df('down', recent_return=-0.05),
+                            other_score=+1000.0)
+        assert sig is not None and sig['signal'] == 'buy'
+
+
 class TestConfigurableStopLoss:
     def test_default_stop_loss(self):
         strat = make_strategy()

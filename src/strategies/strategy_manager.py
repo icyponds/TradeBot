@@ -3088,6 +3088,58 @@ class StrategyManager:
             return True
         return False
 
+    def _whipsaw_lockout_active(self) -> bool:
+        """
+        Market-level whipsaw lockout: block NEW entries for `lockout_days`
+        after the reference symbol (BTC) prints two consecutive daily moves
+        > `threshold_pct` in OPPOSITE directions (e.g. Dec-1/2 2025:
+        -4.6%/+5.8%). In such tape both momentum AND reversal lose after
+        costs (2026-06 research: essentially all of csm's December loss came
+        from entries in the 10 days after the flip). Observable signal —
+        rare (3 triggers in Nov'25-Jun'26 at 3%) and identical live/backtest.
+        """
+        wl = (self.config.get("risk_management", {}) or {}).get("whipsaw_lockout", {}) or {}
+        if not wl.get("enabled", False):
+            return False
+
+        now = getattr(self, '_cycle_timestamp', None) or datetime.now()
+        cache = getattr(self, '_whipsaw_cache', None)
+        if cache is not None and cache[0] == now:
+            return cache[1]
+
+        threshold = float(wl.get("threshold_pct", 3.0)) / 100.0
+        lockout_days = float(wl.get("lockout_days", 10))
+        ref_symbol = wl.get("ref_symbol", "BTC")
+
+        active = False
+        try:
+            bars = self.market_api.get_ohlcv(ref_symbol, '4h', 200)
+            if bars is not None and len(bars) > 12:
+                daily = bars['close'].resample('1D').last().dropna()
+                rets = daily.pct_change().dropna()
+                if len(rets) >= 2:
+                    flips = rets.index[
+                        (rets.abs() > threshold)
+                        & (rets.shift(1).abs() > threshold)
+                        & ((rets * rets.shift(1)) < 0)
+                    ]
+                    for flip_day in flips:
+                        try:
+                            if 0 <= (now - flip_day.to_pydatetime()).total_seconds() <= lockout_days * 86400:
+                                active = True
+                                self.logger.info(
+                                    f"Whipsaw lockout active: {ref_symbol} flip on "
+                                    f"{flip_day.date()}, blocking new entries for "
+                                    f"{lockout_days:.0f}d")
+                                break
+                        except TypeError:
+                            continue
+        except Exception as e:
+            self.logger.debug(f"Whipsaw lockout check failed: {e}")
+
+        self._whipsaw_cache = (now, active)
+        return active
+
     def _should_execute_signal(self, symbol: str, signal: Dict[str, Any], current_price: float,
                                ohlcv: Dict[str, pd.DataFrame], strategy_name: str) -> bool:
         """Determine if we should execute a trading signal."""
@@ -3146,6 +3198,12 @@ class StrategyManager:
         # 2a-bis. Equity circuit breaker (reactive drawdown halt)
         # ---------------------------------------------------------
         if self._circuit_breaker_active(strategy_name):
+            return False
+
+        # ---------------------------------------------------------
+        # 2a-ter. Market-level whipsaw lockout (crash-chop tape)
+        # ---------------------------------------------------------
+        if self._whipsaw_lockout_active():
             return False
 
         # ---------------------------------------------------------

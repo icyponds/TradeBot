@@ -132,6 +132,10 @@ class ExecutionEngine:
                 'z_score': signal.get('z_score'),
                 'sigma': signal.get('sigma'),
                 'mu': signal.get('mu'),
+                # ATR from the signal: strategies with ATR-scaled stops
+                # (volatility_breakout, cross_sectional_momentum) read this;
+                # omitting it silently degraded them to fixed-pct fallbacks
+                'atr': signal.get('atr'),
                 'market_volatility': market_volatility,
                 'signal_strength': signal_strength,
             }

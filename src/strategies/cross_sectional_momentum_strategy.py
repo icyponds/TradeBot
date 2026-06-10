@@ -22,7 +22,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from .base_strategy import BaseStrategy
-from src.utils.statistics import calculate_adx
+from src.utils.statistics import calculate_adx, calculate_atr
 
 class CrossSectionalMomentumStrategy(BaseStrategy):
     """
@@ -59,6 +59,28 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
 
         self.stop_loss_pct = float(csm_config.get('stop_loss_pct', 0.05))
 
+        # ATR-scaled stop (Dec-2025 autopsy: a fixed 5% stop sits inside
+        # crash-month noise — 32 stop-outs cost -$20.6k while winners made
+        # +$12.2k; bounces stopped out positions that were directionally
+        # right). >0 enables entry ± mult*ATR(14). The engine sizes positions
+        # off the implied stop distance, so a wider vol-aware stop also
+        # means a SMALLER position: constant dollar risk, fewer noise stops.
+        self.stop_atr_mult = float(csm_config.get('stop_atr_mult', 0.0))
+
+        # Skip-period momentum (classic 12-2 style): rank on the window
+        # ending `skip_period` bars ago so entries don't chase the freshest
+        # bounce (Dec autopsy: gated longs were bounce-chasers, avg -$300).
+        self.skip_period = int(csm_config.get('skip_period', 0))
+
+        # Inverted mode = SHORT-TERM REVERSAL: long the bottom decile, short
+        # the top (Dec-2025 bounce cycle: 2-day losers bounced every 2-3
+        # days while momentum entries were stopped out). The abs-momentum
+        # gate flips with it (longs require a NEGATIVE own return — buying
+        # dips). Disable the EMA200 trend filter for reversal runs; it is a
+        # momentum-regime construct.
+        self.invert = bool(int(csm_config.get('invert', 0)))
+        self.trend_filter_enabled = bool(int(csm_config.get('trend_filter_enabled', 1)))
+
         self.logger.info(f"Initialized Cross-Sectional Momentum: "
                         f"Lookback={self.lookback_period}h, "
                         f"Top/Bottom={self.top_n_percent:.0%}, ADX_Min={self.adx_threshold}")
@@ -80,11 +102,14 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
         # 1. Update Universe Stats
         current_price = ohlcv['close'].iloc[-1]
         
-        if len(ohlcv) >= self.lookback_period:
-            # Calculate Momentum (Return)
-            past_price = ohlcv['close'].iloc[-self.lookback_period]
-            momentum = (current_price / past_price) - 1
-            
+        if len(ohlcv) >= self.lookback_period + self.skip_period:
+            # Calculate Momentum (Return) over the window ending `skip_period`
+            # bars ago (skip=0 preserves the original behavior)
+            end_idx = -1 - self.skip_period
+            ref_price = ohlcv['close'].iloc[end_idx]
+            past_price = ohlcv['close'].iloc[end_idx - self.lookback_period + 1]
+            momentum = (ref_price / past_price) - 1
+
             # Calculate Volatility (over same lookback period)
             volatility = ohlcv['close'].iloc[-self.lookback_period:].pct_change().std()
             if volatility == 0 or np.isnan(volatility):
@@ -148,16 +173,18 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
 
         signal = 'hold'
         reason = ''
-        
+
         # 5. Generate Signal
         if rank >= (1.0 - self.top_n_percent):
-            # Top Winner -> Long
-            signal = 'buy'
-            reason = f"CSM (Risk-Adj): Top {self.top_n_percent:.0%} Winner (Rank {rank:.2f}, Score {my_score:.2f}, Ret {my_return:.1%})"
+            # Top Winner -> Long (momentum) / Short (reversal)
+            signal = 'sell' if self.invert else 'buy'
+            mode = "Reversal: fade Top" if self.invert else "Top"
+            reason = f"CSM (Risk-Adj): {mode} {self.top_n_percent:.0%} Winner (Rank {rank:.2f}, Score {my_score:.2f}, Ret {my_return:.1%})"
         elif rank <= self.bottom_n_percent:
-            # Bottom Loser -> Short
-            signal = 'sell'
-            reason = f"CSM (Risk-Adj): Bottom {self.bottom_n_percent:.0%} Loser (Rank {rank:.2f}, Score {my_score:.2f}, Ret {my_return:.1%})"
+            # Bottom Loser -> Short (momentum) / Long (reversal)
+            signal = 'buy' if self.invert else 'sell'
+            mode = "Reversal: buy Bottom" if self.invert else "Bottom"
+            reason = f"CSM (Risk-Adj): {mode} {self.bottom_n_percent:.0%} Loser (Rank {rank:.2f}, Score {my_score:.2f}, Ret {my_return:.1%})"
             
         if signal == 'sell':
             # Restrict shorting to higher timeframes (4h, 1d) to avoid whipsaws
@@ -169,45 +196,63 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
             return None
 
         # 5b. Absolute-momentum gate: relative rank is not enough — the asset's
-        # own return must point the same way as the trade.
+        # own return must point the same way as the trade (momentum mode) or
+        # against it (reversal mode: buy actual dips, fade actual rips).
         if self.require_absolute_momentum:
-            if signal == 'buy' and my_return <= self.min_abs_momentum:
-                self.logger.debug(f"{symbol}: Long rejected by abs-momentum gate "
+            buys_need_positive = not self.invert
+            if signal == ('buy' if buys_need_positive else 'sell') and my_return <= self.min_abs_momentum:
+                self.logger.debug(f"{symbol}: {signal} rejected by abs-momentum gate "
                                   f"(return {my_return:.2%} <= {self.min_abs_momentum:.2%})")
                 return None
-            if signal == 'sell' and my_return >= -self.min_abs_momentum:
-                self.logger.debug(f"{symbol}: Short rejected by abs-momentum gate "
+            if signal == ('sell' if buys_need_positive else 'buy') and my_return >= -self.min_abs_momentum:
+                self.logger.debug(f"{symbol}: {signal} rejected by abs-momentum gate "
                                   f"(return {my_return:.2%} >= {-self.min_abs_momentum:.2%})")
                 return None
 
         # 6. Trend Filter Implementation (EMA 200)
         # Only take LONG signals if Price > EMA200
         # Only take SHORT signals if Price < EMA200
-        # Fix SettingWithCopyWarning
-        df_calc = ohlcv.copy()
-        df_calc['ema200'] = df_calc['close'].ewm(span=200, adjust=False).mean()
-        trend_ema = df_calc['ema200'].iloc[-1]
-        
-        if signal == 'buy' and current_price < trend_ema:
-             self.logger.debug(f"{symbol}: Long signal filtered (Price {current_price:.2f} < EMA200 {trend_ema:.2f})")
-             return None
-             
-        if signal == 'sell' and current_price > trend_ema:
-             self.logger.debug(f"{symbol}: Short signal filtered (Price {current_price:.2f} > EMA200 {trend_ema:.2f})")
-             return None
+        # (configurable: a momentum-regime construct, off for reversal mode)
+        trend_ema = None
+        if self.trend_filter_enabled:
+            df_calc = ohlcv.copy()
+            df_calc['ema200'] = df_calc['close'].ewm(span=200, adjust=False).mean()
+            trend_ema = df_calc['ema200'].iloc[-1]
+
+            if signal == 'buy' and current_price < trend_ema:
+                 self.logger.debug(f"{symbol}: Long signal filtered (Price {current_price:.2f} < EMA200 {trend_ema:.2f})")
+                 return None
+
+            if signal == 'sell' and current_price > trend_ema:
+                 self.logger.debug(f"{symbol}: Short signal filtered (Price {current_price:.2f} > EMA200 {trend_ema:.2f})")
+                 return None
 
         # Volatility Targeting for Size?
         # Higher Vol -> Smaller Size (managed by position sizing logic, but we can signal confidence)
         confidence = abs(rank - 0.5) * 2 # 0.5 -> 0, 1.0 -> 1.0
-        
+
+        # ATR for the vol-aware stop (only when the feature is enabled)
+        current_atr = None
+        if self.stop_atr_mult > 0 and 'high' in ohlcv.columns and len(ohlcv) > 15:
+            try:
+                atr_series = calculate_atr(ohlcv['high'], ohlcv['low'], ohlcv['close'], 14)
+                atr_val = float(atr_series.iloc[-1])
+                if atr_val > 0 and not np.isnan(atr_val):
+                    current_atr = atr_val
+            except Exception:
+                pass
+
+        trend_note = (f" [Trend Filter: {'Above' if current_price > trend_ema else 'Below'} EMA200]"
+                      if trend_ema is not None else " [Trend Filter: off]")
         return {
             'signal': signal,
-            'reason': reason + f" [Trend Filter: {'Above' if current_price > trend_ema else 'Below'} EMA200]",
+            'reason': reason + trend_note,
             'price': current_price,
             'strategy': 'cross_sectional_momentum',
             'confidence': confidence,
             'rank': rank,
-            'momentum': my_return
+            'momentum': my_return,
+            'atr': current_atr,
         }
 
     @classmethod
@@ -250,10 +295,17 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
 
     def calculate_stop_loss(self, entry_price: float, side: str, signal_context: Dict[str, Any] = None) -> float:
         """
-        Fixed Stop Loss for Momentum (config: stop_loss_pct, default 5%).
+        Stop Loss for Momentum: ATR-scaled when stop_atr_mult > 0 and the
+        signal carries an ATR (vol-aware width; the engine sizes off the
+        implied stop distance so dollar risk stays constant), otherwise
+        fixed stop_loss_pct (default 5%).
         The ExecutionEngine will clamp this if it exceeds Max Account Risk.
         """
-        sl_pct = self.stop_loss_pct
+        atr = (signal_context or {}).get('atr')
+        if self.stop_atr_mult > 0 and atr and atr > 0 and entry_price > 0:
+            sl_pct = min(0.25, self.stop_atr_mult * atr / entry_price)
+        else:
+            sl_pct = self.stop_loss_pct
 
         if side == 'long':
             return entry_price * (1 - sl_pct)

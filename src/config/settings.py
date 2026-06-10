@@ -277,6 +277,16 @@ def load_config() -> Dict[str, Any]:
                 "loss_threshold_pct": float(os.getenv("CIRCUIT_BREAKER_LOSS_PCT", "5.0")),
                 "lookback_days": float(os.getenv("CIRCUIT_BREAKER_LOOKBACK_DAYS", "7")),
             },
+            # Market-level whipsaw lockout: block new entries for lockout_days
+            # after BTC prints consecutive opposite daily moves > threshold_pct
+            # (crash-chop tape where both momentum and reversal lose; fired 3x
+            # in Nov'25-Jun'26). See StrategyManager._whipsaw_lockout_active.
+            "whipsaw_lockout": {
+                "enabled": os.getenv("WHIPSAW_LOCKOUT_ENABLED", "false").lower() == "true",
+                "threshold_pct": float(os.getenv("WHIPSAW_LOCKOUT_THRESHOLD_PCT", "3.0")),
+                "lockout_days": float(os.getenv("WHIPSAW_LOCKOUT_DAYS", "10")),
+                "ref_symbol": os.getenv("WHIPSAW_LOCKOUT_REF", "BTC"),
+            },
             # Cost hurdle (net edge in bps) per strategy; if a signal provides expected_edge_bps/edge_bps,
             # it must exceed this to trade. Missing edge values are ignored to stay backward compatible.
             "cost_hurdles": {
@@ -500,6 +510,16 @@ def load_config() -> Dict[str, Any]:
                 "require_absolute_momentum": 0,
                 "min_abs_momentum": 0.0,
                 "stop_loss_pct": 0.05,
+                # >0: ATR-scaled stop (entry +/- mult*ATR14); engine sizes off
+                # the stop distance, so wider vol-aware stops = smaller size
+                "stop_atr_mult": 0.0,
+                # Rank on the window ending N bars ago (12-2-style momentum)
+                "skip_period": 0,
+                # 1 = short-term REVERSAL mode: buy bottom decile, fade top
+                # (abs-momentum gate flips with it)
+                "invert": 0,
+                # EMA200 alignment filter (momentum construct; 0 for reversal)
+                "trend_filter_enabled": 1,
             },
 
             # Trend Following (Donchian / time-series momentum)
