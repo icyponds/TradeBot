@@ -267,6 +267,16 @@ def load_config() -> Dict[str, Any]:
                 # Trend following (low churn by design)
                 "tsmom_4h": {"min": 0.05, "max": 0.50},
             },
+            # Reactive per-strategy circuit breaker: block NEW entries while a
+            # strategy's realized PnL over the trailing lookback_days is below
+            # -loss_threshold_pct of equity (exits unaffected; stateless — the
+            # window aging out re-enables the strategy). Predictive regime
+            # switching failed (2026-06); this is the reactive alternative.
+            "circuit_breaker": {
+                "enabled": os.getenv("CIRCUIT_BREAKER_ENABLED", "false").lower() == "true",
+                "loss_threshold_pct": float(os.getenv("CIRCUIT_BREAKER_LOSS_PCT", "5.0")),
+                "lookback_days": float(os.getenv("CIRCUIT_BREAKER_LOOKBACK_DAYS", "7")),
+            },
             # Cost hurdle (net edge in bps) per strategy; if a signal provides expected_edge_bps/edge_bps,
             # it must exceed this to trade. Missing edge values are ignored to stay backward compatible.
             "cost_hurdles": {
@@ -530,6 +540,11 @@ def load_config() -> Dict[str, Any]:
             "reset_results_db": os.getenv("BACKTEST_RESET_RESULTS_DB", "true").lower() == "true",
             "initial_capital": float(os.getenv("BACKTEST_INITIAL_CAPITAL", "50000.0")),
             "initial_spot_balance": float(os.getenv("BACKTEST_INITIAL_SPOT_BALANCE", "0.0")),
+            # Execution cost model per leg (see MockMarketAPI). Defaults
+            # approximate taker execution; maker-scenario upper bound:
+            # BACKTEST_FEE_BPS=1.5 BACKTEST_SLIPPAGE_BPS=0
+            "fee_bps": float(os.getenv("BACKTEST_FEE_BPS", "5.0")),
+            "slippage_bps": float(os.getenv("BACKTEST_SLIPPAGE_BPS", "5.0")),
         },
         
         # Order Management Configuration

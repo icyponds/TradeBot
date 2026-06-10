@@ -3036,7 +3036,59 @@ class StrategyManager:
             self.logger.warning(f"☢️ EXECUTING NUCLEAR DISPLACEMENT on Single Leg {symbol}")
             self.close_position(symbol, reason='nuclear_displacement', timestamp=getattr(self, '_cycle_timestamp', None))
 
-    def _should_execute_signal(self, symbol: str, signal: Dict[str, Any], current_price: float, 
+    def _circuit_breaker_active(self, strategy_name: str) -> bool:
+        """
+        Reactive per-strategy circuit breaker: block NEW entries while the
+        strategy's realized PnL over the trailing `lookback_days` is below
+        -`loss_threshold_pct` of account equity. Exits are unaffected.
+
+        Stateless by design — the lookback IS the cooldown: as losses age out
+        of the window the strategy re-enables itself. Uses the cycle (sim)
+        timestamp in backtests so the window is measured in market time.
+        """
+        cb = (self.config.get("risk_management", {}) or {}).get("circuit_breaker", {}) or {}
+        if not cb.get("enabled", False) or self.performance_tracker is None:
+            return False
+
+        lookback_days = float(cb.get("lookback_days", 7))
+        threshold_pct = float(cb.get("loss_threshold_pct", 5.0))
+
+        now = getattr(self, '_cycle_timestamp', None) or datetime.now()
+        cutoff = now - timedelta(days=lookback_days)
+
+        trades = getattr(self.performance_tracker, 'completed_trades', None) or []
+        realized = 0.0
+        total_pnl = 0.0
+        for t in trades:
+            total_pnl += t.pnl
+            if t.strategy != strategy_name:
+                continue
+            exit_time = t.exit_time
+            try:
+                if isinstance(exit_time, str):
+                    exit_time = pd.to_datetime(exit_time)
+                if getattr(exit_time, 'tzinfo', None) and not getattr(cutoff, 'tzinfo', None):
+                    exit_time = exit_time.replace(tzinfo=None)
+            except Exception:
+                continue
+            if exit_time is not None and exit_time >= cutoff:
+                realized += t.pnl
+
+        equity = float(getattr(self.performance_tracker, 'initial_equity', 0.0) or 0.0) + total_pnl
+        if equity <= 0:
+            return False
+
+        threshold = -(threshold_pct / 100.0) * equity
+        if realized <= threshold:
+            self.logger.info(
+                f"Circuit breaker active for {strategy_name}: realized "
+                f"${realized:.0f} over {lookback_days:.0f}d <= ${threshold:.0f} "
+                f"({threshold_pct}% of ${equity:.0f})"
+            )
+            return True
+        return False
+
+    def _should_execute_signal(self, symbol: str, signal: Dict[str, Any], current_price: float,
                                ohlcv: Dict[str, pd.DataFrame], strategy_name: str) -> bool:
         """Determine if we should execute a trading signal."""
         
@@ -3089,6 +3141,12 @@ class StrategyManager:
                     f"Cooldown active for {strategy_name}: waited {elapsed:.1f}s of {cooldown_sec:.0f}s"
                 )
                 return False
+
+        # ---------------------------------------------------------
+        # 2a-bis. Equity circuit breaker (reactive drawdown halt)
+        # ---------------------------------------------------------
+        if self._circuit_breaker_active(strategy_name):
+            return False
 
         # ---------------------------------------------------------
         # 2b. Pair blacklist/penalty

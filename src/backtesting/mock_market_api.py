@@ -63,6 +63,16 @@ class MockMarketAPI(MarketInterface):
         # Cumulative funding paid by open positions (negative = received)
         self.total_funding_paid = 0.0
 
+        # Execution cost model (per leg). Defaults match Hyperliquid taker
+        # reality (~4.5bps fee) plus book impact. Override via
+        # backtesting.fee_bps / backtesting.slippage_bps for scenario
+        # analysis (e.g. maker-fee upper bound: fee_bps=1.5, slippage_bps=0 —
+        # an UPPER BOUND because fill probability of resting orders is not
+        # modeled).
+        bt_cfg = (config.get('backtesting', {}) or {})
+        self.fee_rate = float(bt_cfg.get('fee_bps', 5.0)) / 10000.0
+        self.slippage_rate = float(bt_cfg.get('slippage_bps', 5.0)) / 10000.0
+
         # WebSocket Subscription State (Mock)
         self._subscribed_symbols = set()
         
@@ -339,8 +349,8 @@ class MockMarketAPI(MarketInterface):
             self.logger.error(f"Cannot execute: no price for {symbol}")
             return {'status': 'rejected', 'reason': 'No Price'}
             
-        # Slippage simulation (0.05%)
-        slippage = 0.0005
+        # Slippage simulation (configurable, default 5bps)
+        slippage = self.slippage_rate
         if side.lower() == 'buy':
             fill_price = price * (1 + slippage)
         else:
@@ -464,8 +474,8 @@ class MockMarketAPI(MarketInterface):
             elif current_pos['size'] == 0 and new_size != 0:
                  self.positions[pos_key]['entry_price'] = fill_price
             
-        # Calculate Fee (0.05% Taker assumed for simplicity)
-        fee_rate = 0.0005
+        # Calculate Fee (configurable, default 5bps taker)
+        fee_rate = self.fee_rate
         fee = cost * fee_rate
         
         # Deduct fee from USDC/Balances
