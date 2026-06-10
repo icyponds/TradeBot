@@ -34,6 +34,53 @@ def generate_synthetic_data(symbol, start_date, end_date, freq='1h'):
 
 import random
 
+
+def select_universe(db, symbols, start, end, max_n):
+    """
+    Rank candidate symbols by liquidity and history coverage instead of
+    alphabetical truncation, and dedupe duplicate underlyings listed on
+    multiple HIP-3 dexes (e.g. cash:NVDA / flx:NVDA / xyz:NVDA) by keeping
+    the most liquid listing. Ensures backtests cover both crypto-native and
+    HIP-3 perps, weighted toward what is actually tradeable.
+    """
+    scored = []
+    window_seconds = max(1.0, (end - start).total_seconds())
+    expected_bars = max(1, int(window_seconds // (4 * 3600)))
+
+    for sym in symbols:
+        try:
+            df = db.get_market_data(sym, '4h')
+        except Exception:
+            continue
+        if df is None or df.empty:
+            continue
+        window = df[(df.index >= start) & (df.index <= end)]
+        coverage = len(window) / expected_bars
+        if coverage < 0.7:
+            continue
+        # Average notional volume; corrupted zero-volume placeholder bars
+        # contribute nothing, which correctly ranks them down
+        notional = float((window['close'] * window['volume']).mean())
+        scored.append((sym, coverage, notional))
+
+    # Dedupe by underlying (strip dex prefix and _SPOT suffix)
+    best = {}
+    for sym, coverage, notional in scored:
+        base = sym.split(':', 1)[-1].replace('_SPOT', '')
+        current = best.get(base)
+        if current is None or notional > current[2]:
+            best[base] = (sym, coverage, notional)
+
+    ranked = sorted(best.values(), key=lambda x: x[2], reverse=True)
+    selected = [sym for sym, _, _ in ranked[:max_n]]
+
+    n_hip3 = sum(1 for s in selected if ':' in s)
+    print(f"Universe: {len(selected)} symbols by notional volume "
+          f"({len(selected) - n_hip3} crypto, {n_hip3} HIP-3); "
+          f"top 5: {selected[:5]}")
+    return selected
+
+
 def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None, param_overrides=None, disable_strategies=None, enable_instances=None, max_symbols=None):
     # Increase log level and setup file logging prior to ANY imports or logic
     import logging
@@ -143,26 +190,18 @@ def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None, 
         pass
 
     # Limit symbol count for performance (backtest with 231 symbols at 15min steps is very slow)
+    # Selection is liquidity-ranked with HIP-3 dedupe, NOT alphabetical (see select_universe)
     max_symbols = max_symbols or 20
     if len(symbols) > max_symbols:
-        print(f"Limiting from {len(symbols)} to top {max_symbols} symbols for backtest performance")
-        symbols = symbols[:max_symbols]
+        symbols = select_universe(db, symbols, start_date, end_date, max_symbols)
 
     # 3. Configure symbols and strategy overrides BEFORE engine init
     config['trading']['dynamic_pair_selection'] = True
     config['trading']['symbols'] = symbols
     
-    # 3.1 Override Strategy Lookbacks for Short Data History
-    # Standard 100-period lookbacks (at 1h = 4 days) consume the entire dataset
-    # for warmup, leaving no trade window. Reduce them.
-    print("Overriding strategy lookbacks for backtest window...")
-    config['strategies']['stat_arb']['window_size'] = 24  # 1 day
-    config['strategies']['stat_arb']['correlation_lookback'] = 24
-    config['strategies']['ou_mean_reversion']['estimation_lookback'] = 24
-    config['strategies']['cointegration']['lookback_period'] = 24
-    config['strategies']['volatility_breakout']['bb_length'] = 20
-    config['strategies']['liquidation_hunter']['window'] = 20
-    config['strategies']['cross_sectional_momentum']['lookback_period'] = 6
+    # NOTE: Historical lookback overrides were removed (2026-06). The DB now
+    # holds 7+ months of history, so strategies run with PRODUCTION lookbacks
+    # ("test what you fly"). Use --param for deliberate experiments.
 
     # 3.1b Apply any --param overrides from CLI
     if param_overrides:
@@ -184,15 +223,9 @@ def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None, 
             except ValueError:
                 print(f"  ⚠ Invalid format '{override}' — expected strategy.param=value")
 
-    # 3.2 Consolidate Strategies
-    # - Disable SentimentML (Underperforming)
-    # - Disable Liquidation Hunter 5m/1h (Underperforming)
+    # 3.2 Strategy instance adjustments (purely CLI-driven; the old hardcoded
+    # sentiment/liquidation-hunter filter was removed - use --disable-strategy)
     if 'instances' in config['strategies']:
-        config['strategies']['instances'] = [
-            s for s in config['strategies']['instances'] 
-            if s['name'] not in ['liquidation_hunter_5m', 'liquidation_hunter_1h']
-            and not s['name'].startswith('sentiment_ml')
-        ]
         # Apply --enable-instance additions (re-test disabled strategies)
         # Format: type:name:timeframe, e.g. cross_sectional_momentum:csm_4h:4h
         if enable_instances:

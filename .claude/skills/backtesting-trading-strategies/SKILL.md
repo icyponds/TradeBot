@@ -86,6 +86,30 @@ sqlite3 data/trades.db "SELECT strategy, COUNT(*), ROUND(SUM(pnl),2) FROM backte
 - **Backtest isolation**: Results are written to `backtest_` prefixed tables (e.g. `backtest_trades`, `backtest_live_positions`) via `TradeDatabase(table_prefix="backtest_")`.
 - **Clean slate**: Always clear all `backtest_*` tables before a new run to prevent ghost position pollution.
 
+## Asset Universe Selection
+
+Backtests MUST cover **both crypto-native perps and HIP-3 perps** (builder-dex
+assets: equities, indices, commodities, FX). Strategy verdicts based on crypto
+alone do not generalize to the HIP-3 books the bot also trades.
+
+Rules:
+1. **Include HIP-3 assets** alongside crypto in every strategy evaluation.
+   HIP-3 symbols are stored dex-prefixed (e.g. `xyz:NVDA`, `cash:GOLD`).
+2. **Prefer the `xyz` dex for HIP-3** — it has the deepest liquidity
+   (XYZ100 ~$1B/day) and the longest history (from Nov 2025).
+3. **Dedupe duplicate underlyings across dexes** (e.g. `cash:NVDA` vs
+   `flx:NVDA` vs `xyz:NVDA`): keep the listing with the most history and the
+   highest notional volume (in practice this is almost always `xyz:`).
+4. **Require reasonable history**: only include symbols whose candle coverage
+   spans >=~70% of the backtest window; rank the remainder by average notional
+   volume (close x volume) and take the top N. Do NOT select alphabetically.
+
+`scripts/run_backtest.py` implements this ranking automatically; pass
+`--max-symbols N` to widen the universe.
+
 ## Data Source
 
 All data comes from `data/trades.db` `market_data` table. See the `trade-database-reader` skill for full schema details.
+Refresh stale data with `scripts/refresh_market_data.py` (public info endpoint,
+rate-limit aware, resumable; updates candles + funding for crypto natives and
+`xyz` HIP-3 assets).
