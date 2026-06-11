@@ -1806,6 +1806,27 @@ class HyperliquidAPI(MarketInterface):
              
         return result
     
+    def _candles_snapshot_smart(self, api_symbol: str, timeframe: str,
+                                start_ms: int, end_ms: int):
+        """
+        candleSnapshot via the SDK wrapper when its name map knows the
+        symbol, else the raw info POST. Spot pair ids ('@107'), internal
+        spot names and brand-new HIP-3 listings are EXPECTED to miss the
+        SDK's name_to_coin — routing them straight to the raw call avoids
+        a KeyError flowing through _rate_limited_call (ERROR log + spurious
+        circuit-breaker failure on every fetch).
+        """
+        if api_symbol in getattr(self.info, 'name_to_coin', {}):
+            def _fetch_sdk():
+                return self.info.candles_snapshot(api_symbol, timeframe, start_ms, end_ms)
+            return self._rate_limited_call(_fetch_sdk, weight=20)
+
+        req = {"coin": api_symbol, "interval": timeframe,
+               "startTime": start_ms, "endTime": end_ms}
+        def _fetch_raw():
+            return self.info.post("/info", {"type": "candleSnapshot", "req": req})
+        return self._rate_limited_call(_fetch_raw, weight=20)
+
     def get_ohlcv(self, symbol: str, timeframe: str = '1h', limit: int = 100, market_type: str = None) -> Optional[pd.DataFrame]:
         """
         Get OHLCV candlestick data with in-memory rolling cache.
@@ -1880,9 +1901,7 @@ class HyperliquidAPI(MarketInterface):
                             # Fetch only the gap
                             gap_start_ms = int(gap_start_dt.timestamp() * 1000)
                             self.logger.debug(f"Gap-fill for {symbol} {timeframe}: fetching from {gap_start_dt}")
-                            def _fetch_gap():
-                                return self.info.candles_snapshot(api_symbol, timeframe, gap_start_ms, end_time)
-                            candles = self._rate_limited_call(_fetch_gap, weight=20)
+                            candles = self._candles_snapshot_smart(api_symbol, timeframe, gap_start_ms, end_time)
                             if candles:
                                 # Filter for DB (Strictly Closed)
                                 candles_db = [c for c in candles if c['t'] + interval_ms <= end_time]
@@ -1936,10 +1955,8 @@ class HyperliquidAPI(MarketInterface):
                                 # Sanity check
                                 if backfill_end_ms > backfill_start_ms:
                                     try:
-                                        def _fetch_backfill():
-                                            return self.info.candles_snapshot(api_symbol, timeframe, 
-                                                                            backfill_start_ms, backfill_end_ms)
-                                        hist_candles = self._rate_limited_call(_fetch_backfill, weight=20)
+                                        hist_candles = self._candles_snapshot_smart(
+                                            api_symbol, timeframe, backfill_start_ms, backfill_end_ms)
                                         
                                         # Filter strictly before earliest_ts to avoid dupes
                                         valid_candles = []
@@ -1998,45 +2015,16 @@ class HyperliquidAPI(MarketInterface):
             actual_limit = max(limit, MIN_FETCH_LIMIT)
             start_time = end_time - (actual_limit * interval_ms)
             
-            # Try using SDK wrapper first, fallback to direct call if symbol unknown (common for HIP-3)
+            # SDK wrapper when the symbol is known, raw call otherwise
+            # (see _candles_snapshot_smart)
             candles = []
-            # Symbols missing from the SDK's name_to_coin map (internal spot
-            # names like BERA_SPOT, new HIP-3 listings) are EXPECTED to use
-            # the raw fallback — check membership instead of letting the
-            # KeyError flow through _rate_limited_call, which logs an ERROR
-            # and records a spurious circuit-breaker failure each time.
-            sdk_knows_symbol = api_symbol in getattr(self.info, 'name_to_coin', {})
             try:
-                if not sdk_knows_symbol:
-                    raise KeyError(api_symbol)
-                # This uses info.name_to_coin map which might miss new HIP-3 assets
-                def _fetch_candles():
-                    return self.info.candles_snapshot(api_symbol, timeframe, start_time, end_time)
-                candles = self._rate_limited_call(_fetch_candles, weight=20)
-            except KeyError:
-                # Fallback: Symbol not in SDK map, try raw API call
-                # HIP-3 assets are often queryable by their name directly
-                try:
-                    req = {
-                        "coin": api_symbol, 
-                        "interval": timeframe, 
-                        "startTime": start_time, 
-                        "endTime": end_time
-                    }
-                    def _fetch_hip3():
-                        return self.info.post("/info", {"type": "candleSnapshot", "req": req})
-                    candles = self._rate_limited_call(_fetch_hip3, weight=20)
-                except Exception as e_raw:
-                     # Phase 12: Enhanced logging to debug HIP-3 failures
-                     error_details = str(e_raw)
-                     # Attempt to extract response text if it's a requests-like error
-                     if hasattr(e_raw, 'response') and hasattr(e_raw.response, 'text'):
-                         error_details += f" | Response: {e_raw.response.text}"
-                     
-                     self.logger.warning(f"Failed raw candle fetch for {api_symbol}: {error_details}")
-                     raise # Re-raise for outer handler
+                candles = self._candles_snapshot_smart(api_symbol, timeframe, start_time, end_time)
             except Exception as e:
-                self.logger.error(f"Error fetching candles for {api_symbol}: {e}")
+                error_details = str(e)
+                if hasattr(e, 'response') and hasattr(e.response, 'text'):
+                    error_details += f" | Response: {e.response.text}"
+                self.logger.error(f"Error fetching candles for {api_symbol}: {error_details}")
                 raise # Re-raise to caller
                 
             if not candles:
@@ -2260,9 +2248,7 @@ class HyperliquidAPI(MarketInterface):
             current_bar_start = now_ms - (now_ms % interval_ms)
             
             # Route through rate limiter to prevent 429 bursts
-            def _fetch():
-                return self.info.candles_snapshot(api_symbol, timeframe, current_bar_start, now_ms)
-            candles = self._rate_limited_call(_fetch, weight=20)
+            candles = self._candles_snapshot_smart(api_symbol, timeframe, current_bar_start, now_ms)
             if candles:
                 bar = {
                     'time': candles[-1]['t'] // 1000,
@@ -2343,9 +2329,13 @@ class HyperliquidAPI(MarketInterface):
             api_symbol = symbol  # May need conversion for spot
             asset_info = self._get_asset_info_for_symbol(symbol)
             if not asset_info:
-                # For spot assets: BTC_SPOT -> UBTC -> @109
-                if symbol in self.SPOT_INTERNAL_TO_API:
-                    api_token_name = self.SPOT_INTERNAL_TO_API[symbol]
+                # For spot assets: BTC_SPOT -> UBTC -> @109. Static map with
+                # strip-_SPOT fallback, same resolution as get_ohlcv — names
+                # like TRUMP_SPOT are not in the static map and previously
+                # leaked unresolved to SDK lookups (KeyError noise).
+                if symbol.endswith('_SPOT') or symbol in self.SPOT_INTERNAL_TO_API:
+                    api_token_name = self.SPOT_INTERNAL_TO_API.get(
+                        symbol, symbol.replace('_SPOT', ''))
                     spot_api = self.get_spot_api_name(api_token_name)
                     if spot_api:
                         api_symbol = spot_api

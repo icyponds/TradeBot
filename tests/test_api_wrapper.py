@@ -50,28 +50,24 @@ class TestHyperliquidAPI:
         assert api_client.info.candles_snapshot.called
 
     def test_get_ohlcv_exhausted_retries(self, api_client):
-        """Test that get_ohlcv returns None after exhausting retries/fallback."""
-        # Note: The decorator raises the last exception if all retries fail,
-        # BUT get_ohlcv now catches exceptions to attempt fallback.
-        
+        """Symbol unknown to the SDK -> raw fallback used directly; if the
+        raw call also fails, the error propagates to the caller."""
         api_client.info = MagicMock()
-        api_client.info.name_to_coin = {'BTC': 'BTC'}  # SDK knows the symbol
-        # Mock initial failure (KeyError triggers fallback)
-        api_client.info.candles_snapshot.side_effect = KeyError("Symbol not found")
-        # Mock fallback failure too (post method)
+        # Symbol NOT in the SDK map -> _candles_snapshot_smart routes raw
+        api_client.info.name_to_coin = {}
         api_client.info.post.side_effect = Exception("Fallback Failed")
-        
+
         # Force cache miss
         api_client.ohlcv_cache.get = MagicMock(return_value=None)
 
         with patch.object(api_client, '_get_asset_info_for_symbol', return_value={'name': 'BTC'}):
             with patch('time.sleep'):
-                # Should raise exception after retries exhausted (_rate_limited_call raises)
                 with pytest.raises(Exception, match="Fallback Failed"):
                     api_client.get_ohlcv("BTC", "1h", limit=1)
-            
-        # Verify calls
-        assert api_client.info.candles_snapshot.called
+
+        # Verify calls: raw POST attempted, SDK wrapper never touched
+        assert api_client.info.post.called
+        assert not api_client.info.candles_snapshot.called
         
     def test_get_ohlcv_retry_logic(self, api_client):
         """Test retry logic - verifies retryable errors trigger retries."""

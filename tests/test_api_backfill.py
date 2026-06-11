@@ -17,6 +17,8 @@ class TestAPIBackfill:
         """Use shared module-scoped client, reset mocks."""
         shared_api_client.exchange.reset_mock()
         shared_api_client.info.reset_mock()
+        # SDK symbol map: tests assert the SDK wrapper path is used
+        shared_api_client.info.name_to_coin = {'BTC': 'BTC'}
         shared_api_client.market_db = mock_db
         return shared_api_client
 
