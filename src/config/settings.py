@@ -281,6 +281,14 @@ def load_config() -> Dict[str, Any]:
             # after BTC prints consecutive opposite daily moves > threshold_pct
             # (crash-chop tape where both momentum and reversal lose; fired 3x
             # in Nov'25-Jun'26). See StrategyManager._whipsaw_lockout_active.
+            # Portfolio gross-leverage ceiling: total notional (every leg of
+            # every position, hedged or not) may not exceed this multiple of
+            # equity. Backstop against leverage drift / sizing bugs — should
+            # essentially never bind at current ~1-3x per-position leverage.
+            "gross_leverage_cap": {
+                "enabled": True,
+                "max_gross_leverage": 2.0,
+            },
             # Same-underlying concentration guard: block a new entry when an
             # open position already carries the same economic underlying
             # (dex-prefix duplicates like xyz:GOLD/cash:GOLD and tokenized

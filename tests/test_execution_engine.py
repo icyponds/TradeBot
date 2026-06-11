@@ -149,6 +149,9 @@ class TestExecutionEngine:
     def test_multi_leg_entry_persists_to_db(self, execution_engine, mock_market_api):
         """Verify execute_multi_leg_entry persists position atomically to DB."""
         from unittest.mock import MagicMock
+        # Real equity so the gross-leverage cap (2x) doesn't block the entry
+        # (float(MagicMock()) coerces to 1.0)
+        execution_engine.portfolio_manager.total_equity = 10000.0
         
         # Mock API order response
         mock_market_api.execute_order.return_value = {
@@ -188,6 +191,8 @@ class TestExecutionEngine:
     def test_multi_leg_scales_to_minimum_order(self, execution_engine, mock_market_api):
         """Verify multi-leg entry scales up when a leg is below $10 minimum."""
         from unittest.mock import MagicMock
+        # Real equity so the gross-leverage cap (2x) doesn't block the entry
+        execution_engine.portfolio_manager.total_equity = 10000.0
         
         # Setup: Prices so that hedge leg would be sub-$10
         # Leg 1: BTC @ $100, hedge_ratio 1.0 -> $100 notional (OK)

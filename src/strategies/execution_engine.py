@@ -90,6 +90,53 @@ class ExecutionEngine:
             self.logger.error(f"Error checking slippage for {symbol}: {e}")
             return True # Fail open safely? Or close? Let's default to True to not block unless certain.
 
+    def _gross_notional(self) -> float:
+        """
+        Gross notional across ALL open positions: sum of |size x price| for
+        single-leg positions plus every leg of every multi-leg position.
+        Deliberately blind to direction and hedging — a delta-neutral
+        funding-arb pair (long spot + short perp) counts BOTH legs: hedged
+        notional still carries fee, basis and liquidation-mechanics exposure.
+        """
+        total = 0.0
+        for pos in list(self.positions.values()):
+            price = pos.current_price or pos.entry_price or 0.0
+            total += abs(pos.size) * float(price)
+        for ml_pos in list(self.multi_leg_positions.values()):
+            for leg in getattr(ml_pos, 'legs', []) or []:
+                total += abs(leg.size) * float(leg.entry_price or 0.0)
+        return total
+
+    def _gross_cap_blocks(self, new_notional: float, symbol: str) -> bool:
+        """
+        Portfolio-level gross leverage ceiling: block a new entry when
+        (current gross + new notional) would exceed max_gross_leverage x
+        equity. A backstop against leverage drift and sizing bugs — at
+        current settings (~1-3x per-position leverage, 90% margin cap) it
+        should essentially never bind. Never closes existing positions.
+        """
+        cap_cfg = (self.config.get('risk_management', {}) or {}).get('gross_leverage_cap', {}) or {}
+        if not cap_cfg.get('enabled', True):
+            return False
+
+        try:
+            equity = float(self.portfolio_manager.total_equity) if self.portfolio_manager else 0.0
+            max_gross = float(cap_cfg.get('max_gross_leverage', 2.0))
+            projected = self._gross_notional() + float(new_notional)
+        except (TypeError, ValueError):
+            # Non-numeric inputs: fail open — the margin/risk checks still
+            # guard the entry; a backstop must not block on bad data.
+            return False
+
+        if equity <= 0:
+            return False
+        if projected > max_gross * equity:
+            self.logger.warning(
+                f"Gross leverage cap: blocking {symbol} entry — projected gross "
+                f"${projected:,.2f} > {max_gross:.1f}x equity (${equity:,.2f})")
+            return True
+        return False
+
     def execute_trade(self, symbol: str, signal: Dict[str, Any], current_price: float, strategy_name: str, ohlcv: Dict[str, pd.DataFrame], strategies_map: Dict[str, Any], timestamp: datetime = None):
         """Execute a single-leg trade based on signal."""
         try:
@@ -275,7 +322,11 @@ class ExecutionEngine:
             
             # Determine market type from symbol
             market_type = 'spot' if symbol.endswith('_SPOT') else 'perp'
-            
+
+            # Portfolio gross-leverage ceiling (backstop, see _gross_cap_blocks)
+            if self._gross_cap_blocks(position_size * current_price, symbol):
+                return
+
             order_result = self.market_api.execute_order(
                 symbol=symbol,
                 side=side,
@@ -660,6 +711,12 @@ class ExecutionEngine:
             # Now check if scaled position is still within risk limits
             if not self.leverage_manager.can_open_position(symbol, margin_required, float(available_capital)):
                 self.logger.warning(f"Multi-leg position for {symbol} blocked after scaling: exceeds risk limits")
+                return
+
+            # Portfolio gross-leverage ceiling: ALL legs count at full
+            # notional (delta-neutral pairs included), checked before any
+            # leg executes so the cap cannot be breached mid-sequence.
+            if self._gross_cap_blocks(notional_value * len(legs), symbol):
                 return
             
             # =========================================================================
