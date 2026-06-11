@@ -2530,7 +2530,14 @@ class HyperliquidAPI(MarketInterface):
                 if result is not None:
                     self.cache.set(cache_key, result, ttl=self.cache_ttl_positions)
                 return result
-            return self._rate_limited_call(_fetch_unified)
+            try:
+                return self._rate_limited_call(_fetch_unified)
+            except Exception as e:
+                # Same contract as the legacy path: None on total failure so
+                # callers (PortfolioManager) hit their fallback, never an
+                # unhandled exception mid-cycle.
+                self.logger.error(f"Failed to fetch unified balance: {e}")
+                return None
 
         def _fetch():
             # Iterate through all discovered DEXs to aggregate balance

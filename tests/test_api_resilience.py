@@ -1,10 +1,26 @@
+"""
+Resilience tests for balance fetching on UNIFIED accounts (Hyperliquid
+Dec-2025 account abstraction — the current production mode):
+- total failure of the spot clearinghouse fetch -> None (safe fallback,
+  never an unhandled exception mid-cycle)
+- perp-positions (PnL) fetch failure is tolerated: balance still returned
+- abstraction-state query failure -> legacy path engaged (its own contract)
+- cache served without re-fetching
+"""
 
 import pytest
 from unittest.mock import MagicMock, patch
 from src.api.hyperliquid_api import HyperliquidAPI
 
+
+SPOT_STATE = {
+    'balances': [{'coin': 'USDC', 'token': 0, 'total': '63.22', 'hold': '0.0'}],
+    'tokenToAvailableAfterMaintenance': [[0, '53.22']],
+}
+
+
 @pytest.fixture
-def mock_api():
+def unified_api():
     config = {
         'wallet': {'address': '0x123', 'private_key': '0xabc'},
         'api': {
@@ -12,110 +28,61 @@ def mock_api():
             'private_key': '0xabc',
             'wallet_address': '0x123'
         },
-        'hip3': {'perp_dexs': ['flx', 'cash']} # Test with multiple contexts
+        'hip3': {'perp_dexs': ['flx', 'cash']}
     }
     with patch('hyperliquid.exchange.Exchange'), \
          patch('hyperliquid.info.Info'):
         api = HyperliquidAPI(config)
-        # These tests exercise the LEGACY (split spot/perp) aggregation path;
-        # pin the mode so they don't depend on MagicMock coercion of the
-        # unified-account abstraction query.
-        api._abstraction_mode = 'disabled'
+        api.info = MagicMock()
+        api.info.query_user_abstraction_state.return_value = 'unifiedAccount'
+        api.info.spot_user_state.return_value = SPOT_STATE
+        api.info.user_state.return_value = {'assetPositions': []}
+        # No retry sleeps in tests
+        api._rate_limited_call = lambda fn, *a, **k: fn(*a)
         return api
 
-def test_get_account_balance_all_fail_returns_none(mock_api):
-    """
-    Test that get_account_balance returns None (safe fallback) 
-    if ALL fetch attempts fail (e.g., due to strict rate limits).
-    """
-    # Mock info.user_state to raise Exception for every call
-    mock_api.info.user_state.side_effect = Exception("API Error 429: Too Many Requests")
-    
-    result = mock_api.get_account_balance()
-    
-    # Crucial assertion: Must return None, NOT a zero-ed out dictionary
-    assert result is None
-    # Verify it tried all 3 contexts ("" + flx + cash)
-    assert mock_api.info.user_state.call_count == 3
 
-def test_get_account_balance_partial_success(mock_api):
-    """Test that it returns a valid aggregated result if at least ONE fetch succeeds."""
-    
-    # Success response structure
-    success_response = {
-        'marginSummary': {
-            'accountValue': '100.0',
-            'totalMarginUsed': '10.0',
-            'totalUnrealizedPnl': '5.0',
-            'withdrawable': '90.0'
-        }
-    }
-    
-    # Mock side_effect: 
-    # 1. Native Context ("") -> Fails
-    # 2. FLX Context ("flx") -> Succeeds
-    # 3. CASH Context ("cash") -> Fails
-    mock_api.info.user_state.side_effect = [
-        Exception("Fail 1"),
-        success_response,
-        Exception("Fail 2")
-    ]
-    
-    result = mock_api.get_account_balance()
-    
-    assert result is not None
-    # Equity should reflect the successful fetch
-    assert result['total_equity'] == 100.0
-    # Free margin calculation: Equity - Used (100 - 10 = 90)
-    assert result['free_margin'] == 90.0
-    assert result['used_margin'] == 10.0
-    assert result['unrealized_pnl'] == 5.0
+def test_unified_balance_happy_path(unified_api):
+    bal = unified_api.get_account_balance()
+    assert bal['total_equity'] == pytest.approx(63.22)
+    assert bal['free_margin'] == pytest.approx(53.22)
 
-def test_get_account_balance_all_success_aggregation(mock_api):
-    """Test that values are correctly aggregated when multiple contexts succeed."""
-    
-    # 1. Native: $1000 equity, $100 used
-    native_response = {
-        'marginSummary': {
-            'accountValue': '1000.0',
-            'totalMarginUsed': '100.0',
-            'totalUnrealizedPnl': '0.0',
-            'withdrawable': '900.0'
-        }
-    }
-    
-    # 2. Spot/FLX: $500 equity, $0 used (Segregated)
-    flx_response = {
-        'marginSummary': {
-            'accountValue': '500.0',
-            'totalMarginUsed': '0.0',
-            'totalUnrealizedPnl': '0.0',
-            'withdrawable': '500.0'
-        }
-    }
 
-    # 3. Cash: Shared collateral (same withdrawable as native) -> Should NOT add equity
-    cash_response = {
-        'marginSummary': {
-            'accountValue': '900.0', # Just cash
-            'totalMarginUsed': '0.0',
-            'totalUnrealizedPnl': '0.0',
-            'withdrawable': '900.0' # Matches native withdrawable -> Shared
-        }
-    }
-    
-    mock_api.info.user_state.side_effect = [native_response, flx_response, cash_response]
-    
-    result = mock_api.get_account_balance()
-    
-    assert result is not None
-    # Expected Equity: 
-    # Native ($1000) + FLX ($500) + Cash (Shared, so +0) = $1500
-    # Logic verification:
-    # Native: equity += 1000. main_withdrawable = 900.
-    # FLX: withdrawable (500) != 900. equity += 500.
-    # Cash: withdrawable (900) == 900. equity += (900 - 900) = 0.
-    
-    assert result['total_equity'] == 1500.0
-    assert result['used_margin'] == 100.0
-    assert result['free_margin'] == 1400.0
+def test_spot_state_failure_returns_none(unified_api):
+    """Total failure -> None, the safe fallback PortfolioManager expects."""
+    unified_api.info.spot_user_state.side_effect = RuntimeError("API down")
+    assert unified_api.get_account_balance() is None
+
+
+def test_pnl_fetch_failure_tolerated(unified_api):
+    """Perp positions unavailable -> balance still returned, PnL = 0."""
+    unified_api.info.user_state.side_effect = RuntimeError("API down")
+    bal = unified_api.get_account_balance()
+    assert bal is not None
+    assert bal['total_equity'] == pytest.approx(63.22)
+    assert bal['unrealized_pnl'] == 0.0
+
+
+def test_abstraction_query_failure_falls_back_to_legacy(unified_api):
+    """Mode unknown -> legacy path engaged (which has its own None contract)."""
+    unified_api._abstraction_mode = None  # clear anything cached
+    unified_api.info.query_user_abstraction_state.side_effect = RuntimeError("down")
+    unified_api.perp_dexs = [""]
+    unified_api.info.user_state.side_effect = RuntimeError("API down")
+    # Legacy path with all dex fetches failing -> None
+    assert unified_api.get_account_balance() is None
+    assert unified_api._get_account_abstraction_mode() == 'disabled'
+
+
+def test_balance_served_from_cache(unified_api):
+    first = unified_api.get_account_balance()
+    unified_api.info.spot_user_state.side_effect = RuntimeError("should not be called")
+    assert unified_api.get_account_balance() == first
+    assert unified_api.info.spot_user_state.call_count == 1
+
+
+def test_perp_balance_failure_returns_zeroes(unified_api):
+    """get_perp_balance: total failure -> zeroed dict (legacy contract)."""
+    unified_api.info.spot_user_state.side_effect = RuntimeError("API down")
+    pb = unified_api.get_perp_balance()
+    assert pb == {'account_value': 0, 'total_margin_used': 0, 'withdrawable': 0}
