@@ -3919,7 +3919,18 @@ class StrategyManager:
                 'percentage': percentage,
                 'notional_value': position.size * position.entry_price
             }
-        
+
+        # Multi-leg positions consume the same capital budget (position-logic
+        # parity: the allocation cap must see BOTH position types)
+        for position_id, ml_pos in list(self.multi_leg_positions.items()):
+            capital_at_risk = ml_pos.capital_at_risk or ml_pos.total_notional
+            total_capital_at_risk += capital_at_risk
+            position_details[position_id] = {
+                'value': capital_at_risk,
+                'percentage': (capital_at_risk / total_equity) * 100 if total_equity > 0 else 0.0,
+                'notional_value': ml_pos.total_notional,
+            }
+
         # Handle division by zero
         if total_equity <= 0:
             allocation_percentage = 0.0
