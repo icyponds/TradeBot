@@ -1592,11 +1592,32 @@ class StrategyManager:
         force_close_threshold = self.STALE_DATA_FORCE_CLOSE_THRESHOLDS.get(timeframe, 600)
         
         # Calculate how long data has been stale for this symbol
-        last_tick_time = self.market_api._symbol_last_tick.get(symbol)
+        tick_map = getattr(self.market_api, '_symbol_last_tick', None)
+        last_tick_time = tick_map.get(symbol) if tick_map is not None else None
         if last_tick_time is None:
-            stale_duration = float('inf')
-        else:
-            stale_duration = time.time() - last_tick_time
+            # Missing timestamp means UNKNOWN, not infinitely stale. Treating
+            # it as inf force-closed xyz:GOLD during a 74s WebSocket blip
+            # (2026-06-11, 'data stale for infs') and re-entered a minute
+            # later — fee churn for a phantom outage. Probe REST; either way
+            # seed the clock so a force-close only ever follows a MEASURED
+            # outage of threshold length.
+            if tick_map is not None:
+                tick_map[symbol] = time.time()
+            try:
+                probe_price = self.market_api.get_current_price(symbol)
+            except Exception:
+                probe_price = None
+            if probe_price:
+                self.logger.info(
+                    f"[{symbol}] No tick timestamp but REST price available "
+                    f"({probe_price}) — staleness clock seeded, managing normally")
+                self._check_exit_conditions_with_price(symbol, position, probe_price)
+            else:
+                self.logger.warning(
+                    f"[{symbol}] No tick timestamp and REST probe failed — "
+                    f"measuring stale window from now (threshold {force_close_threshold}s)")
+            return
+        stale_duration = time.time() - last_tick_time
         
         self.logger.warning(
             f"[{symbol}] Data stale for {stale_duration:.1f}s (threshold: {force_close_threshold}s for {timeframe})"
