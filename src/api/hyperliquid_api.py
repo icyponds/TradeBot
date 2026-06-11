@@ -2451,13 +2451,87 @@ class HyperliquidAPI(MarketInterface):
     # ACCOUNT & POSITIONS
     # =========================================================================
     
+    def _get_account_abstraction_mode(self) -> str:
+        """
+        Account abstraction mode: 'unifiedAccount' | 'portfolioMargin' |
+        'disabled' (legacy split spot/perp wallets).
+
+        Hyperliquid's Dec-2025 upgrade merged spot and perp balances for
+        unified/portfolio-margin accounts; for those, per-dex perp user
+        states are NOT meaningful and all balances/holds live in the spot
+        clearinghouse state. Cached for the process lifetime (mode changes
+        require an explicit user action); falls back to 'disabled' so the
+        legacy path remains the default on query failure.
+        """
+        mode = getattr(self, '_abstraction_mode', None)
+        if mode is not None:
+            return mode
+        try:
+            def _query():
+                return self.info.query_user_abstraction_state(self.public_account_address)
+            state = self._rate_limited_call(_query, weight=2)
+            mode = state if state in ('unifiedAccount', 'portfolioMargin') else 'disabled'
+            self.logger.info(f"Account abstraction mode: {state} -> using "
+                             f"{'unified' if mode != 'disabled' else 'legacy'} balance accounting")
+        except Exception as e:
+            self.logger.warning(f"Could not query account abstraction state ({e}); "
+                                f"assuming legacy split wallets")
+            mode = 'disabled'
+        self._abstraction_mode = mode
+        return mode
+
+    def _get_unified_balance(self) -> Optional[Dict[str, Any]]:
+        """
+        Balance for unified/portfolio-margin accounts: USDC collateral and
+        free margin come from the SPOT clearinghouse state
+        (tokenToAvailableAfterMaintenance, token 0 = USDC); unrealized PnL
+        still comes from the perp positions.
+        """
+        spot_state = self.info.spot_user_state(self.public_account_address)
+        usdc_total = 0.0
+        for bal in (spot_state or {}).get('balances', []):
+            if bal.get('coin') == 'USDC':
+                usdc_total = float(bal.get('total', 0))
+                break
+
+        available = usdc_total
+        for token, amount in (spot_state or {}).get('tokenToAvailableAfterMaintenance', []):
+            if token == 0:  # USDC
+                available = float(amount)
+                break
+
+        unrealized_pnl = 0.0
+        try:
+            user_state = self.info.user_state(self.public_account_address)
+            for ap in (user_state or {}).get('assetPositions', []):
+                unrealized_pnl += float(ap.get('position', {}).get('unrealizedPnl', 0))
+        except Exception as e:
+            self.logger.debug(f"Unified balance: could not read perp positions for PnL: {e}")
+
+        total_equity = usdc_total + unrealized_pnl
+        return {
+            'wallet_address': self.public_account_address,
+            'total_equity': total_equity,
+            'free_margin': available,
+            'used_margin': max(0.0, total_equity - available),
+            'unrealized_pnl': unrealized_pnl,
+        }
+
     def get_account_balance(self) -> Optional[Dict[str, Any]]:
         """Get account balance and margin information."""
         cache_key = "account_balance"
         cached = self.cache.get(cache_key)
         if cached is not None:
             return cached
-        
+
+        if self._get_account_abstraction_mode() != 'disabled':
+            def _fetch_unified():
+                result = self._get_unified_balance()
+                if result is not None:
+                    self.cache.set(cache_key, result, ttl=self.cache_ttl_positions)
+                return result
+            return self._rate_limited_call(_fetch_unified)
+
         def _fetch():
             # Iterate through all discovered DEXs to aggregate balance
             # HIP-3/Spot assets live in different contexts
@@ -2672,9 +2746,26 @@ class HyperliquidAPI(MarketInterface):
     
     def get_perp_balance(self) -> Dict[str, float]:
         """Get perp account balance and margin info."""
+        # Unified/portfolio-margin accounts: the perp marginSummary is not
+        # meaningful — collateral lives in the spot clearinghouse state.
+        if self._get_account_abstraction_mode() != 'disabled':
+            try:
+                unified = self._rate_limited_call(self._get_unified_balance)
+                if unified:
+                    return {
+                        'account_value': unified['total_equity'],
+                        'total_margin_used': unified['used_margin'],
+                        'withdrawable': unified['free_margin'],
+                        'total_ntl_pos': 0.0,
+                        'unrealized_pnl': unified['unrealized_pnl'],
+                    }
+            except Exception as e:
+                self.logger.error(f"Error getting unified perp balance: {e}")
+                return {'account_value': 0, 'total_margin_used': 0, 'withdrawable': 0}
+
         def _fetch():
             return self.info.user_state(self.public_account_address)
-        
+
         try:
             user_state = self._rate_limited_call(_fetch, weight=2)
             margin_summary = user_state.get('marginSummary', {})
