@@ -29,6 +29,7 @@ class TestHyperliquidAPI:
         
         # Mock the SDK Info client
         api_client.info = MagicMock()
+        api_client.info.name_to_coin = {'BTC': 'BTC'}  # SDK knows the symbol
         
         # Ensure it passes "is_valid_perp" check
         with patch.object(api_client, '_get_asset_info_for_symbol', return_value={'name': 'BTC', 'szDecimals': 2}):
@@ -54,6 +55,7 @@ class TestHyperliquidAPI:
         # BUT get_ohlcv now catches exceptions to attempt fallback.
         
         api_client.info = MagicMock()
+        api_client.info.name_to_coin = {'BTC': 'BTC'}  # SDK knows the symbol
         # Mock initial failure (KeyError triggers fallback)
         api_client.info.candles_snapshot.side_effect = KeyError("Symbol not found")
         # Mock fallback failure too (post method)
@@ -74,6 +76,7 @@ class TestHyperliquidAPI:
     def test_get_ohlcv_retry_logic(self, api_client):
         """Test retry logic - verifies retryable errors trigger retries."""
         api_client.info = MagicMock()
+        api_client.info.name_to_coin = {'BTC': 'BTC'}  # SDK knows the symbol
         # Fail twice with retryable errors (timeout), then succeed
         # Note: retry patterns include "timeout", "connection refused", etc.
         api_client.info.candles_snapshot.side_effect = [

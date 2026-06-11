@@ -18,6 +18,8 @@ class TestHIP3Discovery:
                 {'universe': [{'name': 'BTC', 'maxLeverage': 50}]}, 
                 [{'markPx': '50000', 'dayNtlVlm': '1000'}]
             )
+            # SDK symbol map: 'BTC' resolvable via the SDK wrapper path
+            mock_info_instance.name_to_coin = {'BTC': 'BTC'}
             # Mock dex list
             mock_info_instance.perp_dexs.return_value = [
                 {'name': ''}, # Native
