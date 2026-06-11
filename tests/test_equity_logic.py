@@ -23,6 +23,10 @@ class TestEquityAggregation:
             api = HyperliquidAPI(config)
             api.exchange = MagicMock()
             api.info = MagicMock()
+            # These tests exercise the LEGACY (split spot/perp) aggregation
+            # path; pin the mode so they don't depend on MagicMock coercion
+            # of the unified-account abstraction query.
+            api._abstraction_mode = 'disabled'
             return api
 
     def test_shared_collateral_aggregation(self, mock_api):

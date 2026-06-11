@@ -17,6 +17,10 @@ def mock_api():
     with patch('hyperliquid.exchange.Exchange'), \
          patch('hyperliquid.info.Info'):
         api = HyperliquidAPI(config)
+        # These tests exercise the LEGACY (split spot/perp) aggregation path;
+        # pin the mode so they don't depend on MagicMock coercion of the
+        # unified-account abstraction query.
+        api._abstraction_mode = 'disabled'
         return api
 
 def test_get_account_balance_all_fail_returns_none(mock_api):
