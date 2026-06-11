@@ -2,6 +2,22 @@
 
 This document outlines critical development rules and patterns for the TradeBot codebase. All agents modifying this repo MUST adhere to these rules.
 
+## 0. Unit Tests for Every Change
+
+**Every code change MUST ship with unit tests in the same commit** — new
+features, bug fixes, and behavior changes alike.
+
+*   **Bug fixes**: write a test that reproduces the failure mode being fixed
+    (it should fail on the pre-fix code). Reference the incident in the test
+    docstring when one exists (e.g. "live failure 2026-06-11: ...").
+*   **New features/parameters**: cover the enabled path, the default/disabled
+    path, and failure handling.
+*   **Run the FULL suite before committing and verify pytest's exit code
+    directly.** Never gate a commit on `pytest ... | tail` or any pipeline —
+    the pipe masks pytest's exit status and has shipped broken code to main.
+*   Exceptions (comment-only edits, log-message wording) should be rare and
+    called out explicitly in the commit message.
+
 ## 1. Market API Parity
 
 The system architecture relies on the **Mock API** being a functional mirror of the **Real API** to ensure backtests remain valid.
