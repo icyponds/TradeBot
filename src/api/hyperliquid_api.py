@@ -2000,9 +2000,15 @@ class HyperliquidAPI(MarketInterface):
             
             # Try using SDK wrapper first, fallback to direct call if symbol unknown (common for HIP-3)
             candles = []
-            # Try using SDK wrapper first, fallback to direct call if symbol unknown (common for HIP-3)
-            candles = []
+            # Symbols missing from the SDK's name_to_coin map (internal spot
+            # names like BERA_SPOT, new HIP-3 listings) are EXPECTED to use
+            # the raw fallback — check membership instead of letting the
+            # KeyError flow through _rate_limited_call, which logs an ERROR
+            # and records a spurious circuit-breaker failure each time.
+            sdk_knows_symbol = api_symbol in getattr(self.info, 'name_to_coin', {})
             try:
+                if not sdk_knows_symbol:
+                    raise KeyError(api_symbol)
                 # This uses info.name_to_coin map which might miss new HIP-3 assets
                 def _fetch_candles():
                     return self.info.candles_snapshot(api_symbol, timeframe, start_time, end_time)
