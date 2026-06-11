@@ -3161,6 +3161,53 @@ class StrategyManager:
         self._whipsaw_cache = (now, active)
         return active
 
+    # Tokenized / denominated variants that are the same economic underlying
+    # as another tradeable asset. Dex prefixes (xyz:GOLD, cash:GOLD) and
+    # _SPOT suffixes are stripped automatically; this map covers the rest.
+    UNDERLYING_ALIASES = {
+        'PAXG': 'GOLD', 'XAUT': 'GOLD',
+        'UBTC': 'BTC', 'UETH': 'ETH', 'USOL': 'SOL',
+        'KPEPE': 'PEPE', 'KBONK': 'BONK', 'KSHIB': 'SHIB',
+        'KFLOKI': 'FLOKI', 'KLUNC': 'LUNC', 'KNEIRO': 'NEIRO',
+    }
+
+    def _underlying_key(self, symbol: str) -> str:
+        """Economic underlying for a symbol: 'xyz:GOLD' -> 'GOLD',
+        'PAXG' -> 'GOLD', 'BTC_SPOT' -> 'BTC'."""
+        base = symbol.split(':', 1)[1] if ':' in symbol else symbol
+        if base.endswith('_SPOT'):
+            base = base[:-5]
+        base = base.upper()
+        return self.UNDERLYING_ALIASES.get(base, base)
+
+    def _underlying_concentration_blocked(self, symbol: str) -> bool:
+        """
+        Block a new entry when ANY open position already carries the same
+        economic underlying (live failure mode 2026-06-10: csm shorted
+        xyz:GOLD and PAXG in the same cycle — double exposure to gold that
+        rank-based selection and per-symbol conflict checks cannot see).
+        Existing positions are never closed by this check.
+        """
+        uc = (self.config.get("risk_management", {}) or {}).get("underlying_concentration", {}) or {}
+        if not uc.get("enabled", True):
+            return False
+
+        key = self._underlying_key(symbol)
+        for open_symbol in list(self.positions.keys()):
+            if open_symbol != symbol and self._underlying_key(open_symbol) == key:
+                self.logger.info(
+                    f"Skipping {symbol}: open position {open_symbol} shares "
+                    f"underlying '{key}' (concentration guard)")
+                return True
+        for pos_id, ml_pos in list(self.multi_leg_positions.items()):
+            for leg in getattr(ml_pos, 'legs', []) or []:
+                if self._underlying_key(leg.symbol) == key:
+                    self.logger.info(
+                        f"Skipping {symbol}: multi-leg {pos_id} has leg "
+                        f"{leg.symbol} sharing underlying '{key}' (concentration guard)")
+                    return True
+        return False
+
     def _should_execute_signal(self, symbol: str, signal: Dict[str, Any], current_price: float,
                                ohlcv: Dict[str, pd.DataFrame], strategy_name: str) -> bool:
         """Determine if we should execute a trading signal."""
@@ -3225,6 +3272,12 @@ class StrategyManager:
         # 2a-ter. Market-level whipsaw lockout (crash-chop tape)
         # ---------------------------------------------------------
         if self._whipsaw_lockout_active():
+            return False
+
+        # ---------------------------------------------------------
+        # 2a-quater. Same-underlying concentration guard
+        # ---------------------------------------------------------
+        if self._underlying_concentration_blocked(symbol):
             return False
 
         # ---------------------------------------------------------

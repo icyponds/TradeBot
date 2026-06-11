@@ -1381,6 +1381,14 @@ class HyperliquidAPI(MarketInterface):
                     time.sleep(wait_time)
                     continue
 
+                # Known benign server hiccup: Hyperliquid sporadically answers
+                # HTTP 500 with body 'null'; the identical request succeeds on
+                # the next cycle. Fail fast and quietly — no ERROR noise, no
+                # circuit-breaker pollution from a server-side blip.
+                if "(500, 'null')" in str(e):
+                    self.logger.warning(f"Hyperliquid transient 500-null (benign, not retried): {e}")
+                    raise
+
                 # If not retryable or max retries reached:
                 self.circuit_breaker.record_failure()
                 self.logger.error(f"API Call Failed (attempt {attempt+1}/{max_retries+1}): {e}")
