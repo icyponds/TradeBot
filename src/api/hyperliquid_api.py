@@ -3155,18 +3155,20 @@ class HyperliquidAPI(MarketInterface):
                 # The SDK's name_to_coin mapping expects this full prefixed format
                 # e.g., 'xyz:TSLA' -> 'xyz:TSLA' is in the mapping, but 'TSLA' is NOT
                 clean_symbol = symbol  # Keep prefix for SDK - it's required
-                
-                # For asset_info lookup, we may need to strip the prefix
-                lookup_symbol = symbol
-                if ":" in symbol:
-                    lookup_symbol = symbol.split(":", 1)[1]
-                
-                asset_info = self._get_asset_info_for_symbol(lookup_symbol)
+
+                # Asset-info lookup handles both prefixed ('xyz:GOLD') and
+                # bare names internally; pass the symbol as-is.
+                asset_info = self._get_asset_info_for_symbol(symbol)
                 price = self.get_current_price(symbol) # This handles stripping internally now
-                
+
                 if not price:
                     return None
-                
+
+                if not asset_info:
+                    self.logger.warning(
+                        f"No asset metadata for {symbol}; defaulting sz_decimals=2 "
+                        f"(small orders on high-priced assets may round to zero)")
+
                 return {
                     'symbol': clean_symbol, # Important: Pass stripped symbol to SDK
                     'display_symbol': symbol,
@@ -4634,18 +4636,25 @@ class HyperliquidAPI(MarketInterface):
     def _get_asset_info_for_symbol(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Get asset info for a specific symbol."""
         asset_info = self.get_asset_info()
-        
-        # Handle prefixes
-        clean_symbol = symbol
-        if ":" in symbol:
-            parts = symbol.split(":", 1)
-            if parts[0].isdigit():
-                clean_symbol = parts[1]
+        if not asset_info:
+            return None
+        universe = asset_info.get('universe', [])
 
-        if asset_info:
-            for asset in asset_info.get('universe', []):
-                if asset['name'] == clean_symbol:
-                    return asset
+        # Exact match first: HIP-3 entries are stored dex-prefixed
+        # ('xyz:GOLD'), and stripping the prefix before lookup made them
+        # unfindable — callers then fell back to sz_decimals=2, which
+        # rounded small high-priced orders (e.g. 0.0031 GOLD) down to a
+        # $0 order.
+        for asset in universe:
+            if asset['name'] == symbol:
+                return asset
+
+        # Fallback: strip "<prefix>:" (numeric coin ids like "147:GOLD"
+        # and any dex prefix) and match the bare name.
+        clean_symbol = symbol.split(":", 1)[1] if ":" in symbol else symbol
+        for asset in universe:
+            if asset['name'] == clean_symbol:
+                return asset
         return None
     
     def _get_tick_size(self, price: float) -> float:
