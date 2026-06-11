@@ -4035,8 +4035,9 @@ class StrategyManager:
         """Update current prices and margin info for all open positions."""
         now = time.time()
         
-        # Update single-leg positions
-        for symbol, position in self.positions.items():
+        # Update single-leg positions (snapshot: the exit-monitor thread
+        # iterates while the main cycle may add/remove positions)
+        for symbol, position in list(self.positions.items()):
             current_price = self.market_api.get_current_price(symbol)
             if current_price:
                 position.current_price = current_price
@@ -4053,8 +4054,8 @@ class StrategyManager:
                 except Exception as e:
                     self.logger.debug(f"Error caching margin info for {symbol}: {e}")
         
-        # Update multi-leg positions
-        for position_id, position in self.multi_leg_positions.items():
+        # Update multi-leg positions (snapshot, same race)
+        for position_id, position in list(self.multi_leg_positions.items()):
             for leg in position.legs:
                 leg_price = self._get_leg_price(leg.symbol, leg.market_type)
                 if leg_price:
@@ -4069,7 +4070,7 @@ class StrategyManager:
         total_unrealized_pnl = 0.0
         total_capital_at_risk = 0.0
         
-        for symbol, position in self.positions.items():
+        for symbol, position in list(self.positions.items()):
             if position.current_price is None:
                 continue
             
@@ -4100,7 +4101,7 @@ class StrategyManager:
         
         # Add multi-leg positions
         multi_leg_summary = []
-        for position_id, position in self.multi_leg_positions.items():
+        for position_id, position in list(self.multi_leg_positions.items()):
             unrealized_pnl = position.unrealized_pnl
             capital_at_risk = position.capital_at_risk or position.total_notional
             
@@ -4267,7 +4268,7 @@ class StrategyManager:
             # Check for positions that need to be closed
             positions_to_close = []
             
-            for symbol, position in self.positions.items():
+            for symbol, position in list(self.positions.items()):
                 if not position.current_price:
                     # CRITICAL: Never silently skip - force fetch price with retry
                     self.logger.warning(f"⚠️ No price for open position {symbol}, forcing fetch...")
