@@ -171,3 +171,7 @@ log/
 # macOS specific
 .DS_Store
 test_output.txt
+
+# SQLite WAL/SHM sidecar files (transient)
+tests/test_trades.db-shm
+tests/test_trades.db-wal

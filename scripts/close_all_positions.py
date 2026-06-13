@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 """
-Emergency Position Cleanup Script
+Explicit Close-All-Positions Command
 
-Use this script to close all open positions if the bot crashed or was killed with 'kill -9'.
-This is a standalone script that doesn't require the bot to be running.
+Flattens the entire book with reduce-only market orders, across the native
+and HIP-3 (xyz/...) perp dexes. Standalone — does not require the bot to be
+running, so it also doubles as crash/`kill -9` cleanup.
+
+This is OPT-IN by design: the bot KEEPS positions on shutdown by default
+(settings: system.close_on_shutdown = False) so routine restarts for code
+changes don't churn the book. Run this when you genuinely want to wind down.
 
 Usage:
-    python scripts/close_all_positions.py [--dry-run]
+    python scripts/close_all_positions.py             # flatten everything
+    python scripts/close_all_positions.py --dry-run   # preview, no orders
 
 Options:
     --dry-run    Show positions that would be closed without actually closing them
@@ -21,6 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.config.settings import load_config
 from src.api.hyperliquid_api import HyperliquidAPI
+from src.utils.position_close import plan_close_order, order_succeeded
 
 
 def main():
@@ -30,7 +37,7 @@ def main():
     args = parser.parse_args()
     
     print("=" * 60)
-    print("EMERGENCY POSITION CLEANUP")
+    print("CLOSE ALL POSITIONS" + ("  [DRY RUN]" if args.dry_run else ""))
     print("=" * 60)
     
     # Load configuration
@@ -88,31 +95,27 @@ def main():
     
     for pos in positions:
         symbol = pos.get('symbol', '?')
-        size = float(pos.get('size', 0))
-        
-        if size == 0:
-            continue
-        
-        # Close by placing opposite market order
-        close_side = 'sell' if size > 0 else 'buy'
-        close_size = abs(size)
-        
+        order = plan_close_order(pos)
+        if order is None:
+            continue  # zero/dust size, nothing to close
+
         try:
             result = api.place_order(
-                symbol=symbol,
-                side=close_side,
-                size=close_size,
-                order_type='market',
-                reduce_only=True
+                symbol=order['symbol'],
+                side=order['side'],
+                size=order['size'],
+                order_type=order['order_type'],
+                reduce_only=order['reduce_only'],
             )
-            
-            if result and result.get('status') == 'ok':
-                print(f"  ✓ Closed {symbol}")
+
+            if order_succeeded(result):
+                status = result.get('status')
+                print(f"  ✓ Closed {symbol} ({status})")
                 success_count += 1
             else:
                 print(f"  ✗ Failed to close {symbol}: {result}")
                 fail_count += 1
-                
+
         except Exception as e:
             print(f"  ✗ Error closing {symbol}: {e}")
             fail_count += 1

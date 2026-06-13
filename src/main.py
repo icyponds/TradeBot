@@ -3,13 +3,23 @@
 Main entry point for the trading bot.
 
 SHUTDOWN BEHAVIOR:
-- Ctrl+C (SIGINT): Graceful shutdown, closes all positions
-- kill <pid> (SIGTERM): Graceful shutdown, closes all positions  
-- Terminal closed (SIGHUP): Graceful shutdown, closes all positions
-- kill -9 <pid> (SIGKILL): CANNOT BE CAUGHT - positions remain open!
-  Use the cleanup script or exchange UI to close positions manually.
+Ctrl+C (SIGINT), kill <pid> (SIGTERM), and terminal close (SIGHUP) all
+trigger a graceful shutdown: threads are stopped cleanly and open positions
+are persisted to the database so the next start resumes managing them.
 
-For safety, always use Ctrl+C or regular 'kill' to stop the bot.
+Open positions are KEPT by default (system.close_on_shutdown = False) so a
+routine restart for a code change does not churn the book (fees + slippage +
+lost entries). To flatten the book instead, either set
+system.close_on_shutdown = True, or run the explicit close command:
+
+    python scripts/close_all_positions.py             # flatten everything
+    python scripts/close_all_positions.py --dry-run   # preview only
+
+- kill -9 <pid> (SIGKILL): CANNOT BE CAUGHT - threads die immediately.
+  Open positions are simply left as-is on the exchange (same as the default
+  KEEP behavior); use the close command or exchange UI to flatten manually.
+
+For a clean stop, always use Ctrl+C or regular 'kill' (never 'kill -9').
 """
 
 import logging
