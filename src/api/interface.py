@@ -58,6 +58,14 @@ class MarketInterface(ABC):
         pass
 
     @abstractmethod
+    def place_stop_order(self, symbol: str, side: str, size: float,
+                         trigger_price: float, reduce_only: bool = True,
+                         is_market: bool = True) -> Optional[Dict[str, Any]]:
+        """Place a native reduce-only stop (trigger) order that rests on the
+        exchange and fires independently of the bot."""
+        pass
+
+    @abstractmethod
     def get_positions(self) -> List[Dict[str, Any]]:
         """Get current open positions."""
         pass

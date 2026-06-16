@@ -403,10 +403,14 @@ class ExecutionEngine:
                 self.total_trades += 1
                 
                 self.logger.info(f"✅ Executed {side} trade for {symbol}: {fill_size} @ {fill_price:.6f}")
-                
+
+                # Rest a native protective stop on the exchange (best-effort;
+                # the in-process stops still apply if this fails).
+                self._place_native_stop(position)
+
                 # Persist position atomically to database
                 self._persist_position(position)
-                
+
             else:
                 self.logger.error(f"Failed to fill order for {symbol}")
                 
@@ -425,6 +429,11 @@ class ExecutionEngine:
             position = self.positions[symbol]
             close_side = 'sell' if position.side == 'long' else 'buy'
             urgency = "high" if any(kw in reason for kw in ['stop_loss', 'liquidation_risk', 'emergency']) else "normal"
+
+            # Cancel the resting native stop first so it can't orphan on the
+            # exchange and fire against a later re-entry. Best-effort: a missed
+            # cancel is harmless (reduce-only), a missed close is not.
+            self._cancel_native_stop(position)
             
             # Determine market type from symbol
             market_type = 'spot' if symbol.endswith('_SPOT') else 'perp'
@@ -1429,6 +1438,63 @@ class ExecutionEngine:
         except Exception as e:
             self.logger.warning(f"Failed to inject stat_arb metadata: {e}")
 
+    def _native_stops_enabled(self) -> bool:
+        """Whether exchange-native protective stops are turned on."""
+        return bool(
+            self.config.get('risk_management', {})
+            .get('native_stop_orders', {})
+            .get('enabled', False)
+        )
+
+    def _place_native_stop(self, position) -> None:
+        """Rest a reduce-only stop-market on the exchange for an open position.
+
+        Defense in depth: this stop fires independently of the bot, so it still
+        protects when the in-process exit loop hangs or the process crashes
+        (added after the 2026-06-11 deadlock froze in-process stops ~43h).
+        Best-effort and fail-open — never let a stop-placement failure abort the
+        trade that already filled.
+        """
+        if not self._native_stops_enabled():
+            return
+        if not getattr(position, 'stop_loss', None):
+            return
+        if not hasattr(self.market_api, 'place_stop_order'):
+            return
+        try:
+            # The protective order closes the position: sell a long, buy a short.
+            stop_side = 'sell' if position.side == 'long' else 'buy'
+            result = self.market_api.place_stop_order(
+                symbol=position.symbol,
+                side=stop_side,
+                size=abs(position.size),
+                trigger_price=position.stop_loss,
+                reduce_only=True,
+                is_market=True,
+            )
+            if result and result.get('order_id'):
+                position.stop_order_id = result['order_id']
+            else:
+                self.logger.warning(
+                    f"Native stop not placed for {position.symbol} "
+                    f"(in-process stops still active): {result}")
+        except Exception as e:
+            self.logger.error(f"Error placing native stop for {position.symbol}: {e}")
+
+    def _cancel_native_stop(self, position) -> None:
+        """Cancel a position's resting native stop, if any. Best-effort."""
+        stop_oid = getattr(position, 'stop_order_id', None)
+        if not stop_oid:
+            return
+        if not hasattr(self.market_api, 'cancel_order'):
+            return
+        try:
+            self.market_api.cancel_order(position.symbol, stop_oid)
+        except Exception as e:
+            self.logger.warning(f"Error cancelling native stop {stop_oid} for {position.symbol}: {e}")
+        finally:
+            position.stop_order_id = None
+
     def _persist_position(self, position) -> bool:
         """
         Atomically save a single position to the database.
@@ -1451,7 +1517,10 @@ class ExecutionEngine:
                 'highest_price': getattr(position, 'highest_price', None),
                 'lowest_price': getattr(position, 'lowest_price', None),
                 'trailing_stop_active': getattr(position, 'trailing_stop_active', False),
-                'leverage': position.leverage
+                'leverage': position.leverage,
+                # Persist so a resting native stop can be cancelled after a
+                # restart-driven reload (else it would orphan on the exchange).
+                'stop_order_id': getattr(position, 'stop_order_id', None),
             }
             
             position_data = {
@@ -1647,6 +1716,7 @@ class ExecutionEngine:
                             highest_price=metadata.get('highest_price'),
                             lowest_price=metadata.get('lowest_price'),
                             trailing_stop_active=metadata.get('trailing_stop_active', False),
+                            stop_order_id=metadata.get('stop_order_id'),
                         )
                         self.positions[symbol] = position
 

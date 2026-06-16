@@ -582,6 +582,41 @@ class MockMarketAPI(MarketInterface):
         # For now, backtest assumes immediate fills or rejections, so no open orders.
         return []
 
+    def place_stop_order(self, symbol: str, side: str, size: float,
+                         trigger_price: float, reduce_only: bool = True,
+                         is_market: bool = True) -> Optional[Dict[str, Any]]:
+        """Simulate a native stop order.
+
+        Backtests already model stop exits inside the engine's exit checks, so
+        the native stop is a harmless bookkeeping no-op here: it records the
+        intended stop and returns a synthetic order_id so the engine can store
+        and later cancel it, WITHOUT altering simulated fill logic.
+        """
+        self._mock_stop_seq = getattr(self, '_mock_stop_seq', 0) + 1
+        order_id = 900_000_000 + self._mock_stop_seq
+        if not hasattr(self, '_mock_stop_orders'):
+            self._mock_stop_orders = {}
+        self._mock_stop_orders[order_id] = {
+            'symbol': symbol, 'side': side, 'size': abs(size),
+            'trigger_price': trigger_price, 'reduce_only': reduce_only,
+        }
+        return {
+            'order_id': order_id,
+            'symbol': symbol,
+            'side': side,
+            'size': abs(size),
+            'price': trigger_price,
+            'status': 'open',
+            'filled_size': 0.0,
+            'avg_fill_price': 0.0,
+        }
+
+    def cancel_order(self, symbol: str, order_id: int) -> bool:
+        """Simulate cancelling a resting order (e.g. a native stop)."""
+        if hasattr(self, '_mock_stop_orders'):
+            self._mock_stop_orders.pop(order_id, None)
+        return True
+
     def get_user_state(self) -> Dict[str, Any]:
         """Mock get_user_state for PairSelector validation."""
         return {

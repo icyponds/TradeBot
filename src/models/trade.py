@@ -223,7 +223,8 @@ class Position:
     capital_at_risk: Optional[float] = None  # Actual capital at risk
     leverage: Optional[float] = None  # Leverage used for the position
     order_id: Optional[str] = None  # Exchange order ID for traceability
-    
+    stop_order_id: Optional[int] = None  # Resting native stop (trigger) order OID
+
     # Trailing stop fields
     trailing_stop_enabled: bool = False
     trailing_stop_pct: float = 0.0  # e.g., 0.05 = 5% trail
@@ -300,8 +301,10 @@ class Position:
             'highest_price': self.highest_price,
             'lowest_price': self.lowest_price,
             'trailing_stop_active': self.trailing_stop_active,
+            'order_id': self.order_id,
+            'stop_order_id': self.stop_order_id,
         }
-    
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'Position':
         """Create position from dictionary."""
@@ -323,4 +326,6 @@ class Position:
             highest_price=data.get('highest_price'),
             lowest_price=data.get('lowest_price'),
             trailing_stop_active=data.get('trailing_stop_active', False),
-        ) 
+            order_id=data.get('order_id'),
+            stop_order_id=data.get('stop_order_id'),
+        )

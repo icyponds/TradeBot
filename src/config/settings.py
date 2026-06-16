@@ -289,6 +289,16 @@ def load_config() -> Dict[str, Any]:
                 "enabled": True,
                 "max_gross_leverage": 2.0,
             },
+            # Exchange-native protective stops: on entry, also rest a
+            # reduce-only stop-market trigger on the exchange so the stop fires
+            # even if the bot's in-process exit loop hangs or the process
+            # crashes (added after the 2026-06-11 deadlock froze in-process
+            # stops for ~43h). Defense in depth — the in-process realtime and
+            # monitor stops still run. Live-only; the backtest mock simulates
+            # it as a harmless no-op so sim fill logic is unchanged.
+            "native_stop_orders": {
+                "enabled": True,
+            },
             # Same-underlying concentration guard: block a new entry when an
             # open position already carries the same economic underlying
             # (dex-prefix duplicates like xyz:GOLD/cash:GOLD and tokenized

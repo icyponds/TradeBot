@@ -3085,6 +3085,10 @@ class HyperliquidAPI(MarketInterface):
     _ORDER_WALK_DELAY = 0.3  # Seconds between attempts
     _INITIAL_SLIPPAGE_BPS = 50  # 0.5% initial slippage tolerance (aggressive for IOC)
     _MAX_SLIPPAGE_BPS = 100  # 1% max slippage for aggressive fills
+    # Slippage guard on a native stop-MARKET order's limit price. Wide on
+    # purpose: a protective stop must fill once triggered even in a fast move
+    # (the exact scenario it exists for), so we accept worse price for certainty.
+    _STOP_LIMIT_SLIPPAGE_BPS = 500  # 5%
     
     def _resolve_market_info(
         self,
@@ -3681,6 +3685,102 @@ class HyperliquidAPI(MarketInterface):
             self.logger.error(f"Order placement failed: {e}")
             return None
     
+    def place_stop_order(
+        self,
+        symbol: str,
+        side: str,
+        size: float,
+        trigger_price: float,
+        reduce_only: bool = True,
+        is_market: bool = True,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Place a native reduce-only stop (trigger) order on the exchange.
+
+        The order rests on Hyperliquid and fires independently of the bot, so
+        a stop is enforced even if the bot process hangs or crashes — defense
+        in depth on top of the in-process realtime/monitor stops (added after
+        the 2026-06-11 deadlock froze the in-process exit loop for ~43h).
+
+        Args:
+            symbol: Trading symbol.
+            side: Side of the PROTECTIVE order — 'sell' closes a long, 'buy'
+                  closes a short.
+            size: Position size to protect (absolute).
+            trigger_price: Price at which the stop fires.
+            reduce_only: Keep True so the stop can only close, never open.
+            is_market: True = stop-market (fills on trigger); False = stop-limit.
+
+        Note: a 'scheduleCancel' dead man's switch (refreshed every 15s while
+        the main loop lives) will cancel resting orders ~30s after the process
+        fully dies. So this fully covers a hung/wedged-but-alive bot and gives
+        ~30s of cover after a hard crash.
+        """
+        if not self.exchange:
+            self.logger.error("Exchange client not initialized")
+            return None
+
+        try:
+            asset_info = self._get_asset_info_for_symbol(symbol)
+            sz_decimals = asset_info.get('szDecimals', 2) if asset_info else 2
+            rounded_size = round(abs(size), sz_decimals)
+            if rounded_size <= 0:
+                self.logger.error(f"Stop order size rounds to 0 for {symbol} (size={size})")
+                return None
+
+            is_buy = side.lower() == 'buy'
+            trig = self._round_to_tick(
+                trigger_price, symbol=symbol, sz_decimals=sz_decimals, is_perp=True)
+
+            # limit_px caps slippage once the stop triggers. Aggressive in the
+            # fill direction so a stop-market actually fills: a buy stop (closing
+            # a short) must be willing to pay up; a sell stop (closing a long)
+            # must be willing to sell down.
+            slippage = self._STOP_LIMIT_SLIPPAGE_BPS / 10000
+            raw_limit = trig * (1 + slippage) if is_buy else trig * (1 - slippage)
+            limit_px = self._round_to_tick(
+                raw_limit, symbol=symbol, sz_decimals=sz_decimals, is_perp=True)
+
+            order_type = {"trigger": {
+                "triggerPx": trig, "isMarket": is_market, "tpsl": "sl"}}
+
+            response = self._rate_limited_call(
+                self.exchange.order,
+                symbol,
+                is_buy,
+                rounded_size,
+                limit_px,
+                order_type,
+                reduce_only=reduce_only,
+            )
+
+            order_result = self._parse_order_response(
+                response, symbol, side, rounded_size, trig)
+
+            if order_result and order_result.get('order_id'):
+                self.order_tracker.track(TrackedOrder(
+                    order_id=order_result['order_id'],
+                    symbol=symbol,
+                    side=side,
+                    size=rounded_size,
+                    price=trig,
+                    status=order_result.get('status', 'open'),
+                    created_at=datetime.now(),
+                    updated_at=datetime.now(),
+                    filled_size=order_result.get('filled_size', 0),
+                    avg_fill_price=order_result.get('avg_fill_price', 0),
+                ))
+                self.logger.info(
+                    f"🛡️ Native stop placed for {symbol}: {side} {rounded_size} "
+                    f"trigger={trig} (oid={order_result['order_id']})")
+
+            self.cache.invalidate("positions")
+            return order_result
+
+        except Exception as e:
+            self.logger.error(f"Stop order placement failed for {symbol}: {e}")
+            return None
+
     def _parse_order_response(
         self,
         response: Any,
