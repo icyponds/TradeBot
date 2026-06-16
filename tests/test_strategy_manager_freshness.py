@@ -61,46 +61,48 @@ class TestStrategyManagerFreshness:
         assert strategy_manager._is_data_ready_for_symbol(symbol) is True
 
     def test_realtime_trigger_execution(self, strategy_manager):
-        """Test that _on_price_update triggers immediate execution checks."""
+        """_on_price_update detects SL/TP and HANDS OFF the close to the
+        executor queue — it must NOT call close_position inline on the WS
+        thread (live failure 2026-06-11: inline close on the WS thread, while
+        the API _data_lock was held, deadlocked the engine for ~43h)."""
         symbol = "BTC"
-        
-        # Setup position with tight SL/TP
+
         from src.models.trade import Position
         position = Position(
-            symbol=symbol, 
-            side='long', 
-            size=1.0, 
-            entry_price=50000, 
-            current_price=50000, 
+            symbol=symbol,
+            side='long',
+            size=1.0,
+            entry_price=50000,
+            current_price=50000,
             entry_time=datetime.now(),
             strategy='test'
         )
-        # Set TP/SL attributes directly as Position model fields might vary
         position.stop_loss = 49000
         position.take_profit = 51000
-        
+
         strategy_manager.execution_engine.positions = {symbol: position}
-        
-        # Mock execution engine
         strategy_manager.execution_engine.close_position = MagicMock()
-        
-        # Case 1: No trigger (Price inside range)
+
+        def drain():
+            items = []
+            while not strategy_manager._trigger_close_queue.empty():
+                items.append(strategy_manager._trigger_close_queue.get_nowait())
+            # Clear in-flight so the next breach can re-queue (the executor
+            # would normally do this after closing).
+            strategy_manager._trigger_close_inflight.clear()
+            return items
+
+        # Case 1: No trigger (price inside range) -> nothing queued, nothing closed.
         strategy_manager._on_price_update(symbol, 50500, 1234567890)
+        assert drain() == []
         strategy_manager.execution_engine.close_position.assert_not_called()
-        
-        # Case 2: Stop Loss Trigger (Price drops to 48000)
+
+        # Case 2: Stop loss -> queued, NOT closed inline.
         strategy_manager._on_price_update(symbol, 48000, 1234567890)
-        strategy_manager.execution_engine.close_position.assert_called_with(
-            symbol=symbol, 
-            reason="stop_loss_realtime"
-        )
-        
-        # Reset mock
-        strategy_manager.execution_engine.close_position.reset_mock()
-        
-        # Case 3: Take Profit Trigger (Price rises to 52000)
+        strategy_manager.execution_engine.close_position.assert_not_called()
+        assert drain() == [(symbol, "stop_loss_realtime")]
+
+        # Case 3: Take profit -> queued, NOT closed inline.
         strategy_manager._on_price_update(symbol, 52000, 1234567890)
-        strategy_manager.execution_engine.close_position.assert_called_with(
-            symbol=symbol, 
-            reason="take_profit_realtime"
-        )
+        strategy_manager.execution_engine.close_position.assert_not_called()
+        assert drain() == [(symbol, "take_profit_realtime")]

@@ -9,6 +9,7 @@ import sys
 import json
 import random
 import threading
+import queue
 from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime, timedelta
 import pandas as pd
@@ -178,6 +179,27 @@ class StrategyManager:
         # and exit checks running even when the main loop is busy fetching data
         self._exit_monitor_thread: Optional[threading.Thread] = None
         self._position_monitor_lock = threading.RLock()
+        # Heartbeat + generation power the watchdog (live failure 2026-06-11
+        # 13:12: a stop-loss close ran inline on the WS callback thread while
+        # the API _data_lock was held and deadlocked the monitor thread; the
+        # exit loop froze silently for ~43h, so no stop fired for any position).
+        self._monitor_heartbeat_ts: float = 0.0   # set when (re)spawned, bumped each cycle
+        self._monitor_generation: int = 0          # respawn epoch; stale threads exit
+        self._monitor_watchdog_thread: Optional[threading.Thread] = None
+        # Bound on how long a monitor cycle may block acquiring the lock or
+        # complete before the watchdog considers the loop hung.
+        self._monitor_lock_timeout: float = 15.0
+        # Watchdog tunables (kept as attrs so tests can shrink them).
+        self._monitor_staleness_floor: float = 45.0   # don't respawn on brief blips
+        self._monitor_watchdog_interval: float = 5.0  # how often the watchdog checks
+        # Off-thread SL/TP execution: _check_triggers_realtime (WS thread) must
+        # never call close_position directly — it enqueues here and a dedicated
+        # worker drains it, so the WS callback never blocks while holding
+        # _data_lock. This is the direct fix for the 2026-06-11 deadlock.
+        self._trigger_close_queue: "queue.Queue" = queue.Queue()
+        self._trigger_close_inflight: set = set()
+        self._trigger_close_inflight_lock = threading.Lock()
+        self._trigger_executor_thread: Optional[threading.Thread] = None
 
         # Once-per-closed-bar signal gating: {(symbol, strategy_name): bar_ts}
         self._last_signal_bar: Dict[Tuple[str, str], float] = {}
@@ -1765,22 +1787,99 @@ class StrategyManager:
         # Start trading loop
         self.is_running = True
 
+        # Start the off-thread SL/TP executor first so realtime triggers have
+        # a drain target the moment the exit monitor (and WS feed) come up.
+        self._trigger_executor_thread = threading.Thread(
+            target=self._run_trigger_executor_loop,
+            name="trigger-executor",
+            daemon=True
+        )
+        self._trigger_executor_thread.start()
+
         # Start dedicated exit monitor so trailing stops / exit checks keep
         # running even when the main loop is busy analyzing other symbols
+        self._spawn_exit_monitor()
+
+        # Watchdog: detect and recover a hung exit monitor (see __init__ note).
+        self._monitor_watchdog_thread = threading.Thread(
+            target=self._run_monitor_watchdog,
+            name="monitor-watchdog",
+            daemon=True
+        )
+        self._monitor_watchdog_thread.start()
+
+        self._run_trading_loop()
+
+    def _spawn_exit_monitor(self):
+        """Create and start a fresh exit-monitor thread for the current epoch.
+
+        Used at startup and by the watchdog to replace a hung thread. The
+        heartbeat is seeded to 'now' so the watchdog measures staleness from
+        spawn time rather than from epoch 0.
+        """
+        self._monitor_heartbeat_ts = time.time()
+        gen = self._monitor_generation
         self._exit_monitor_thread = threading.Thread(
             target=self._run_exit_monitor_loop,
-            name="exit-monitor",
+            args=(gen,),
+            name=f"exit-monitor-{gen}",
             daemon=True
         )
         self._exit_monitor_thread.start()
 
-        self._run_trading_loop()
+    def _monitor_staleness_threshold(self) -> float:
+        """How long without a heartbeat before the monitor is deemed hung."""
+        interval = self.config['trading'].get('position_monitoring_interval', 10)
+        # Allow a full cycle plus the lock-acquire budget, with a floor.
+        return max(3 * interval, interval + self._monitor_lock_timeout + 10,
+                   self._monitor_staleness_floor)
 
     def _exit_monitor_active(self) -> bool:
-        """Whether the dedicated exit-monitor thread is running."""
-        return self._exit_monitor_thread is not None and self._exit_monitor_thread.is_alive()
+        """Whether the exit-monitor thread is running AND making progress.
 
-    def _run_exit_monitor_loop(self):
+        A thread that is alive but wedged (deadlock/hang) is NOT 'active' — the
+        old is_alive()-only check let the 2026-06-11 freeze go undetected and
+        defeated the main-loop fallback. We require a recent heartbeat too.
+        """
+        t = self._exit_monitor_thread
+        if t is None or not t.is_alive():
+            return False
+        age = time.time() - self._monitor_heartbeat_ts
+        return age < self._monitor_staleness_threshold()
+
+    def _run_monitor_watchdog(self):
+        """Respawn the exit-monitor thread if its heartbeat goes stale.
+
+        Stale heartbeat == the loop is wedged (it updates the heartbeat every
+        cycle). Bumping the generation tells the old thread to exit if/when it
+        unsticks; a fresh thread takes over so stops keep being evaluated.
+        """
+        self.logger.info("Monitor watchdog started")
+        while self.is_running:
+            check_every = self._monitor_watchdog_interval
+            slept = 0.0
+            while slept < check_every and self.is_running:
+                step = min(1.0, check_every - slept)
+                time.sleep(step)
+                slept += step
+            if not self.is_running:
+                break
+            t = self._exit_monitor_thread
+            if t is None or not t.is_alive():
+                continue
+            age = time.time() - self._monitor_heartbeat_ts
+            threshold = self._monitor_staleness_threshold()
+            if age > threshold:
+                self.logger.critical(
+                    f"🚨 Exit monitor hung ({age:.0f}s since last heartbeat > "
+                    f"{threshold:.0f}s threshold) — respawning. Stops were NOT "
+                    f"being evaluated; check for a deadlock."
+                )
+                self._monitor_generation += 1  # supersede the wedged thread
+                self._spawn_exit_monitor()
+        self.logger.info("Monitor watchdog stopped")
+
+    def _run_exit_monitor_loop(self, generation: int = 0):
         """
         Dedicated position-exit monitoring loop (live mode only).
 
@@ -1789,27 +1888,50 @@ class StrategyManager:
         a slow data fetch for one symbol can no longer delay exits for others.
         Prices come from the WebSocket-first get_current_price path, so this
         loop is cheap in API weight.
+
+        Bumps a heartbeat every cycle so the watchdog can tell a healthy loop
+        from a wedged one, and exits when superseded by a newer generation
+        (the watchdog increments the generation when it respawns us).
         """
         interval = self.config['trading'].get('position_monitoring_interval', 10)
         emergency_pct = self.config.get('risk_management', {}).get('emergency_portfolio_loss_pct', 10.0)
-        self.logger.info(f"Exit monitor thread started (interval: {interval}s)")
+        self.logger.info(f"Exit monitor thread started (interval: {interval}s, gen: {generation})")
 
-        while self.is_running:
+        while self.is_running and generation == self._monitor_generation:
             try:
                 if self.positions or self.multi_leg_positions:
-                    with self._position_monitor_lock:
-                        self.update_position_prices()
-                        self._monitor_and_close_positions(emergency_pct)
+                    # Bounded acquire: never block forever on a lock another
+                    # (possibly wedged) cycle is holding — skip and let the
+                    # watchdog react rather than freezing silently.
+                    acquired = self._position_monitor_lock.acquire(
+                        timeout=self._monitor_lock_timeout)
+                    if not acquired:
+                        self.logger.error(
+                            "Exit monitor could not acquire position lock within "
+                            f"{self._monitor_lock_timeout}s — skipping cycle "
+                            "(another monitor cycle may be stuck)"
+                        )
+                    else:
+                        try:
+                            self.update_position_prices()
+                            self._monitor_and_close_positions(emergency_pct)
+                        finally:
+                            self._position_monitor_lock.release()
             except Exception as e:
                 self.logger.error(f"Error in exit monitor loop: {e}")
 
+            # Heartbeat: a completed cycle. A hang inside the work above never
+            # reaches this line, so the timestamp goes stale and the watchdog
+            # fires.
+            self._monitor_heartbeat_ts = time.time()
+
             # Interruptible sleep
             slept = 0.0
-            while slept < interval and self.is_running:
+            while slept < interval and self.is_running and generation == self._monitor_generation:
                 time.sleep(min(1.0, interval - slept))
                 slept += 1.0
 
-        self.logger.info("Exit monitor thread stopped")
+        self.logger.info(f"Exit monitor thread stopped (gen: {generation})")
 
     def _update_account_balance_periodic(self):
         """Periodically update account balance."""
@@ -1841,9 +1963,14 @@ class StrategyManager:
         self.logger.info("Stopping strategy manager...")
         self.is_running = False
 
-        # Stop the exit monitor thread before closing positions to avoid races
-        if self._exit_monitor_thread is not None and self._exit_monitor_thread.is_alive():
-            self._exit_monitor_thread.join(timeout=5.0)
+        # Stop the monitor/watchdog/executor threads before closing positions
+        # to avoid races. is_running=False breaks each loop; join briefly. A
+        # wedged exit-monitor thread won't join (daemon) — that's fine, the
+        # process is exiting and it's a daemon.
+        for t in (self._exit_monitor_thread, self._monitor_watchdog_thread,
+                  self._trigger_executor_thread):
+            if t is not None and t.is_alive():
+                t.join(timeout=5.0)
 
         if close_positions:
             self.logger.warning("Closing all positions before stopping...")
@@ -2070,15 +2197,26 @@ class StrategyManager:
             position_monitoring_interval = self.config['trading']['position_monitoring_interval']
             emergency_portfolio_loss_pct = self.config.get('risk_management', {}).get('emergency_portfolio_loss_pct', 10.0)
 
+            # Fallback runs inline when the dedicated monitor is absent OR hung
+            # (_exit_monitor_active() is heartbeat-aware). Bounded acquire so a
+            # wedged monitor holding the lock can't freeze the main loop too.
             if not self._exit_monitor_active() and \
                current_time - self.last_position_monitoring >= position_monitoring_interval:
                 self.logger.debug(f"Running position monitoring check ({len(self.positions)} positions)")
-                with self._position_monitor_lock:
-                    self._monitor_and_close_positions(
-                        emergency_portfolio_loss_pct,
-                        timestamp=current_datetime
+                if self._position_monitor_lock.acquire(timeout=self._monitor_lock_timeout):
+                    try:
+                        self._monitor_and_close_positions(
+                            emergency_portfolio_loss_pct,
+                            timestamp=current_datetime
+                        )
+                    finally:
+                        self._position_monitor_lock.release()
+                    self.last_position_monitoring = current_time
+                else:
+                    self.logger.error(
+                        "Main-loop fallback could not acquire position lock within "
+                        f"{self._monitor_lock_timeout}s — monitor may be wedged"
                     )
-                self.last_position_monitoring = current_time
             
             # Validate position integrity (if enabled)
             if self.enable_position_validation:
@@ -2233,16 +2371,49 @@ class StrategyManager:
                (position.side == 'short' and price <= position.take_profit):
                 exit_reason = "take_profit_realtime"
                 
-        # Execute if triggered
+        # Hand off if triggered. CRITICAL: do NOT call close_position here.
+        # This runs on the WS callback thread while the API holds _data_lock;
+        # closing inline deadlocked the engine on 2026-06-11 (the close needed
+        # a lock the monitor thread held, which needed _data_lock back). Enqueue
+        # for the dedicated executor instead so the WS callback returns at once.
         if exit_reason:
-            self.logger.info(f"⚡ Real-time trigger for {symbol}: {exit_reason} (Price: {price})")
-            # Close position immediately
-            # Note: close_position is thread-safe enough (uses API lock + dict ops)
-            # Urgency is determined internally by close_position based on the reason
-            self.execution_engine.close_position(
-                symbol=symbol, 
-                reason=exit_reason
-            )
+            self._enqueue_trigger_close(symbol, exit_reason)
+
+    def _enqueue_trigger_close(self, symbol: str, reason: str):
+        """Queue an SL/TP close for the off-thread executor (de-duped).
+
+        De-dup prevents a flood of identical closes for the same symbol while a
+        close is already pending/in flight (the realtime check fires on every
+        tick, many of which still breach the stop).
+        """
+        with self._trigger_close_inflight_lock:
+            if symbol in self._trigger_close_inflight:
+                return
+            self._trigger_close_inflight.add(symbol)
+        self.logger.info(f"⚡ Real-time trigger for {symbol}: {reason} (queued for executor)")
+        self._trigger_close_queue.put((symbol, reason))
+
+    def _run_trigger_executor_loop(self):
+        """Drain queued SL/TP closes off the WS thread and execute them.
+
+        Keeping close_position off the WS callback thread means a slow or
+        contended close can never stall the price feed or hold _data_lock.
+        """
+        self.logger.info("Trigger executor thread started")
+        while self.is_running:
+            try:
+                symbol, reason = self._trigger_close_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            try:
+                self.logger.info(f"Executing queued close for {symbol}: {reason}")
+                self.execution_engine.close_position(symbol=symbol, reason=reason)
+            except Exception as e:
+                self.logger.error(f"Error executing queued close for {symbol}: {e}")
+            finally:
+                with self._trigger_close_inflight_lock:
+                    self._trigger_close_inflight.discard(symbol)
+        self.logger.info("Trigger executor thread stopped")
 
     def _on_price_update(self, symbol: str, price: float, timestamp: float):
         """Handle real-time price updates."""
