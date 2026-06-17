@@ -12,6 +12,7 @@ Usage:
 import os
 import sys
 import json
+import socket
 import logging
 from datetime import datetime
 from typing import Optional, Dict, Any, List
@@ -831,10 +832,27 @@ def _get_trades_data(page: int = 1, limit: int = 25, timeframe: str = '7d') -> D
     }
 
 
+def _find_free_port(preferred: int, host: str = '0.0.0.0', max_tries: int = 20) -> Optional[int]:
+    """Return an available TCP port at or above ``preferred``, or None.
+
+    Probes by attempting to bind; an actively-listening port (e.g. a leftover
+    bot instance or a prior test's server) fails to bind and is skipped. Keeps
+    the dashboard from crashing/hanging on a busy port.
+    """
+    for candidate in range(preferred, preferred + max_tries):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            try:
+                probe.bind((host, candidate))
+                return candidate
+            except OSError:
+                continue
+    return None
+
+
 def run_dashboard(strategy_manager=None, market_api=None, port: int = 5050, debug: bool = False):
     """
     Run the dashboard server.
-    
+
     Args:
         strategy_manager: Optional StrategyManager instance for live data
         market_api: Optional HyperliquidAPI instance for price data
@@ -844,15 +862,34 @@ def run_dashboard(strategy_manager=None, market_api=None, port: int = 5050, debu
     global _strategy_manager, _market_api
     _strategy_manager = strategy_manager
     _market_api = market_api or (strategy_manager.market_api if strategy_manager else None)
-    
+
     app = create_dashboard_app()
-    
+
     # Run in a separate thread if integrated with bot
     if strategy_manager is not None:
-        thread = Thread(target=lambda: app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False))
-        thread.daemon = True
+        # Find a free port so a busy 5050 (leftover instance, another process,
+        # or a prior test's server) neither crashes the thread nor hangs.
+        chosen = _find_free_port(port)
+        if chosen is None:
+            logger.warning(
+                f"Dashboard disabled: no free port in [{port}, {port + 19}]. "
+                f"Bot continues trading without the dashboard."
+            )
+            return None
+        if chosen != port:
+            logger.warning(f"Dashboard port {port} busy; using {chosen} instead")
+
+        def _serve():
+            # Guard the server thread: a bind race or runtime error must log,
+            # not raise an uncaught exception inside the daemon thread.
+            try:
+                app.run(host='0.0.0.0', port=chosen, debug=False, use_reloader=False)
+            except Exception as e:
+                logger.error(f"Dashboard server stopped: {e}")
+
+        thread = Thread(target=_serve, daemon=True)
         thread.start()
-        logger.info(f"Dashboard started at http://localhost:{port}")
+        logger.info(f"Dashboard started at http://localhost:{chosen}")
         return thread
     else:
         # Standalone mode
