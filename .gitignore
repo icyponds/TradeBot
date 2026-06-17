@@ -176,6 +176,14 @@ test_output.txt
 tests/test_trades.db-shm
 tests/test_trades.db-wal
 
-# Claude Code: ignore personal + runtime files, but keep shared .claude/skills/ tracked
+# Claude Code
+# Track shared/team config even though the broad *.json and settings.json rules
+# above would otherwise ignore it. Negations must come AFTER those ignores.
+!.claude/settings.json
+!.claude/skills/**
+!.claude/commands/**
+!.claude/agents/**
+# ...but never personal or runtime files (re-assert LAST so they win over the
+# negations above).
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
