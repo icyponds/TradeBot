@@ -101,13 +101,16 @@ class TestCancelAllOnStartup:
         mock_manager.leverage_manager = MagicMock()
         mock_manager.performance_tracker = MagicMock()
         
-        mock_manager.start()
-        
+        # enable_dashboard=False: don't start the real Flask server (port 5050)
+        # in tests — it leaks across tests and hangs the suite.
+        mock_manager.start(enable_dashboard=False)
+
         # Verify cancel_all_orders was called
         mock_manager.market_api.cancel_all_orders.assert_called_once()
-    
-    def test_startup_sets_dead_mans_switch(self, mock_manager):
-        """Test that start() enables dead man's switch."""
+
+    def test_startup_skips_dead_mans_switch_by_default(self, mock_manager):
+        """Dead man's switch is OFF by default so native stop orders survive a
+        crash — start() must NOT arm it unless explicitly enabled."""
         mock_manager.market_api.cancel_all_orders = MagicMock(return_value=0)
         mock_manager.market_api.set_dead_mans_switch = MagicMock(return_value=True)
         mock_manager._check_startup_orphans = MagicMock()
@@ -118,11 +121,30 @@ class TestCancelAllOnStartup:
         mock_manager.portfolio_manager.calculate_available_capital_for_trading.return_value = 10000.0
         mock_manager.leverage_manager = MagicMock()
         mock_manager.performance_tracker = MagicMock()
-        
-        mock_manager.start()
-        
-        # Verify dead man's switch was set with 30s timeout
-        mock_manager.market_api.set_dead_mans_switch.assert_called_once_with(30)
+
+        mock_manager.start(enable_dashboard=False)
+
+        mock_manager.market_api.set_dead_mans_switch.assert_not_called()
+
+    def test_startup_arms_dead_mans_switch_when_enabled(self, mock_manager):
+        """When explicitly enabled in config, start() arms the switch with the
+        configured timeout."""
+        mock_manager.config.setdefault('risk_management', {})['dead_mans_switch'] = {
+            'enabled': True, 'timeout_seconds': 45}
+        mock_manager.market_api.cancel_all_orders = MagicMock(return_value=0)
+        mock_manager.market_api.set_dead_mans_switch = MagicMock(return_value=True)
+        mock_manager._check_startup_orphans = MagicMock()
+        mock_manager.sync_positions_with_exchange = MagicMock()
+        mock_manager.check_startup_exits = MagicMock()
+        mock_manager._run_trading_loop = MagicMock()
+        mock_manager.portfolio_manager = MagicMock()
+        mock_manager.portfolio_manager.calculate_available_capital_for_trading.return_value = 10000.0
+        mock_manager.leverage_manager = MagicMock()
+        mock_manager.performance_tracker = MagicMock()
+
+        mock_manager.start(enable_dashboard=False)
+
+        mock_manager.market_api.set_dead_mans_switch.assert_called_once_with(45)
 
 
 class TestHeartbeatRefresh:
@@ -153,10 +175,13 @@ class TestHeartbeatRefresh:
             return manager
     
     def test_heartbeat_respects_interval(self, mock_manager):
-        """Test that heartbeat only refreshes every 15 seconds."""
+        """Test that heartbeat only refreshes every 15 seconds (when the dead
+        man's switch is enabled — it's OFF by default now)."""
         import time
+        mock_manager.config.setdefault('risk_management', {})['dead_mans_switch'] = {
+            'enabled': True, 'timeout_seconds': 30}
         mock_manager.market_api.refresh_dead_mans_switch = MagicMock(return_value=True)
-        
+
         # First call should refresh (no last_heartbeat_refresh set)
         mock_manager._refresh_dead_mans_switch_periodic()
         assert mock_manager.market_api.refresh_dead_mans_switch.call_count == 1

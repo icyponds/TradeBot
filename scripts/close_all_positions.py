@@ -119,7 +119,17 @@ def main():
         except Exception as e:
             print(f"  ✗ Error closing {symbol}: {e}")
             fail_count += 1
-    
+
+    # Cancel any resting orders (notably native protective stops). This script
+    # bypasses close_position, so without this the reduce-only stops would
+    # orphan on the exchange and could fire against a later re-entry.
+    print("\nCancelling resting orders (native stops, etc.)...")
+    try:
+        cancelled = api.cancel_all_orders()
+        print(f"  ✓ Cancelled {cancelled} resting order(s)")
+    except Exception as e:
+        print(f"  ⚠️  Could not cancel resting orders: {e}")
+
     print("\n" + "=" * 60)
     print(f"CLEANUP COMPLETE: {success_count} closed, {fail_count} failed")
     print("=" * 60)

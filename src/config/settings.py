@@ -299,6 +299,16 @@ def load_config() -> Dict[str, Any]:
             "native_stop_orders": {
                 "enabled": True,
             },
+            # Dead man's switch (scheduleCancel): auto-cancels ALL resting
+            # orders ~timeout after the bot stops heart-beating. DISABLED by
+            # default: native_stop_orders are now the only resting orders, and
+            # they MUST survive a crash to protect open positions — the switch
+            # would cancel exactly the protection we want. Re-enable only if the
+            # bot starts resting non-protective orders (e.g. ALO maker entries).
+            "dead_mans_switch": {
+                "enabled": False,
+                "timeout_seconds": 30,
+            },
             # Same-underlying concentration guard: block a new entry when an
             # open position already carries the same economic underlying
             # (dex-prefix duplicates like xyz:GOLD/cash:GOLD and tokenized

@@ -1065,19 +1065,34 @@ class StrategyManager:
         except Exception as e:
             self.logger.error(f"Error in position sync loop: {e}")
     
+    def _dead_mans_switch_config(self) -> dict:
+        return self.config.get('risk_management', {}).get('dead_mans_switch', {})
+
+    def _dead_mans_switch_enabled(self) -> bool:
+        """Whether the scheduleCancel dead man's switch is armed.
+
+        OFF by default: it would cancel the resting native stop orders ~30s
+        after a crash — exactly the protection we want to survive. See the
+        settings note.
+        """
+        return bool(self._dead_mans_switch_config().get('enabled', False))
+
     def _refresh_dead_mans_switch_periodic(self):
-        """Refresh dead man's switch heartbeat every 15 seconds."""
+        """Refresh dead man's switch heartbeat every 15 seconds (if armed)."""
+        if not self._dead_mans_switch_enabled():
+            return
         try:
             now = time.time()
             # Refresh every 15 seconds
             if now - getattr(self, 'last_heartbeat_refresh', 0) < 15:
                 return
-            
+
             self.last_heartbeat_refresh = now
-            
+
+            timeout = int(self._dead_mans_switch_config().get('timeout_seconds', 30))
             if hasattr(self.market_api, 'refresh_dead_mans_switch'):
-                self.market_api.refresh_dead_mans_switch(30)  # 30 second timeout
-                
+                self.market_api.refresh_dead_mans_switch(timeout)
+
         except Exception as e:
             self.logger.error(f"Error refreshing dead man's switch: {e}")
 
@@ -1771,12 +1786,21 @@ class StrategyManager:
             except Exception as e:
                 self.logger.error(f"Failed to cancel orders on startup: {e}")
         
-        # SAFETY: Enable dead man's switch (auto-cancel if bot crashes)
-        if hasattr(self.market_api, 'set_dead_mans_switch'):
+        # Dead man's switch: OFF by default so resting native stop orders
+        # survive a crash and keep protecting open positions. Only arm it if
+        # explicitly enabled (e.g. when resting non-protective maker orders).
+        if self._dead_mans_switch_enabled() and hasattr(self.market_api, 'set_dead_mans_switch'):
             try:
-                self.market_api.set_dead_mans_switch(30)  # 30 second timeout
+                timeout = int(self._dead_mans_switch_config().get('timeout_seconds', 30))
+                self.market_api.set_dead_mans_switch(timeout)
+                self.logger.info(f"Dead man's switch armed ({timeout}s)")
             except Exception as e:
                 self.logger.error(f"Failed to set dead man's switch: {e}")
+        else:
+            self.logger.info(
+                "Dead man's switch disabled — native stop orders will persist "
+                "across a crash to protect open positions"
+            )
         
         # Sync with exchange to clear any ghost positions (closed while bot was off)
         self.sync_positions_with_exchange()
