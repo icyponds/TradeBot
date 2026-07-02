@@ -89,10 +89,10 @@ class SentimentMLStrategy(BaseStrategy):
         z_score = (current_sentiment - mean_val) / std_val
         
         # 3. Trend Filter Calculation
-        trend_ok = True
         trend_desc = ""
         current_price = ohlcv['close'].iloc[-1]
-        
+        current_ema = None
+
         if self.enable_trend_filter and len(ohlcv) > self.trend_ema_period:
             ema = ohlcv['close'].ewm(span=self.trend_ema_period, adjust=False).mean()
             current_ema = ema.iloc[-1]
@@ -100,6 +100,12 @@ class SentimentMLStrategy(BaseStrategy):
                 trend_desc = "Uptrend"
             else:
                 trend_desc = "Downtrend"
+
+        # With the filter on but not enough history for the EMA, we cannot
+        # verify trend alignment — skip rather than crash (NameError) or
+        # trade unfiltered.
+        if self.enable_trend_filter and current_ema is None:
+            return None
                 
         signal = 'hold'
         reason = ''

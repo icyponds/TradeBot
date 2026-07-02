@@ -75,3 +75,33 @@ class TestSentimentMLOptimization:
             # D. FUD (Short) in Uptrend -> BLOCK
             sig = strategy._generate_signal_internal(df_uptrend, "BTC")
             assert sig is None
+
+    def test_short_history_with_trend_filter_returns_none(self, config):
+        """
+        Regression (codebase review 2026-07-02): with the trend filter enabled
+        and history longer than normalization_lookback but shorter than
+        trend_ema_period, current_ema was never assigned and a hype spike
+        raised NameError. Must return None (cannot verify trend), not crash.
+        """
+        config['strategies']['sentiment_ml']['normalization_lookback'] = 24
+        config['strategies']['sentiment_ml']['trend_ema_period'] = 200
+        strategy = SentimentMLStrategy(config, timeframe='1h')
+        assert strategy.enable_trend_filter
+
+        n = 100  # 24 < n <= 200 -> EMA never computed
+        dates = pd.date_range(start='2024-01-01', periods=n, freq='1h')
+        closes = np.full(n, 100.0)
+        df = pd.DataFrame({
+            'open': closes, 'high': closes, 'low': closes,
+            'close': closes, 'volume': 1000
+        }, index=dates)
+
+        with patch.object(strategy, '_get_sentiment_proxy') as mock_sent:
+            sentiment_vals = np.zeros(n)
+            sentiment_vals[-20:] = range(20)
+            sentiment_vals[-1] = 1000  # hype spike, Z > 2
+            mock_sent.return_value = pd.Series(sentiment_vals)
+
+            sig = strategy._generate_signal_internal(df, "BTC")
+
+        assert sig is None
