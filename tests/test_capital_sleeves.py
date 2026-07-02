@@ -91,6 +91,17 @@ class TestSleevesDisabled:
         mock_close.assert_called_once()
         assert mock_close.call_args[0][0] == 'ETH'
 
+    def test_rotation_still_used_at_global_cap_when_disabled(self, manager_factory):
+        """Pre-sleeve behavior at the global allocation cap is unchanged."""
+        manager = manager_factory(sleeves_cfg={'enabled': False, 'weights': {}})
+        allocation = {'allocation_percentage': 95.0, 'total_equity': 50000.0}
+        with patch.object(manager, '_check_portfolio_allocation', return_value=allocation), \
+             patch.object(manager, '_close_least_profitable_position', return_value=True) as mock_rot:
+            result = manager._should_execute_with_position_limit(
+                'SOL', {'signal': 'buy'}, 0.9, strategy_name='csm_4h')
+        assert result is True
+        mock_rot.assert_called_once()
+
 
 # ---------------------------------------------------------------------------
 # Enabled path: fractions, budgets, isolation
@@ -189,10 +200,11 @@ class TestSleeveGate:
             'max_allocation': 100.0,
         }
 
-    def test_blocks_strategy_over_its_sleeve(self, manager_factory):
-        """csm fills its half; a new csm entry is blocked even though the
-        OTHER strategy's half of the book is empty — and sentiment's
-        positions are never eligible for displacement."""
+    def test_sleeve_full_skips_without_rotation(self, manager_factory):
+        """csm fills its half: a new csm entry is SKIPPED — no displacement
+        of its own positions and never of the other strategy's (2026-07-02
+        sleeved matrix: rotating within the sleeve relocated the churn,
+        165 rotations/month, every leg worse than unsleeved)."""
         manager = manager_factory(sleeves_cfg={'enabled': True, 'weights': {}})
         manager.max_positions_percentage = 100.0
         # reserve 10% -> effective_max 90, sleeve_max 45% of equity
@@ -202,25 +214,16 @@ class TestSleeveGate:
         }
         with patch.object(manager, '_check_portfolio_allocation',
                           return_value=self._allocation(48.0)), \
-             patch.object(manager, '_get_position_profitability_score', return_value=0.0), \
              patch.object(manager, 'close_position') as mock_close:
-            # csm over sleeve: rotation considers only csm positions; BTC is
-            # its only one and scores 0.0 < strength - threshold -> closes BTC
             result = manager._should_execute_with_position_limit(
                 'SOL', {'signal': 'buy'}, 0.9, strategy_name='csm_4h')
-        assert result is True
-        mock_close.assert_called_once()
-        assert mock_close.call_args[0][0] == 'BTC'  # never ETH (sentiment's)
+        assert result is False
+        mock_close.assert_not_called()
 
-    def test_blocked_when_no_own_position_to_rotate(self, manager_factory):
-        """Over-sleeve strategy with nothing of its own to close is refused —
-        it cannot evict the other strategy's positions."""
+    def test_sleeve_full_from_multi_leg_positions(self, manager_factory):
+        """Parity: a multi-leg position fills the owner's sleeve too."""
         manager = manager_factory(sleeves_cfg={'enabled': True, 'weights': {}})
         manager.max_positions_percentage = 100.0
-        manager.execution_engine.positions = {
-            'ETH': _make_position('sentiment_ml_1h', capital_at_risk=1000.0),
-        }
-        # csm's multi-leg position fills its sleeve
         manager.execution_engine.multi_leg_positions = {
             'ml_1': _make_multi_leg('csm_4h', capital_at_risk=23000.0),
         }
@@ -231,6 +234,18 @@ class TestSleeveGate:
                 'SOL', {'signal': 'buy'}, 0.9, strategy_name='csm_4h')
         assert result is False
         mock_close.assert_not_called()
+
+    def test_no_rotation_at_global_cap_with_sleeves_enabled(self, manager_factory):
+        """Even at the global cap, sleeves-on means skip — never displace."""
+        manager = manager_factory(sleeves_cfg={'enabled': True, 'weights': {}})
+        manager.max_positions_percentage = 100.0
+        with patch.object(manager, '_check_portfolio_allocation',
+                          return_value=self._allocation(95.0)), \
+             patch.object(manager, '_close_least_profitable_position') as mock_rot:
+            result = manager._should_execute_with_position_limit(
+                'SOL', {'signal': 'buy'}, 0.9, strategy_name='csm_4h')
+        assert result is False
+        mock_rot.assert_not_called()
 
     def test_under_sleeve_strategy_allowed(self, manager_factory):
         """The other strategy still has sleeve headroom and may trade."""
@@ -257,26 +272,16 @@ class TestSleeveGate:
         assert result is True
 
 
-class TestRotationIsolation:
-    def test_rotation_filters_by_owner(self, manager_factory):
+class TestRotationDisabledUnderSleeves:
+    def test_position_count_limit_skips_without_rotation(self, manager_factory):
+        """At the position-count limit with sleeves on: skip, don't displace."""
         manager = manager_factory(sleeves_cfg={'enabled': True, 'weights': {}})
-        manager.execution_engine.positions = {
-            'BTC': _make_position('csm_4h'),
-            'ETH': _make_position('sentiment_ml_1h'),
-        }
-        with patch.object(manager, '_get_position_profitability_score', return_value=0.0), \
-             patch.object(manager, '_check_position_limit', return_value=False), \
-             patch.object(manager, 'close_position') as mock_close:
-            closed = manager._close_least_profitable_position(0.9, strategy_name='sentiment_ml_1h')
-        assert closed is True
-        assert mock_close.call_args[0][0] == 'ETH'
-
-    def test_rotation_refuses_when_owner_has_no_positions(self, manager_factory):
-        manager = manager_factory(sleeves_cfg={'enabled': True, 'weights': {}})
-        manager.execution_engine.positions = {
-            'ETH': _make_position('sentiment_ml_1h'),
-        }
-        with patch.object(manager, 'close_position') as mock_close:
-            closed = manager._close_least_profitable_position(0.9, strategy_name='csm_4h')
-        assert closed is False
-        mock_close.assert_not_called()
+        manager.max_positions_percentage = 100.0
+        allocation = {'allocation_percentage': 10.0, 'total_equity': 50000.0}
+        with patch.object(manager, '_check_portfolio_allocation', return_value=allocation), \
+             patch.object(manager, '_check_position_limit', return_value=True), \
+             patch.object(manager, '_close_least_profitable_position') as mock_rot:
+            result = manager._should_execute_with_position_limit(
+                'SOL', {'signal': 'buy'}, 0.9, strategy_name='csm_4h')
+        assert result is False
+        mock_rot.assert_not_called()

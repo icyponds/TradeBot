@@ -322,8 +322,10 @@ def load_config() -> Dict[str, Any]:
             # they compete for one capital pool and evict each other's
             # positions (capital rotation churn). When enabled, each strategy
             # instance is budgeted a fixed fraction of the allocation cap and
-            # capital rotation may only displace positions owned by the SAME
-            # strategy. Default OFF until validated by the combined matrix.
+            # capital rotation is disabled outright: a full sleeve SKIPS the
+            # entry, never displaces (the validated solo profiles rotate
+            # zero times — see reports/oos_matrix3). Default OFF until
+            # validated by the combined matrix.
             "capital_sleeves": {
                 "enabled": False,
                 # Relative shares by instance name, e.g. {"csm_4h": 2.0,

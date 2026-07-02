@@ -3963,9 +3963,13 @@ class StrategyManager:
         
         return final_score
     
-    def _close_least_profitable_position(self, new_signal_strength: float, strategy_name: Optional[str] = None) -> bool:
+    def _close_least_profitable_position(self, new_signal_strength: float) -> bool:
         """
         Close the least profitable position to make room for a new trade.
+
+        Only used when capital sleeves are DISABLED — with sleeves on, a full
+        budget skips the entry instead of displacing (rotation churn is the
+        cross-strategy failure mode sleeves exist to remove).
 
         Uses comprehensive scoring that considers:
         - Current PnL
@@ -3975,25 +3979,16 @@ class StrategyManager:
 
         Args:
             new_signal_strength: Signal strength of the new potential trade (0-1 scale)
-            strategy_name: When set (capital sleeves), only positions owned by
-                this strategy are eligible for displacement — a strategy may
-                never evict another strategy's positions.
 
         Returns:
             True if a position was closed, False otherwise
         """
-        candidates = [
-            symbol for symbol, pos in self.positions.items()
-            if strategy_name is None or getattr(pos, 'strategy', None) == strategy_name
-        ]
-        if not candidates:
-            if strategy_name is not None and self.positions:
-                self.logger.info(f"Capital rotation: no {strategy_name} positions to displace (sleeve isolation)")
+        if not self.positions:
             return False
 
-        # Calculate profitability scores for all eligible positions
+        # Calculate profitability scores for all positions
         position_scores = {}
-        for symbol in candidates:
+        for symbol in self.positions:
             score = self._get_position_profitability_score(symbol, new_signal_strength)
             position_scores[symbol] = score
         
@@ -4339,10 +4334,12 @@ class StrategyManager:
             f"(max: {effective_max:.1f}%, exploration={is_exploration}, reserve_pct={reserve_pct:.2f})"
         )
 
-        # With sleeves enabled, capital rotation may only displace positions
-        # owned by the same strategy — cross-strategy eviction is the churn
-        # that made validated strategies lose when run together.
-        rotation_owner = strategy_name if (self.capital_sleeves_enabled and strategy_name) else None
+        # With sleeves enabled, capital rotation is disabled entirely: a full
+        # budget means SKIP, never displace. The validated solo profiles did
+        # zero rotations (their caps never bound); rotating within a sleeve
+        # just relocates the churn we are trying to kill (2026-07-02 sleeved
+        # matrix: 165 rotations/month and every leg worse than unsleeved).
+        rotation_allowed = not self.capital_sleeves_enabled
 
         # Per-strategy sleeve gate: the strategy's own capital at risk must
         # stay inside its budgeted fraction of the allocation cap.
@@ -4353,13 +4350,11 @@ class StrategyManager:
                 sleeve_max_pct = effective_max * sleeve_fraction
                 strategy_alloc_pct = (self._strategy_capital_at_risk(strategy_name) / total_equity) * 100.0
                 if strategy_alloc_pct >= sleeve_max_pct:
-                    self.logger.warning(
-                        f"Sleeve limit reached for {strategy_name}: {strategy_alloc_pct:.1f}% >= "
-                        f"{sleeve_max_pct:.1f}% ({sleeve_fraction:.0%} of {effective_max:.1f}%)"
+                    self.logger.info(
+                        f"Sleeve full for {strategy_name}: {strategy_alloc_pct:.1f}% >= "
+                        f"{sleeve_max_pct:.1f}% ({sleeve_fraction:.0%} of {effective_max:.1f}%), "
+                        f"skipping {symbol}"
                     )
-                    if self._close_least_profitable_position(signal_strength, strategy_name=rotation_owner):
-                        self.logger.info(f"Closed least profitable {strategy_name} position to make room for {symbol}")
-                        return True
                     return False
 
         if allocation['allocation_percentage'] >= effective_max:
@@ -4367,7 +4362,7 @@ class StrategyManager:
                 f"Portfolio allocation limit reached: {allocation['allocation_percentage']:.1f}% >= {effective_max:.1f}%"
             )
             # Try to close least profitable position to make room
-            if self._close_least_profitable_position(signal_strength, strategy_name=rotation_owner):
+            if rotation_allowed and self._close_least_profitable_position(signal_strength):
                 self.logger.info(f"Closed least profitable position to make room for {symbol}")
                 return True
             return False
@@ -4381,7 +4376,7 @@ class StrategyManager:
             return True
 
         # If we have reached the position count limit, try to close a less profitable position
-        if self._close_least_profitable_position(signal_strength, strategy_name=rotation_owner):
+        if rotation_allowed and self._close_least_profitable_position(signal_strength):
             self.logger.info(f"Closed least profitable position to make room for {symbol}")
             return True
 
