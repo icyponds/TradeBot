@@ -685,7 +685,18 @@ class ExecutionEngine:
             
             market_volatility = self.calculate_market_volatility(ohlcv)
             available_capital = self.portfolio_manager.calculate_available_capital_for_trading()
-            
+
+            # Capital sleeve parity (single/multi-leg rule): multi-leg entries
+            # are capped at the owning strategy's remaining sleeve budget too.
+            if strategy_manager is not None and hasattr(strategy_manager, '_sleeve_headroom'):
+                sleeve_headroom = strategy_manager._sleeve_headroom(strategy_name)
+                if sleeve_headroom is not None and available_capital > sleeve_headroom:
+                    self.logger.info(
+                        f"Sleeve cap for {strategy_name} (multi-leg): capital "
+                        f"${available_capital:.2f} -> ${sleeve_headroom:.2f}"
+                    )
+                    available_capital = sleeve_headroom
+
             # Exploration logic omitted for brevity/cleanliness, can be re-injected if needed
             
             position_size, margin_required, leverage = self.leverage_manager.calculate_leveraged_position_size(

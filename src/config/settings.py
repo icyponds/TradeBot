@@ -316,6 +316,21 @@ def load_config() -> Dict[str, Any]:
             "underlying_concentration": {
                 "enabled": os.getenv("UNDERLYING_CONCENTRATION_GUARD", "true").lower() == "true",
             },
+            # Per-strategy capital sleeves (research round 6, 2026-07-02):
+            # two individually bar-passing strategies (csm_4h, sentiment_ml_1h
+            # + lockout) returned -$10.1k TOGETHER vs +$21k summed solo —
+            # they compete for one capital pool and evict each other's
+            # positions (capital rotation churn). When enabled, each strategy
+            # instance is budgeted a fixed fraction of the allocation cap and
+            # capital rotation may only displace positions owned by the SAME
+            # strategy. Default OFF until validated by the combined matrix.
+            "capital_sleeves": {
+                "enabled": False,
+                # Relative shares by instance name, e.g. {"csm_4h": 2.0,
+                # "sentiment_ml_1h": 1.0} = 2/3 vs 1/3. Instances not listed
+                # get weight 1.0; empty dict = equal split.
+                "weights": {},
+            },
             "whipsaw_lockout": {
                 # Default ON since 2026-06-10: flips Dec-2025 positive for
                 # csm_4h (+$11k single-window delta) at the cost of ~-$4k in

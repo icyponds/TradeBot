@@ -106,6 +106,11 @@ class StrategyManager:
         # Per-strategy position limit (default 5)
         self.max_positions_per_strategy = config['trading'].get('max_positions_per_strategy', 5)
 
+        # Per-strategy capital sleeves (see risk_management.capital_sleeves)
+        sleeves_cfg = (config.get('risk_management', {}) or {}).get('capital_sleeves', {}) or {}
+        self.capital_sleeves_enabled = bool(sleeves_cfg.get('enabled', False))
+        self.capital_sleeve_weights = dict(sleeves_cfg.get('weights', {}) or {})
+
         
         # Trading pairs management
         self.max_pairs_to_trade = config['trading'].get('max_pairs_to_trade', 50)
@@ -3528,7 +3533,7 @@ class StrategyManager:
         # However, close_position() usually updates state immediately.
         # Bypass check for replacement operations
         if resolution not in ['flip', 'upgrade', 'nuclear']:
-            if not self._should_execute_with_position_limit(symbol, signal, signal_strength):
+            if not self._should_execute_with_position_limit(symbol, signal, signal_strength, strategy_name=strategy_name):
                 return False
         
         # Check per-strategy position limit
@@ -3571,6 +3576,16 @@ class StrategyManager:
                  self.logger.info(f"Applying Kelly sizing for {strategy_name}: "
                                   f"multiplier={kelly_multiplier:.2f}x (Kelly: {kelly_fraction:.4f})")
             available_capital_for_trade *= kelly_multiplier
+
+        # Capital sleeve: hard-cap trade capital at the strategy's remaining
+        # sleeve budget so one strategy can never consume another's capital.
+        sleeve_headroom = self._sleeve_headroom(strategy_name)
+        if sleeve_headroom is not None and available_capital_for_trade > sleeve_headroom:
+            self.logger.info(
+                f"Sleeve cap for {strategy_name}: trade capital "
+                f"${available_capital_for_trade:.2f} -> ${sleeve_headroom:.2f}"
+            )
+            available_capital_for_trade = sleeve_headroom
 
         self.logger.info(
             f"Calculating position size for {symbol}: available capital=${available_capital:.2f} "
@@ -3948,28 +3963,37 @@ class StrategyManager:
         
         return final_score
     
-    def _close_least_profitable_position(self, new_signal_strength: float) -> bool:
+    def _close_least_profitable_position(self, new_signal_strength: float, strategy_name: Optional[str] = None) -> bool:
         """
         Close the least profitable position to make room for a new trade.
-        
+
         Uses comprehensive scoring that considers:
         - Current PnL
         - Expected value (distance to TP/SL)
         - Strategy historical performance
         - Position age and momentum
-        
+
         Args:
             new_signal_strength: Signal strength of the new potential trade (0-1 scale)
-            
+            strategy_name: When set (capital sleeves), only positions owned by
+                this strategy are eligible for displacement — a strategy may
+                never evict another strategy's positions.
+
         Returns:
             True if a position was closed, False otherwise
         """
-        if not self.positions:
+        candidates = [
+            symbol for symbol, pos in self.positions.items()
+            if strategy_name is None or getattr(pos, 'strategy', None) == strategy_name
+        ]
+        if not candidates:
+            if strategy_name is not None and self.positions:
+                self.logger.info(f"Capital rotation: no {strategy_name} positions to displace (sleeve isolation)")
             return False
-        
-        # Calculate profitability scores for all positions
+
+        # Calculate profitability scores for all eligible positions
         position_scores = {}
-        for symbol in self.positions:
+        for symbol in candidates:
             score = self._get_position_profitability_score(symbol, new_signal_strength)
             position_scores[symbol] = score
         
@@ -4215,7 +4239,74 @@ class StrategyManager:
             'max_allocation': self.max_positions_percentage
         }
 
-    def _should_execute_with_position_limit(self, symbol: str, signal: Dict[str, Any], signal_strength: float) -> bool:
+    def _sleeve_fraction(self, strategy_name: str) -> Optional[float]:
+        """
+        Fraction of the allocation cap budgeted to this strategy instance.
+
+        Returns None when sleeves are disabled (no per-strategy budget).
+        Weights are relative shares by instance name; instances without a
+        configured (positive) weight count as 1.0, so an empty weights dict
+        means an equal split across enabled instances.
+        """
+        if not self.capital_sleeves_enabled:
+            return None
+
+        names = list(self.strategies.keys())
+        if not names:
+            return None
+
+        def weight(name: str) -> float:
+            try:
+                w = float(self.capital_sleeve_weights.get(name, 1.0))
+            except (TypeError, ValueError):
+                w = 1.0
+            return w if w > 0 else 1.0
+
+        total = sum(weight(n) for n in names)
+        if strategy_name in names:
+            return weight(strategy_name) / total
+        # Unknown instance (e.g. legacy base name): fail safe to an equal share
+        return 1.0 / len(names)
+
+    def _strategy_capital_at_risk(self, strategy_name: str) -> float:
+        """Capital at risk of one strategy's positions, single-leg AND multi-leg."""
+        total = 0.0
+        for symbol, position in self.positions.items():
+            if getattr(position, 'strategy', None) != strategy_name:
+                continue
+            capital_at_risk = position.capital_at_risk
+            if capital_at_risk is None:
+                notional_value = position.size * position.entry_price
+                leverage = getattr(position, 'leverage', 0) or 0
+                capital_at_risk = notional_value / leverage if leverage > 0 else notional_value
+            total += capital_at_risk
+
+        for position_id, ml_pos in self.multi_leg_positions.items():
+            if getattr(ml_pos, 'strategy', None) != strategy_name:
+                continue
+            total += ml_pos.capital_at_risk or ml_pos.total_notional
+
+        return total
+
+    def _sleeve_headroom(self, strategy_name: str) -> Optional[float]:
+        """
+        Dollars this strategy may still deploy inside its sleeve.
+
+        Returns None when sleeves are disabled or equity is unknown (callers
+        fall back to the global behavior in both cases).
+        """
+        fraction = self._sleeve_fraction(strategy_name)
+        if fraction is None:
+            return None
+
+        total_equity = self.portfolio_manager.total_equity
+        if total_equity <= 0:
+            return None
+
+        budget = total_equity * (float(self.max_positions_percentage) / 100.0) * fraction
+        return max(0.0, budget - self._strategy_capital_at_risk(strategy_name))
+
+    def _should_execute_with_position_limit(self, symbol: str, signal: Dict[str, Any], signal_strength: float, strategy_name: Optional[str] = None) -> bool:
         """
         Check if we should execute a trade considering position limits.
         
@@ -4247,33 +4338,56 @@ class StrategyManager:
             f"Portfolio allocation for {symbol}: {alloc_pct:.1f}% "
             f"(max: {effective_max:.1f}%, exploration={is_exploration}, reserve_pct={reserve_pct:.2f})"
         )
-        
+
+        # With sleeves enabled, capital rotation may only displace positions
+        # owned by the same strategy — cross-strategy eviction is the churn
+        # that made validated strategies lose when run together.
+        rotation_owner = strategy_name if (self.capital_sleeves_enabled and strategy_name) else None
+
+        # Per-strategy sleeve gate: the strategy's own capital at risk must
+        # stay inside its budgeted fraction of the allocation cap.
+        sleeve_fraction = self._sleeve_fraction(strategy_name) if strategy_name else None
+        if sleeve_fraction is not None:
+            total_equity = float(allocation.get('total_equity') or 0.0)
+            if total_equity > 0:
+                sleeve_max_pct = effective_max * sleeve_fraction
+                strategy_alloc_pct = (self._strategy_capital_at_risk(strategy_name) / total_equity) * 100.0
+                if strategy_alloc_pct >= sleeve_max_pct:
+                    self.logger.warning(
+                        f"Sleeve limit reached for {strategy_name}: {strategy_alloc_pct:.1f}% >= "
+                        f"{sleeve_max_pct:.1f}% ({sleeve_fraction:.0%} of {effective_max:.1f}%)"
+                    )
+                    if self._close_least_profitable_position(signal_strength, strategy_name=rotation_owner):
+                        self.logger.info(f"Closed least profitable {strategy_name} position to make room for {symbol}")
+                        return True
+                    return False
+
         if allocation['allocation_percentage'] >= effective_max:
             self.logger.warning(
                 f"Portfolio allocation limit reached: {allocation['allocation_percentage']:.1f}% >= {effective_max:.1f}%"
             )
             # Try to close least profitable position to make room
-            if self._close_least_profitable_position(signal_strength):
+            if self._close_least_profitable_position(signal_strength, strategy_name=rotation_owner):
                 self.logger.info(f"Closed least profitable position to make room for {symbol}")
                 return True
             return False
-        
+
         # If we haven't reached the position count limit, allow the trade
         position_limit_reached = self._check_position_limit(max_allocation_pct=effective_max)
         self.logger.info(f"Position limit check for {symbol}: {len(self.positions)} positions, limit reached: {position_limit_reached}")
-        
+
         if not position_limit_reached:
             self.logger.info(f"Position limit not reached for {symbol}, allowing trade")
             return True
-        
+
         # If we have reached the position count limit, try to close a less profitable position
-        if self._close_least_profitable_position(signal_strength):
+        if self._close_least_profitable_position(signal_strength, strategy_name=rotation_owner):
             self.logger.info(f"Closed least profitable position to make room for {symbol}")
             return True
-        
+
         # If we couldn't close any positions, don't execute the trade
         self.logger.warning(f"Position limit reached ({len(self.positions)} positions), skipping trade for {symbol}")
-        return False 
+        return False
 
     def load_positions_from_db(self):
         """Load positions from database."""
