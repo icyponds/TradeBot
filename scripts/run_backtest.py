@@ -86,7 +86,43 @@ def select_universe(db, symbols, start, end, max_n):
     return selected
 
 
-def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None, param_overrides=None, disable_strategies=None, enable_instances=None, max_symbols=None, universe='all'):
+def apply_risk_overrides(config, overrides):
+    """
+    Apply --risk-param overrides (dotted paths under risk_management).
+
+    E.g. 'capital_sleeves.enabled=true' sets
+    config['risk_management']['capital_sleeves']['enabled'] = True.
+    Values are typed: true/false -> bool, numeric -> int/float, else str.
+    """
+    if not overrides:
+        return
+    print("Applying risk_management overrides:")
+    for override in overrides:
+        try:
+            key_path, value = override.split('=', 1)
+        except ValueError:
+            print(f"  ⚠ Invalid format '{override}' — expected path.to.key=value")
+            continue
+        lowered = value.strip().lower()
+        if lowered in ('true', 'false'):
+            typed_value = (lowered == 'true')
+        else:
+            try:
+                typed_value = float(value)
+                if typed_value == int(typed_value) and '.' not in value:
+                    typed_value = int(value)
+            except ValueError:
+                typed_value = value
+        node = config.setdefault('risk_management', {})
+        parts = key_path.split('.')
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+        old_value = node.get(parts[-1], 'N/A')
+        node[parts[-1]] = typed_value
+        print(f"  risk_management.{key_path}: {old_value} → {typed_value}")
+
+
+def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None, param_overrides=None, disable_strategies=None, enable_instances=None, max_symbols=None, universe='all', risk_param_overrides=None):
     # Increase log level and setup file logging prior to ANY imports or logic
     import logging
     
@@ -250,6 +286,9 @@ def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None, 
             except ValueError:
                 print(f"  ⚠ Invalid format '{override}' — expected strategy.param=value")
 
+    # 3.1c Apply any --risk-param overrides from CLI (risk_management.*)
+    apply_risk_overrides(config, risk_param_overrides)
+
     # 3.2 Strategy instance adjustments (purely CLI-driven; the old hardcoded
     # sentiment/liquidation-hunter filter was removed - use --disable-strategy)
     if 'instances' in config['strategies']:
@@ -393,6 +432,9 @@ if __name__ == "__main__":
                         help='Cap on number of symbols to simulate (default: 20)')
     parser.add_argument('--universe', choices=['all', 'crypto', 'hip3'], default='all',
                         help='Restrict the asset universe (default: all)')
+    parser.add_argument('--risk-param', action='append', metavar='path.to.key=value',
+                        help='Override a risk_management setting (repeatable, dotted path). '
+                             'E.g. --risk-param capital_sleeves.enabled=true')
 
     args = parser.parse_args()
     
@@ -409,7 +451,8 @@ if __name__ == "__main__":
             disable_strategies=args.disable_strategy,
             enable_instances=args.enable_instance,
             max_symbols=args.max_symbols,
-            universe=args.universe
+            universe=args.universe,
+            risk_param_overrides=args.risk_param
         )
     except KeyboardInterrupt:
         print("\nBacktest interrupted by user.")
