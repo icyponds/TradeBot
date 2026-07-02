@@ -2360,17 +2360,23 @@ class HyperliquidAPI(MarketInterface):
     
     def get_all_prices(self) -> Dict[str, float]:
         """Get current prices for all symbols."""
+        def _fetch():
+            return self.info.all_mids()
+
         try:
-            all_mids = self.info.all_mids()
+            all_mids = self._rate_limited_call(_fetch)
             return {k: float(v) for k, v in all_mids.items()}
         except Exception as e:
             self.logger.error(f"Error getting all prices: {e}")
             return {}
-    
+
     def get_order_book(self, symbol: str, depth: int = 20) -> Optional[Dict[str, Any]]:
         """Get order book for a symbol."""
+        def _fetch():
+            return self.info.l2_snapshot(symbol)
+
         try:
-            book = self.info.l2_snapshot(symbol)
+            book = self._rate_limited_call(_fetch)
             return {
                 'symbol': symbol,
                 'bids': book.get('levels', [[]])[0][:depth],
@@ -2395,8 +2401,11 @@ class HyperliquidAPI(MarketInterface):
         Returns:
             Dict containing asset metadata or None if not found
         """
+        def _fetch():
+            return self.info.meta()
+
         try:
-            meta = self.info.meta()
+            meta = self._rate_limited_call(_fetch)
             if not meta or 'universe' not in meta:
                 return None
             
@@ -2491,7 +2500,10 @@ class HyperliquidAPI(MarketInterface):
         (tokenToAvailableAfterMaintenance, token 0 = USDC); unrealized PnL
         still comes from the perp positions.
         """
-        spot_state = self.info.spot_user_state(self.public_account_address)
+        def _fetch_spot_state():
+            return self.info.spot_user_state(self.public_account_address)
+
+        spot_state = self._rate_limited_call(_fetch_spot_state, weight=2)
         usdc_total = 0.0
         for bal in (spot_state or {}).get('balances', []):
             if bal.get('coin') == 'USDC':
@@ -2506,7 +2518,10 @@ class HyperliquidAPI(MarketInterface):
 
         unrealized_pnl = 0.0
         try:
-            user_state = self.info.user_state(self.public_account_address)
+            def _fetch_user_state():
+                return self.info.user_state(self.public_account_address)
+
+            user_state = self._rate_limited_call(_fetch_user_state, weight=2)
             for ap in (user_state or {}).get('assetPositions', []):
                 unrealized_pnl += float(ap.get('position', {}).get('unrealizedPnl', 0))
         except Exception as e:
@@ -2564,11 +2579,14 @@ class HyperliquidAPI(MarketInterface):
             for i, dex_name in enumerate(dexs_to_query):
                 try:
                     # Fetch state for this context
-                    # Note: We don't cache individual DEX calls here efficiently yet, 
+                    # Note: We don't cache individual DEX calls here efficiently yet,
                     # but rate limiter handles them.
                     # SDK expects dex as a string: "" for native, dex name for HIP-3
-                    user_state = self.info.user_state(self.public_account_address, dex=dex_name)
-                    
+                    def _fetch_state(dex=dex_name):
+                        return self.info.user_state(self.public_account_address, dex=dex)
+
+                    user_state = self._rate_limited_call(_fetch_state, weight=2)
+
                     margin_summary = user_state.get('marginSummary', {})
                     account_value = float(margin_summary.get('accountValue', 0))
                     used_margin = float(margin_summary.get('totalMarginUsed', 0))
@@ -2643,8 +2661,11 @@ class HyperliquidAPI(MarketInterface):
             for dex_name in dexs_to_query:
                 try:
                     # Pass the dex name explicitly. Native is "" (empty string).
-                    user_state = self.info.user_state(self.public_account_address, dex=dex_name)
-                    
+                    def _fetch_state(dex=dex_name):
+                        return self.info.user_state(self.public_account_address, dex=dex)
+
+                    user_state = self._rate_limited_call(_fetch_state, weight=2)
+
                     for pos in user_state.get('assetPositions', []):
                         position_data = pos.get('position', {})
                         size = float(position_data.get('szi', 0))
@@ -3884,7 +3905,10 @@ class HyperliquidAPI(MarketInterface):
         try:
             # Fetch recent user fills
             # user_fills expects address. We use the configured wallet address.
-            fills = self.info.user_fills(self.wallet_address)
+            def _fetch_fills():
+                return self.info.user_fills(self.wallet_address)
+
+            fills = self._rate_limited_call(_fetch_fills, weight=2)
             
             total_fee = 0.0
             found = False
