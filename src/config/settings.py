@@ -438,8 +438,12 @@ def load_config() -> Dict[str, Any]:
                 # the validation bar SOLO. NOT enabled: run together with
                 # csm_4h the pair returns -$10.1k over the same 8 windows
                 # (worse than either alone in 7/8 windows — conflict
-                # resolution + capital rotation churn). Blocked on capital
-                # isolation between strategies, not on signal quality.
+                # resolution + capital rotation churn). Capital sleeves
+                # (same day) close every eviction channel and lift the
+                # combined book to +$1.8k — still below csm_4h SOLO
+                # (~+$9.0k/8w): residual symbol-occupancy interference +
+                # halved capital. Co-running stays off; would need a
+                # separate subaccount or symbol partitioning.
                 # Full numbers: reports/oos_matrix3/SUMMARY.md
                 # {"type": "sentiment_ml", "name": "sentiment_ml_1h", "timeframe": "1h"},
                 # {"type": "sentiment_ml", "name": "sentiment_ml_4h", "timeframe": "4h"},
