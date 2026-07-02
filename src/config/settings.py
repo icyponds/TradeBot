@@ -403,6 +403,10 @@ def load_config() -> Dict[str, Any]:
                 # {"type": "volatility_breakout", "name": "vol_breakout_4h", "timeframe": "4h"},
                 
                 # Adaptive Grid (15m, 1h, 4h)
+                # 2026-07-02 diagnostic: still 0 trades (Dec'25, May'26) —
+                # entry needs ADX<30 AND RSI extreme AND ATR-band break AND
+                # EMA-slope agreement at once. Inert; archive or redesign,
+                # do not tune into activity.
                 # {"type": "adaptive_grid", "name": "adaptive_grid_15m", "timeframe": "15m"},
                 # {"type": "adaptive_grid", "name": "adaptive_grid_1h", "timeframe": "1h"},
                 # {"type": "adaptive_grid", "name": "adaptive_grid_4h", "timeframe": "4h"},
@@ -410,6 +414,16 @@ def load_config() -> Dict[str, Any]:
                 # Sentiment ML (15m, 1h, 4h)
                 # sentiment_ml_15m disabled due to poor backtest performance (-$49)
                 # {"type": "sentiment_ml", "name": "sentiment_ml_15m", "timeframe": "15m"},
+                # 2026-07-02 re-test WITH whipsaw lockout (its Dec killer is
+                # exactly the lockout's trigger tape): nov -$10.7k(28% DD) /
+                # dec +$5.3k / jan +$7.2k / feb +$0.9k / mar +$0.8k /
+                # apr +$3.9k / may +$6.6k / jun(fwd) -$1.3k = +$12.7k, PASSES
+                # the validation bar SOLO. NOT enabled: run together with
+                # csm_4h the pair returns -$10.1k over the same 8 windows
+                # (worse than either alone in 7/8 windows — conflict
+                # resolution + capital rotation churn). Blocked on capital
+                # isolation between strategies, not on signal quality.
+                # Full numbers: reports/oos_matrix3/SUMMARY.md
                 # {"type": "sentiment_ml", "name": "sentiment_ml_1h", "timeframe": "1h"},
                 # {"type": "sentiment_ml", "name": "sentiment_ml_4h", "timeframe": "4h"},
                 
