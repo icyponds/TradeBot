@@ -3182,20 +3182,31 @@ class StrategyManager:
         
         return None
 
-    def _resolve_conflict(self, symbol: str, signal: Dict[str, Any], new_strength: float) -> str:
+    def _resolve_conflict(self, symbol: str, signal: Dict[str, Any], new_strength: float, strategy_name: Optional[str] = None) -> str:
         """
         Traffic Controller: Resolve conflicts between New Signal and Existing Position.
-        
+
         Returns:
             'flip': Close existing, Open new.
             'upgrade': Close existing (profit), Open new (larger size).
             'block': Ignore new signal.
             'nuclear': Displace multi-leg.
         """
-        
+
         # 1. Check Nuclear Displacement (Arb vs Single)
         nuclear = self._check_nuclear_displacement(symbol, new_strength)
         if nuclear == 'displacement_arb':
+            # Sleeve isolation: a strategy may only displace its OWN multi-leg
+            # position — flip/upgrade/nuclear are eviction channels that
+            # bypass the capital gate (single/multi-leg parity).
+            if self.capital_sleeves_enabled and strategy_name:
+                arb_position = self.execution_engine.get_multi_leg_position_by_leg_symbol(symbol)
+                if arb_position is not None and getattr(arb_position, 'strategy', None) != strategy_name:
+                    self.logger.info(
+                        f"🛡️ Sleeve isolation: {strategy_name} may not displace "
+                        f"{getattr(arb_position, 'strategy', 'unknown')}'s multi-leg position on {symbol}"
+                    )
+                    return 'block'
             return 'nuclear'
         elif nuclear == 'block':
             return 'block'
@@ -3203,8 +3214,21 @@ class StrategyManager:
         # 2. Check Standard Position
         if symbol not in self.positions:
             return 'open' # No conflict
-            
+
         position = self.positions[symbol]
+
+        # Sleeve isolation: another strategy's position on this symbol cannot
+        # be flipped or upgraded away — the incoming signal is blocked. The
+        # combined matrix showed cross-strategy flips are the residual
+        # eviction channel after capital rotation is removed.
+        if self.capital_sleeves_enabled and strategy_name:
+            owner = getattr(position, 'strategy', None)
+            if owner is not None and owner != strategy_name:
+                self.logger.info(
+                    f"🛡️ Sleeve isolation: {strategy_name} signal on {symbol} blocked "
+                    f"({owner} owns the position)"
+                )
+                return 'block'
         
         # Get Old Strength (Default to 0.5 if missing)
         # We need to ensure we store this on entry!
@@ -3429,7 +3453,7 @@ class StrategyManager:
         # ---------------------------------------------------------
         # 2. Conflict Resolution ("The Traffic Controller")
         # ---------------------------------------------------------
-        resolution = self._resolve_conflict(symbol, signal, signal_strength)
+        resolution = self._resolve_conflict(symbol, signal, signal_strength, strategy_name=strategy_name)
         
         if resolution == 'block':
             # self.logger.debug(f"Signal for {symbol} BLOCKED by Traffic Controller")

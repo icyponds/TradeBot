@@ -272,6 +272,59 @@ class TestSleeveGate:
         assert result is True
 
 
+class TestConflictIsolation:
+    def test_cross_strategy_flip_blocked(self, manager_factory):
+        """Sleeves on: a strong opposing signal cannot flip another
+        strategy's position — flips were the residual eviction channel."""
+        manager = manager_factory(sleeves_cfg={'enabled': True, 'weights': {}})
+        pos = _make_position('csm_4h')
+        pos.side = 'long'
+        pos.entry_signal_strength = 0.3
+        manager.execution_engine.positions = {'BTC': pos}
+        manager.execution_engine.get_multi_leg_position_by_leg_symbol.return_value = None
+
+        resolution = manager._resolve_conflict(
+            'BTC', {'signal': 'sell'}, 0.9, strategy_name='sentiment_ml_1h')
+        assert resolution == 'block'
+
+    def test_same_strategy_flip_still_allowed(self, manager_factory):
+        """A strategy managing its own book may still flip its position."""
+        manager = manager_factory(sleeves_cfg={'enabled': True, 'weights': {}})
+        pos = _make_position('csm_4h')
+        pos.side = 'long'
+        pos.entry_signal_strength = 0.3
+        manager.execution_engine.positions = {'BTC': pos}
+        manager.execution_engine.get_multi_leg_position_by_leg_symbol.return_value = None
+
+        resolution = manager._resolve_conflict(
+            'BTC', {'signal': 'sell'}, 0.9, strategy_name='csm_4h')
+        assert resolution == 'flip'
+
+    def test_cross_strategy_flip_allowed_when_disabled(self, manager_factory):
+        """Sleeves off: strength-based flips keep pre-sleeve behavior."""
+        manager = manager_factory(sleeves_cfg={'enabled': False, 'weights': {}})
+        pos = _make_position('csm_4h')
+        pos.side = 'long'
+        pos.entry_signal_strength = 0.3
+        manager.execution_engine.positions = {'BTC': pos}
+        manager.execution_engine.get_multi_leg_position_by_leg_symbol.return_value = None
+
+        resolution = manager._resolve_conflict(
+            'BTC', {'signal': 'sell'}, 0.9, strategy_name='sentiment_ml_1h')
+        assert resolution == 'flip'
+
+    def test_cross_strategy_nuclear_blocked(self, manager_factory):
+        """Parity: another strategy's multi-leg position is protected too."""
+        manager = manager_factory(sleeves_cfg={'enabled': True, 'weights': {}})
+        arb = _make_multi_leg('stat_arb_1h')
+        arb.entry_signal_strength = 0.1
+        manager.execution_engine.get_multi_leg_position_by_leg_symbol.return_value = arb
+
+        resolution = manager._resolve_conflict(
+            'BTC', {'signal': 'buy'}, 0.9, strategy_name='sentiment_ml_1h')
+        assert resolution == 'block'
+
+
 class TestRotationDisabledUnderSleeves:
     def test_position_count_limit_skips_without_rotation(self, manager_factory):
         """At the position-count limit with sleeves on: skip, don't displace."""
