@@ -4480,8 +4480,11 @@ class HyperliquidAPI(MarketInterface):
         Returns:
             List of funding rate records
         """
-        try:
+        def _fetch():
             return self.info.funding_history(symbol, start_time_ms, end_time_ms)
+
+        try:
+            return self._rate_limited_call(_fetch, weight=2)
         except Exception as e:
             self.logger.error(f"Error getting funding history for {symbol}: {e}")
             return []

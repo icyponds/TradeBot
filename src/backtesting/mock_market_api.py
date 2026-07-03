@@ -818,6 +818,31 @@ class MockMarketAPI(MarketInterface):
         """Inject historical funding rates."""
         self.historical_funding = funding_data
 
+    def get_funding_history(self, symbol: str, start_time_ms: int, end_time_ms: int) -> list:
+        """
+        Historical funding records in the real API's format
+        ([{'coin', 'fundingRate', 'time'}], fundingRate as str, time in ms).
+
+        CRITICAL: the window is clamped to the simulation clock so a
+        strategy can never read funding from the future.
+        """
+        df = self.historical_funding.get(symbol)
+        if df is None or df.empty or self.current_time is None:
+            return []
+
+        start = datetime.utcfromtimestamp(start_time_ms / 1000.0)
+        end = min(datetime.utcfromtimestamp(end_time_ms / 1000.0), self.current_time)
+
+        window = df[(df.index >= start) & (df.index <= end)]
+        return [
+            {
+                'coin': symbol,
+                'fundingRate': str(row['funding_rate']),
+                'time': int(ts.timestamp() * 1000),
+            }
+            for ts, row in window.iterrows()
+        ]
+
     def get_funding_rate(self, symbol: str) -> Optional[float]:
         """Get current funding rate from history."""
         if not self.current_time:

@@ -43,6 +43,7 @@ STRATEGY_CLASSES = {
     'liquidation_hunter': ('liquidation_hunter_strategy', 'LiquidationHunterStrategy'),
     'cross_sectional_momentum': ('cross_sectional_momentum_strategy', 'CrossSectionalMomentumStrategy'),
     'trend_following': ('trend_following_strategy', 'TrendFollowingStrategy'),
+    'funding_carry': ('funding_carry_strategy', 'FundingCarryStrategy'),
 }
 
 
@@ -1481,7 +1482,7 @@ class StrategyManager:
                     strategies[instance_name] = strategy_class(
                         self.config, self.market_api, self.correlation_manager, timeframe=timeframe
                     )
-                elif strategy_type == 'funding_rate_arbitrage':
+                elif strategy_type in ('funding_rate_arbitrage', 'funding_carry'):
                     strategies[instance_name] = strategy_class(
                         self.config, self.market_api, timeframe=timeframe
                     )

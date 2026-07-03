@@ -495,6 +495,11 @@ def load_config() -> Dict[str, Any]:
                 # longs -$1.4k) -> no edge at either speed, long-only would not save it.
                 # {"type": "trend_following", "name": "tsmom_4h", "timeframe": "4h"},
 
+                # Cross-Sectional Funding Carry (funding as directional signal)
+                # 2026-07-03: NEW, backtesting in progress — enable via
+                # --enable-instance funding_carry:funding_carry_1h:1h
+                # {"type": "funding_carry", "name": "funding_carry_1h", "timeframe": "1h"},
+
                 # NOTE (2026-06 clean-engine re-test of vol_breakout_1h): only
                 # profitable in the Dec-2025 crash regime (+$6k, concentrated in
                 # one ANZ short); Nov/Jan/Feb all negative (PF 0.5-0.8). Keep off.
@@ -617,6 +622,21 @@ def load_config() -> Dict[str, Any]:
                 "invert": 0,
                 # EMA200 alignment filter (momentum construct; 0 for reversal)
                 "trend_filter_enabled": 1,
+            },
+
+            # Cross-Sectional Funding Carry (research round 7, 2026-07-03)
+            # Funding as a DIRECTIONAL signal: short the most crowded longs
+            # (top decile trailing funding — they pay hourly to hold), long
+            # the most crowded shorts; receive the carry while positioned.
+            # One leg per name — deliberately avoids the 4-leg fee math that
+            # killed delta-neutral funding_rate_arbitrage.
+            "funding_carry": {
+                "funding_lookback_hours": 24,   # trailing window for the signal
+                "exit_lookback_hours": 8,       # short window for the funding-flip exit
+                "top_n_percent": 0.15,          # fade top/bottom 15% of the universe
+                "min_abs_funding_apr": 0.10,    # trailing funding must annualize past 10%
+                "min_universe": 10,
+                "stop_loss_pct": 0.05,
             },
 
             # Trend Following (Donchian / time-series momentum)
