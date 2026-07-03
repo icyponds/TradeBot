@@ -40,3 +40,12 @@ def test_none_overrides_is_noop():
     config = {'risk_management': {'x': 1}}
     apply_risk_overrides(config, None)
     assert config == {'risk_management': {'x': 1}}
+
+
+def test_trading_section_override():
+    apply_section_overrides = _mod.apply_section_overrides
+    config = {'trading': {'maker_entries': {'enabled': False}}}
+    apply_section_overrides(config, 'trading', ['maker_entries.enabled=true',
+                                                'maker_entries.timeout_seconds=120'])
+    assert config['trading']['maker_entries']['enabled'] is True
+    assert config['trading']['maker_entries']['timeout_seconds'] == 120
