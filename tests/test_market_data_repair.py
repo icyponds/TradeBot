@@ -403,3 +403,74 @@ class TestRepairerTimeframeParameter:
         assert checked_timeframes == ['15m'], \
             f"Expected ['15m'], got {checked_timeframes}"
 
+
+
+class TestWindowBoundaryAlignment:
+    """
+    Regression (live 2026-07-03): verify window start snapped to the HOUR,
+    not the timeframe boundary. The API returns the candle OVERLAPPING
+    startTime while the DB query excludes rows before start_dt, so a 13:00
+    start inside a 12:00 4h candle flagged that candle "missing in DB" on
+    every hourly scan — the same range was re-repaired (weight-20 fetch +
+    rewrite of identical data) for every pooled symbol, forever.
+    """
+
+    def _setup(self, start_dt):
+        from src.utils.market_data_repair import MarketDataRepairer
+
+        interval_ms = 4 * 3600 * 1000
+        base = datetime(2026, 7, 1, 0, 0, tzinfo=timezone.utc)
+        # Six closed 4h candles at proper boundaries, identical in DB & API
+        candle_times = [base + timedelta(hours=4 * i) for i in range(6)]
+        api_candles = [
+            {'t': int(ts.timestamp() * 1000), 'o': '1', 'h': '1', 'l': '1',
+             'c': '100.0', 'v': '50.0'}
+            for ts in candle_times
+        ]
+
+        full_df = pd.DataFrame(
+            {'open': 1.0, 'high': 1.0, 'low': 1.0, 'close': 100.0, 'volume': 50.0},
+            index=pd.DatetimeIndex([ts.replace(tzinfo=None) for ts in candle_times]),
+        )
+
+        mock_api = MagicMock()
+        mock_api.get_spot_api_name.return_value = None
+        # API returns every candle OVERLAPPING [start, end] regardless of
+        # exact start (Hyperliquid behavior)
+        mock_api._rate_limited_call.return_value = api_candles
+
+        mock_db = MagicMock()
+
+        def get_market_data(symbol, timeframe, start_date=None, end_date=None):
+            # Real DB behavior: strictly exclude rows before start_date
+            cutoff = start_date.replace(tzinfo=None) if start_date.tzinfo else start_date
+            return full_df[full_df.index >= cutoff]
+
+        mock_db.get_market_data.side_effect = get_market_data
+        repairer = MarketDataRepairer(mock_api, mock_db)
+        return repairer, mock_db
+
+    def test_mid_candle_start_finds_no_false_mismatch(self):
+        """Start inside a 4h candle (13:00) must not flag the 12:00 candle."""
+        with patch('src.utils.market_data_repair.datetime') as mock_dt:
+            real_now = datetime(2026, 7, 2, 12, 0, tzinfo=timezone.utc)
+            mock_dt.now.return_value = real_now
+            mock_dt.fromtimestamp = datetime.fromtimestamp
+            start = datetime(2026, 7, 1, 13, 0, tzinfo=timezone.utc)
+            end = real_now
+
+            repairer, _ = self._setup(start)
+            mismatches = repairer.verify_and_repair('BNB', '4h', start, end, repair=False)
+
+        assert mismatches == 0
+
+    def test_db_query_start_is_floored_to_boundary(self):
+        """The DB fetch must use the floored start so both sides align."""
+        start = datetime(2026, 7, 1, 13, 0, tzinfo=timezone.utc)
+        end = datetime(2026, 7, 2, 12, 0, tzinfo=timezone.utc)
+        repairer, mock_db = self._setup(start)
+
+        repairer.verify_and_repair('BNB', '4h', start, end, repair=False)
+
+        called_start = mock_db.get_market_data.call_args.kwargs['start_date']
+        assert called_start == datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc)

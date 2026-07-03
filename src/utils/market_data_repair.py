@@ -135,7 +135,16 @@ class MarketDataRepairer:
             start_dt = start_dt.replace(tzinfo=timezone.utc)
         if end_dt.tzinfo is None:
             end_dt = end_dt.replace(tzinfo=timezone.utc)
-        
+
+        # Align the window start to a CANDLE boundary for this timeframe.
+        # The API returns the candle OVERLAPPING start_ms while the DB query
+        # excludes rows before start_dt — an hour-snapped start inside a 4h
+        # candle flagged that boundary candle "missing" on every scan, an
+        # eternal re-repair loop (live 2026-07-03: identical July-1 ranges
+        # re-repaired hourly for every pooled symbol, weight-20 fetch each).
+        start_ts = int(start_dt.timestamp())
+        start_dt = datetime.fromtimestamp(start_ts - (start_ts % interval), tz=timezone.utc)
+
         # 1. Fetch Local
         df_db = self.db.get_market_data(symbol, timeframe, start_date=start_dt, end_date=end_dt)
         
@@ -163,10 +172,17 @@ class MarketDataRepairer:
         if not closed_candles:
             return 0
             
-        # Map API candles (closed only)
+        # Map API candles (closed only), RESTRICTED to the aligned window:
+        # the API may return candles before startTime (overlap + margin);
+        # those are outside the verified range, so their absence from the
+        # DB query proves nothing — comparing them created the eternal
+        # re-repair loop.
+        window_start = pd.Timestamp(start_dt).tz_localize(None)
         api_map = {}
         for c in closed_candles:
             ts = pd.to_datetime(c['t'], unit='ms')
+            if ts < window_start:
+                continue
             api_map[ts] = {
                 'close': float(c['c']),
                 'volume': float(c['v'])
