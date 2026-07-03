@@ -496,8 +496,15 @@ def load_config() -> Dict[str, Any]:
                 # {"type": "trend_following", "name": "tsmom_4h", "timeframe": "4h"},
 
                 # Cross-Sectional Funding Carry (funding as directional signal)
-                # 2026-07-03: NEW, backtesting in progress — enable via
-                # --enable-instance funding_carry:funding_carry_1h:1h
+                # 2026-07-03 verdict: NO EDGE — 8-window matrix -$15.1k
+                # (nov -2.3k / dec +0.8k / jan -1.4k / feb +0.2k / mar -7.6k
+                # / apr -2.3k / may -3.7k / jun +1.3k). Fails the bar:
+                # shorting crowded longs = shorting momentum; in trend
+                # months the crowd is right and collected funding is ~10x
+                # too small to cover directional stop-outs. Dec profile
+                # (+$808, PF 2.06, 0.9% DD) noted for a future crash-regime
+                # sleeve. Do not re-tune on these windows.
+                # Full numbers: reports/oos_matrix4/SUMMARY.md
                 # {"type": "funding_carry", "name": "funding_carry_1h", "timeframe": "1h"},
 
                 # NOTE (2026-06 clean-engine re-test of vol_breakout_1h): only
