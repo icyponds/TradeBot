@@ -56,6 +56,12 @@ class FundingCarryStrategy(BaseStrategy):
         self.exit_apr_buffer = float(fc_config.get('exit_apr_buffer', 0.05))
         # No funding-flip exit before this age; stops/trailing still protect.
         self.min_holding_hours = float(fc_config.get('min_holding_hours', 8))
+        # 'short' | 'long' | 'both'. Default SHORT-ONLY: HL funding is
+        # anchored to a ~+11% APR baseline, so negative-funding spikes mean-
+        # revert within hours — every long was an 8h fee-bleed round trip
+        # (entry -> baseline restored -> flip exit at ~-$15). Crowded-long
+        # extremes persist; crowded-short extremes do not.
+        self.direction = str(fc_config.get('direction', 'short')).lower()
 
         # Per-(symbol, window) trailing-funding cache, refreshed when the
         # hour changes (funding only updates hourly).
@@ -153,12 +159,16 @@ class FundingCarryStrategy(BaseStrategy):
         signal = None
         reason = ''
 
-        if rank >= (1.0 - self.top_n_percent) and funding_apr >= self.min_abs_funding_apr:
+        if (self.direction in ('short', 'both')
+                and rank >= (1.0 - self.top_n_percent)
+                and funding_apr >= self.min_abs_funding_apr):
             # Crowded longs paying the most: fade them, receive funding
             signal = 'sell'
             reason = (f"Funding Carry: SHORT crowded longs (rank {rank:.2f}, "
                       f"trailing funding {funding_apr:+.1%} APR)")
-        elif rank <= self.top_n_percent and funding_apr <= -self.min_abs_funding_apr:
+        elif (self.direction in ('long', 'both')
+                and rank <= self.top_n_percent
+                and funding_apr <= -self.min_abs_funding_apr):
             # Crowded shorts paying the most: fade them, receive funding
             signal = 'buy'
             reason = (f"Funding Carry: LONG crowded shorts (rank {rank:.2f}, "

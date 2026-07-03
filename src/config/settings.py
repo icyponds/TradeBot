@@ -641,6 +641,11 @@ def load_config() -> Dict[str, Any]:
                 "stop_loss_pct": 0.05,
                 "exit_apr_buffer": 0.05,        # flip must clearly cross, not touch zero
                 "min_holding_hours": 8,         # no flip-exit while young; stops still protect
+                # SHORT-ONLY by default: HL funding anchors to ~+11% APR
+                # baseline, so negative-funding longs mean-revert to a flip
+                # exit within hours (pure fee bleed, ~40 x -$15 in the v1
+                # smoke test). 'both'/'long' available for research.
+                "direction": "short",
             },
 
             # Trend Following (Donchian / time-series momentum)

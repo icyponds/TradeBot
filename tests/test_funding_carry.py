@@ -69,19 +69,29 @@ def _universe(extreme_pos=0.0002, extreme_neg=-0.0002, n_neutral=10):
 
 
 class TestSignals:
-    def test_fades_crowded_extremes(self):
+    def test_fades_crowded_longs_short_only_default(self):
         rates = _universe()
         strategy = _make_strategy(rates)
-        first_pass = _prime_universe(strategy, rates)
+        _prime_universe(strategy, rates)
         # First pass may miss extremes seen before the universe filled;
         # second pass ranks against the full cache.
         sig_short = strategy.generate_signal('CROWDED_LONGS', _ohlcv())
         sig_long = strategy.generate_signal('CROWDED_SHORTS', _ohlcv())
 
         assert sig_short is not None and sig_short['signal'] == 'sell'
+        assert sig_short['funding_apr'] > 0.30
+        # Default direction='short': the long side is OFF (HL baseline
+        # funding mean-reverts negative spikes within hours — fee bleed)
+        assert sig_long is None
+
+    def test_direction_both_enables_longs(self):
+        rates = _universe()
+        strategy = _make_strategy(rates, {'direction': 'both'})
+        _prime_universe(strategy, rates)
+
+        sig_long = strategy.generate_signal('CROWDED_SHORTS', _ohlcv())
         assert sig_long is not None and sig_long['signal'] == 'buy'
-        assert sig_short['funding_apr'] > 0.10
-        assert sig_long['funding_apr'] < -0.10
+        assert sig_long['funding_apr'] < -0.30
 
     def test_neutral_names_get_no_signal(self):
         rates = _universe()
@@ -91,9 +101,10 @@ class TestSignals:
         assert strategy.generate_signal('MID3', _ohlcv()) is None
 
     def test_apr_threshold_blocks_weak_extremes(self):
-        # Extreme by rank but only ~4% APR — below the 10% default gate
-        rates = _universe(extreme_pos=0.0000045, extreme_neg=-0.0000045)
-        strategy = _make_strategy(rates)
+        # Extreme by rank but only ~13% APR — barely above baseline, below
+        # the 30% gate (direction 'both' so the long side is also checked)
+        rates = _universe(extreme_pos=0.000015, extreme_neg=-0.000015)
+        strategy = _make_strategy(rates, {'direction': 'both'})
         _prime_universe(strategy, rates)
 
         assert strategy.generate_signal('CROWDED_LONGS', _ohlcv()) is None
