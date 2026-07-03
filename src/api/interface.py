@@ -58,6 +58,18 @@ class MarketInterface(ABC):
         pass
 
     @abstractmethod
+    def execute_maker_order(self, symbol: str, side: str, size: float,
+                            timeout_seconds: float = 300.0,
+                            poll_interval_seconds: float = 5.0,
+                            market_type: str = 'perp') -> Optional[Dict[str, Any]]:
+        """Post-only (ALO) entry at the touch: rests until filled or timeout.
+
+        Unfilled after timeout = the entry is MISSED (status 'missed'), never
+        chased with a taker order. Live analogue of the backtest maker model
+        (backtesting.maker_execution)."""
+        pass
+
+    @abstractmethod
     def place_stop_order(self, symbol: str, side: str, size: float,
                          trigger_price: float, reduce_only: bool = True,
                          is_market: bool = True) -> Optional[Dict[str, Any]]:

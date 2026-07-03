@@ -3593,6 +3593,158 @@ class HyperliquidAPI(MarketInterface):
             self.logger.error(f"Order execution failed for {symbol} ({market_type}): {e}")
             return None
     
+    def execute_maker_order(
+        self,
+        symbol: str,
+        side: str,
+        size: float,
+        timeout_seconds: float = 300.0,
+        poll_interval_seconds: float = 5.0,
+        market_type: str = 'perp'
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Post-only (ALO) entry at the touch.
+
+        Places a resting limit order joining the best bid (buy) / best ask
+        (sell) with tif=Alo so it can never take liquidity. Polls until
+        filled or `timeout_seconds`, then cancels: an unfilled entry is
+        MISSED (status 'missed'), never chased with a taker order — the
+        live analogue of the backtest maker model (round 4).
+
+        Entries only (reduce_only exits must stay taker: you cross the
+        spread rather than fail to exit).
+        """
+        if not self.exchange:
+            self.logger.error("Exchange client not initialized")
+            return None
+
+        try:
+            market_info = self._resolve_market_info(symbol, market_type)
+            if not market_info:
+                self.logger.error(f"Cannot resolve market info for {symbol} ({market_type})")
+                return None
+
+            trading_symbol = market_info['symbol']
+            display_symbol = market_info['display_symbol']
+            current_price = market_info['price']
+            sz_decimals = market_info['sz_decimals']
+
+            rounded_size = round(size, sz_decimals)
+            is_buy = side.lower() == 'buy'
+
+            order_value = rounded_size * current_price
+            if order_value < 10.0:
+                self.logger.error(f"Maker order value ${order_value:.2f} below minimum $10")
+                return None
+
+            # Join the touch: best bid for buys, best ask for sells
+            limit_price = current_price
+            try:
+                def _fetch_l2():
+                    return self.info.l2_snapshot(trading_symbol)
+                l2 = self._rate_limited_call(_fetch_l2, weight=2)
+                levels = (l2 or {}).get('levels', [])
+                if is_buy and levels and levels[0]:
+                    limit_price = float(levels[0][0]['px'])
+                elif (not is_buy) and len(levels) > 1 and levels[1]:
+                    limit_price = float(levels[1][0]['px'])
+            except Exception as e:
+                self.logger.warning(f"Maker order: L2 unavailable for {display_symbol}, using mid ({e})")
+
+            limit_price = self._round_to_tick(
+                limit_price,
+                symbol=trading_symbol,
+                sz_decimals=sz_decimals,
+                is_perp=(market_type != 'spot')
+            )
+
+            self.logger.info(
+                f"Placing post-only entry: {side} {rounded_size} {display_symbol} "
+                f"@ {limit_price:.6f} (Alo, timeout {timeout_seconds:.0f}s)"
+            )
+
+            response = self._rate_limited_call(
+                self.exchange.order,
+                trading_symbol,
+                is_buy,
+                rounded_size,
+                limit_price,
+                {"limit": {"tif": "Alo"}},
+                reduce_only=False
+            )
+
+            order_result = self._parse_order_response(
+                response, trading_symbol, side, rounded_size, limit_price
+            )
+
+            if not order_result:
+                # ALO that would cross is rejected by the exchange — that is
+                # a legitimate miss, not an error to retry with taker.
+                self.logger.info(f"Maker entry rejected (would cross?) for {display_symbol} — missed")
+                return {'status': 'missed', 'symbol': symbol, 'side': side,
+                        'filled_size': 0.0, 'avg_fill_price': 0.0,
+                        'reason': 'alo_rejected'}
+
+            if order_result.get('status') == 'filled':
+                return order_result
+
+            order_id = order_result.get('order_id')
+            if not order_id:
+                return {'status': 'missed', 'symbol': symbol, 'side': side,
+                        'filled_size': 0.0, 'avg_fill_price': 0.0,
+                        'reason': 'no_order_id'}
+
+            # Rest until filled or timeout
+            deadline = time.time() + float(timeout_seconds)
+            while time.time() < deadline:
+                time.sleep(max(1.0, float(poll_interval_seconds)))
+                status = self.get_order_status(order_id)
+                if status and status.get('status') == 'filled':
+                    self.logger.info(
+                        f"✓ Maker entry filled: {side} {status.get('filled_size')} "
+                        f"{display_symbol} @ {status.get('avg_fill_price')}"
+                    )
+                    return {
+                        'status': 'filled',
+                        'order_id': order_id,
+                        'symbol': symbol,
+                        'side': side,
+                        'size': rounded_size,
+                        'filled_size': float(status.get('filled_size') or rounded_size),
+                        'avg_fill_price': float(status.get('avg_fill_price') or limit_price),
+                        'fee': float(status.get('fee', 0.0) or 0.0),
+                        'timestamp': datetime.now(),
+                    }
+
+            # Timeout: cancel the resting order; report any partial fill
+            self.cancel_order(symbol, order_id)
+            final = self.get_order_status(order_id) or {}
+            filled_size = float(final.get('filled_size') or 0.0)
+            if filled_size > 0:
+                self.logger.info(
+                    f"Maker entry PARTIAL at timeout: {filled_size}/{rounded_size} {display_symbol}"
+                )
+                return {
+                    'status': 'partial',
+                    'order_id': order_id,
+                    'symbol': symbol,
+                    'side': side,
+                    'size': rounded_size,
+                    'filled_size': filled_size,
+                    'avg_fill_price': float(final.get('avg_fill_price') or limit_price),
+                    'fee': float(final.get('fee', 0.0) or 0.0),
+                    'timestamp': datetime.now(),
+                }
+
+            self.logger.info(f"Maker entry MISSED (timeout): {side} {rounded_size} {display_symbol}")
+            return {'status': 'missed', 'order_id': order_id, 'symbol': symbol,
+                    'side': side, 'filled_size': 0.0, 'avg_fill_price': 0.0,
+                    'reason': 'timeout'}
+
+        except Exception as e:
+            self.logger.error(f"Error executing maker order for {symbol}: {e}")
+            return None
+
     def place_order(
         self,
         symbol: str,

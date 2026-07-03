@@ -368,14 +368,18 @@ class MockMarketAPI(MarketInterface):
             return {'status': 'rejected', 'reason': 'No Price'}
             
         # Maker entry attempt (see __init__): fill at the limit or miss.
-        is_maker_fill = self.maker_enabled and not reduce_only
-        if is_maker_fill:
+        # _forced_maker_fill: set by execute_maker_order, which has already
+        # made the fill/miss decision — book the fill at maker economics.
+        forced_maker = getattr(self, '_forced_maker_fill', False)
+        is_maker_fill = (self.maker_enabled or forced_maker) and not reduce_only
+        if is_maker_fill and not forced_maker:
             self.maker_stats['attempted'] += 1
             if self._maker_rng.random() > self.maker_fill_prob:
                 self.maker_stats['rejected'] += 1
                 return {'status': 'rejected',
                         'reason': 'maker_unfilled (post-only limit not reached)'}
             self.maker_stats['filled'] += 1
+        if is_maker_fill:
             fill_price = price  # resting limit at the touch: no slippage
         else:
             # Taker: slippage simulation (configurable, default 5bps)
@@ -610,6 +614,31 @@ class MockMarketAPI(MarketInterface):
             'filled_size': 0.0,
             'avg_fill_price': 0.0,
         }
+
+    def execute_maker_order(self, symbol: str, side: str, size: float,
+                            timeout_seconds: float = 300.0,
+                            poll_interval_seconds: float = 5.0,
+                            market_type: str = 'perp') -> Optional[Dict[str, Any]]:
+        """
+        Simulated post-only entry: fills at the touch with maker fee with
+        `fill_prob`, otherwise the entry is MISSED (status 'missed').
+        Mirrors HyperliquidAPI.execute_maker_order semantics so the live
+        trading.maker_entries routing is exercised in backtests.
+        """
+        self.maker_stats['attempted'] += 1
+        if self._maker_rng.random() > self.maker_fill_prob:
+            self.maker_stats['rejected'] += 1
+            return {'status': 'missed', 'symbol': symbol, 'side': side,
+                    'filled_size': 0.0, 'avg_fill_price': 0.0,
+                    'reason': 'timeout'}
+
+        self.maker_stats['filled'] += 1
+        self._forced_maker_fill = True
+        try:
+            return self.execute_order(symbol, side, size, reduce_only=False,
+                                      market_type=market_type)
+        finally:
+            self._forced_maker_fill = False
 
     def cancel_order(self, symbol: str, order_id: int) -> bool:
         """Simulate cancelling a resting order (e.g. a native stop)."""

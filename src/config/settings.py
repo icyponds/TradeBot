@@ -130,6 +130,23 @@ def load_config() -> Dict[str, Any]:
             # Global risk limit: max % of account that can be lost on any single trade
             "max_account_loss_per_trade": float(os.getenv("MAX_ACCOUNT_LOSS_PER_TRADE", "3.0")),  # 3% of account
 
+            # Post-only (ALO) maker ENTRIES — live analogue of the round-4
+            # backtest model (backtesting.maker_execution): rest at the touch,
+            # unfilled after timeout = missed entry, never chased with taker.
+            # Exits and reduce-only orders are unaffected (always taker).
+            # Maker fills cut ~10bps/leg to ~1.5bps; at csm's trade rate that
+            # roughly doubles the validated 7-window total (round 4: 5-seed
+            # ensemble all positive, mean +$17k..+$22k). Default OFF pending
+            # live validation at small size.
+            "maker_entries": {
+                "enabled": False,
+                # Instance names to route through maker entries; empty = all
+                # single-leg perp/HIP-3 entries.
+                "strategies": [],
+                "timeout_seconds": 300.0,
+                "poll_interval_seconds": 5.0,
+            },
+
             # Multi-leg trade controls (used by funding-rate arbitrage: spot + perp)
             "multi_leg": {
                 # If true, when we don't have enough *combined* USDC across spot + perp silos

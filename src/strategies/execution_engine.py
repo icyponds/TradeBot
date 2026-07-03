@@ -327,14 +327,41 @@ class ExecutionEngine:
             if self._gross_cap_blocks(position_size * current_price, symbol):
                 return
 
-            order_result = self.market_api.execute_order(
-                symbol=symbol,
-                side=side,
-                size=position_size,
-                reduce_only=False,
-                urgency="normal",
-                market_type=market_type
+            # Post-only maker entries (trading.maker_entries): rest at the
+            # touch; a miss means NO trade — never chased with taker.
+            maker_cfg = (self.config.get('trading', {}) or {}).get('maker_entries', {}) or {}
+            maker_allowed = (
+                bool(maker_cfg.get('enabled', False))
+                and market_type != 'spot'
+                and hasattr(self.market_api, 'execute_maker_order')
+                and (not maker_cfg.get('strategies')
+                     or strategy_name in maker_cfg.get('strategies', []))
             )
+
+            if maker_allowed:
+                order_result = self.market_api.execute_maker_order(
+                    symbol=symbol,
+                    side=side,
+                    size=position_size,
+                    timeout_seconds=float(maker_cfg.get('timeout_seconds', 300.0)),
+                    poll_interval_seconds=float(maker_cfg.get('poll_interval_seconds', 5.0)),
+                    market_type=market_type,
+                )
+                if not order_result or order_result.get('filled_size', 0) <= 0:
+                    reason = (order_result or {}).get('reason', 'unknown')
+                    self.logger.info(
+                        f"Maker entry missed for {symbol} ({reason}) — skipping trade"
+                    )
+                    return
+            else:
+                order_result = self.market_api.execute_order(
+                    symbol=symbol,
+                    side=side,
+                    size=position_size,
+                    reduce_only=False,
+                    urgency="normal",
+                    market_type=market_type
+                )
             
             if order_result and order_result.get('filled_size', 0) > 0:
                 fill_size = order_result['filled_size']
