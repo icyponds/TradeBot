@@ -125,14 +125,15 @@ class TestSignals:
 
 
 class TestExit:
-    def _position(self, symbol='BTC', side='short'):
+    def _position(self, symbol='BTC', side='short', age_hours=12):
         pos = MagicMock()
         pos.symbol = symbol
         pos.side = side
+        pos.timestamp = NOW - timedelta(hours=age_hours)
         return pos
 
     def test_short_exits_when_funding_flips_negative(self):
-        strategy = _make_strategy({'BTC': -0.0001})
+        strategy = _make_strategy({'BTC': -0.0001})  # ~-88% APR, past buffer
         should, reason = strategy.should_exit(self._position(side='short'), 100.0)
         assert should is True
         assert 'flipped' in reason
@@ -147,6 +148,20 @@ class TestExit:
         should, reason = strategy.should_exit(self._position(side='long'), 100.0)
         assert should is True
 
+    def test_flip_within_buffer_holds(self):
+        """Hysteresis: an 8h mean drifting barely negative (~-2.6% APR,
+        inside the 5% buffer) must NOT churn the position out."""
+        strategy = _make_strategy({'BTC': -0.000003})
+        should, _ = strategy.should_exit(self._position(side='short'), 100.0)
+        assert should is False
+
+    def test_min_holding_blocks_early_flip_exit(self):
+        """Anti-churn: no funding-flip exit while the position is young."""
+        strategy = _make_strategy({'BTC': -0.0001})  # clearly flipped
+        should, _ = strategy.should_exit(
+            self._position(side='short', age_hours=2), 100.0)
+        assert should is False
+
     def test_no_funding_data_holds(self):
         config = {'strategies': {'ohlcv_limit': 100, 'funding_carry': {}}}
         api = MagicMock()
@@ -160,9 +175,9 @@ class TestExit:
 class TestSignalStrength:
     def test_strength_scales_with_apr(self):
         strategy = _make_strategy({})
-        weak = strategy.calculate_signal_strength({}, signal_context={'funding_apr': 0.10})
-        mid = strategy.calculate_signal_strength({}, signal_context={'funding_apr': 0.30})
-        strong = strategy.calculate_signal_strength({}, signal_context={'funding_apr': 0.60})
+        weak = strategy.calculate_signal_strength({}, signal_context={'funding_apr': 0.30})
+        mid = strategy.calculate_signal_strength({}, signal_context={'funding_apr': 0.90})
+        strong = strategy.calculate_signal_strength({}, signal_context={'funding_apr': 2.00})
         assert weak == 0.5
         assert 0.5 < mid < 1.0
         assert strong == 1.0

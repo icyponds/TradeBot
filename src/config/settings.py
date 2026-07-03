@@ -634,9 +634,13 @@ def load_config() -> Dict[str, Any]:
                 "funding_lookback_hours": 24,   # trailing window for the signal
                 "exit_lookback_hours": 8,       # short window for the funding-flip exit
                 "top_n_percent": 0.15,          # fade top/bottom 15% of the universe
-                "min_abs_funding_apr": 0.10,    # trailing funding must annualize past 10%
+                # HL baseline funding ~11% APR: the gate must sit well above
+                # it (v0 at 10% churned 94 trades/week on normal names)
+                "min_abs_funding_apr": 0.30,
                 "min_universe": 10,
                 "stop_loss_pct": 0.05,
+                "exit_apr_buffer": 0.05,        # flip must clearly cross, not touch zero
+                "min_holding_hours": 8,         # no flip-exit while young; stops still protect
             },
 
             # Trend Following (Donchian / time-series momentum)

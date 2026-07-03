@@ -44,9 +44,18 @@ class FundingCarryStrategy(BaseStrategy):
         self.funding_lookback_hours = int(fc_config.get('funding_lookback_hours', 24))
         self.exit_lookback_hours = int(fc_config.get('exit_lookback_hours', 8))
         self.top_n_percent = float(fc_config.get('top_n_percent', 0.15))
-        self.min_abs_funding_apr = float(fc_config.get('min_abs_funding_apr', 0.10))
+        # Hyperliquid baseline funding is ~11% APR — the gate must sit well
+        # above it or "extreme" captures perfectly normal names (v0 smoke
+        # test: 94 trades/week of churn at the 10% default).
+        self.min_abs_funding_apr = float(fc_config.get('min_abs_funding_apr', 0.30))
         self.min_universe = int(fc_config.get('min_universe', 10))
         self.stop_loss_pct = float(fc_config.get('stop_loss_pct', 0.05))
+        # Funding-flip exit hysteresis: the trailing APR must clearly cross
+        # against the receive side, not merely touch zero (hourly funding
+        # noise flips an 8h mean constantly).
+        self.exit_apr_buffer = float(fc_config.get('exit_apr_buffer', 0.05))
+        # No funding-flip exit before this age; stops/trailing still protect.
+        self.min_holding_hours = float(fc_config.get('min_holding_hours', 8))
 
         # Per-(symbol, window) trailing-funding cache, refreshed when the
         # hour changes (funding only updates hourly).
@@ -183,14 +192,23 @@ class FundingCarryStrategy(BaseStrategy):
         if not symbol or side not in ('long', 'short'):
             return False, None
 
+        # Let the carry accrue: no funding-flip exit while the position is
+        # young (stops and the trailing stop still protect price risk).
+        entry_ts = getattr(position, 'timestamp', None)
+        if entry_ts is not None:
+            age_hours = (self._now() - entry_ts).total_seconds() / 3600.0
+            if age_hours < self.min_holding_hours:
+                return False, None
+
         recent = self._trailing_funding(symbol, self.exit_lookback_hours)
         if recent is None:
             return False, None
 
-        if side == 'short' and recent <= 0:
-            return True, f"Funding flipped ({recent * 24 * 365:+.1%} APR): short no longer receives"
-        if side == 'long' and recent >= 0:
-            return True, f"Funding flipped ({recent * 24 * 365:+.1%} APR): long no longer receives"
+        recent_apr = recent * 24 * 365
+        if side == 'short' and recent_apr <= -self.exit_apr_buffer:
+            return True, f"Funding flipped ({recent_apr:+.1%} APR): short no longer receives"
+        if side == 'long' and recent_apr >= self.exit_apr_buffer:
+            return True, f"Funding flipped ({recent_apr:+.1%} APR): long no longer receives"
 
         return False, None
 
