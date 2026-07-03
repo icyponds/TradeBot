@@ -4819,13 +4819,22 @@ class StrategyManager:
             current_data = {}
             if timestamp:
                 current_data['timestamp'] = timestamp
-            try:
-                # Get OHLCV data for this symbol
-                ohlcv = self.market_api.get_ohlcv(position.symbol, strategy.timeframe, strategy.ohlcv_limit)
-                if ohlcv is not None:
-                    current_data['ohlcv'] = ohlcv
-            except Exception as e:
-                self.logger.debug(f"Could not get OHLCV for exit check: {e}")
+
+            # Only pay for an OHLCV fetch when the strategy actually
+            # overrides should_exit — the base implementation is a no-op,
+            # and this fetch (REST + rate limiter on cache miss, per
+            # position, every monitor cycle) starved the exit monitor past
+            # its watchdog threshold while the background scout saturated
+            # the limiter (live 2026-07-03: two watchdog respawns in 10min).
+            from .base_strategy import BaseStrategy
+            if type(strategy).should_exit is not BaseStrategy.should_exit:
+                try:
+                    # Get OHLCV data for this symbol
+                    ohlcv = self.market_api.get_ohlcv(position.symbol, strategy.timeframe, strategy.ohlcv_limit)
+                    if ohlcv is not None:
+                        current_data['ohlcv'] = ohlcv
+                except Exception as e:
+                    self.logger.debug(f"Could not get OHLCV for exit check: {e}")
             
             # Call strategy's should_exit method
             should_exit, exit_reason = strategy.should_exit(
