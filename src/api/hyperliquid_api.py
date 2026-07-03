@@ -2433,24 +2433,40 @@ class HyperliquidAPI(MarketInterface):
         if not self.exchange:
             self.logger.error("Exchange client not initialized")
             return False
-            
+
         try:
+            # The exchange rejects non-positive leverage with an opaque 422
+            # ("Failed to deserialize the JSON body"). Clamp defensively —
+            # sub-1x sizing leverage is a notional concept, not a valid
+            # exchange setting (live failure 2026-07-03).
+            leverage = max(1, int(leverage))
+
             # Check for isolated-only assets
             asset_info = self._get_asset_info_for_symbol(symbol)
             if asset_info and asset_info.get('onlyIsolated', False):
                 if is_cross:
                     self.logger.warning(f"Asset {symbol} only supports Isolated Margin. Forcing is_cross=False.")
                     is_cross = False
-            
+
             self.logger.info(f"Updating leverage for {symbol} to {leverage}x (Cross: {is_cross})")
             def _update():
                 return self.exchange.update_leverage(leverage, symbol, is_cross)
             result = self._rate_limited_call(_update)
             
+            # Some assets (HIP-3 equities) are isolated-only but do not
+            # always carry the onlyIsolated flag in cached metadata — retry
+            # as isolated instead of failing (live 2026-07-03, xyz:INTC).
+            if (result.get('status') != 'ok' and is_cross
+                    and 'cross margin is not allowed' in str(result.get('response', '')).lower()):
+                self.logger.warning(f"{symbol} rejects cross margin; retrying leverage update as isolated")
+                def _update_isolated():
+                    return self.exchange.update_leverage(leverage, symbol, False)
+                result = self._rate_limited_call(_update_isolated)
+
             if result.get('status') == 'ok':
                 self.logger.info(f"Successfully updated leverage for {symbol}")
                 # Invalidate positions cache as leverage changes affect margin calculation
-                self.cache.invalidate("positions") 
+                self.cache.invalidate("positions")
                 return True
             else:
                 self.logger.error(f"Failed to update leverage: {result}")

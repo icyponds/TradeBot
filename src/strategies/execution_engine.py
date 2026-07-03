@@ -209,8 +209,11 @@ class ExecutionEngine:
                 asset_max_leverage=asset_max_leverage,
                 stop_loss_pct=stop_loss_pct_for_sizing
             )
-            # Explicitly cast to int as exchange requires integer leverage
-            leverage = int(leverage)
+            # Exchange requires integer leverage >= 1. Dynamic sizing can
+            # produce sub-1x "leverage" (deleveraged notional on small
+            # equity); the exchange setting must still be 1 — int() alone
+            # sent 0 and got a 422 (live failure 2026-07-03, ZEC at 0.7x).
+            leverage = max(1, int(leverage))
             
             # 5. Enforce Leverage on Exchange
             try:
