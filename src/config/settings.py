@@ -368,6 +368,19 @@ def load_config(profile: Optional[str] = None) -> Dict[str, Any]:
                 # get weight 1.0; empty dict = equal split.
                 "weights": {},
             },
+            # Churn controls (research round 8, 2026-10-03). With the
+            # backtest selector no longer seeded from live trades, csm_4h solo
+            # spent ~half its June trades on these two paths (46 position_limit
+            # + 44 capital_rotation closes; 20 same-side upgrades) — the
+            # "validated" profiles never rotated only because live-trade
+            # seeding kept signal strengths low. Defaults = current behavior.
+            # capital_rotation: close the least-profitable position when a
+            # stronger signal arrives at the allocation/position limit.
+            "capital_rotation": {"enabled": True},
+            # same_strategy_upgrade: let a strategy close+reopen its OWN
+            # same-side position on a stronger signal (cross-strategy
+            # upgrades are unaffected).
+            "same_strategy_upgrade": {"enabled": True},
             "whipsaw_lockout": {
                 # Default ON since 2026-06-10: flips Dec-2025 positive for
                 # csm_4h (+$11k single-window delta) at the cost of ~-$4k in

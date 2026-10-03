@@ -112,6 +112,13 @@ class StrategyManager:
         self.capital_sleeves_enabled = bool(sleeves_cfg.get('enabled', False))
         self.capital_sleeve_weights = dict(sleeves_cfg.get('weights', {}) or {})
 
+        # Churn controls (research round 8): see settings.py risk_management
+        rm_cfg = config.get('risk_management', {}) or {}
+        self.capital_rotation_enabled = bool(
+            (rm_cfg.get('capital_rotation', {}) or {}).get('enabled', True))
+        self.same_strategy_upgrade_enabled = bool(
+            (rm_cfg.get('same_strategy_upgrade', {}) or {}).get('enabled', True))
+
         
         # Trading pairs management
         self.max_pairs_to_trade = config['trading'].get('max_pairs_to_trade', 50)
@@ -3262,6 +3269,14 @@ class StrategyManager:
         # B. Same Direction (Long vs Long)
         # Upgrade Only: New > Old + 0.5 (increased from 0.2 to prevent premature closures)
         if new_strength > (old_strength + 0.5):
+            # Same strategy, same symbol, same side: an "upgrade" is a pure
+            # close+reopen round trip (fees + reset stops) — it exists for a
+            # STRONGER strategy taking over a symbol, not for re-entering
+            # what we already hold.
+            if not self.same_strategy_upgrade_enabled and strategy_name \
+                    and getattr(position, 'strategy', None) == strategy_name:
+                self.logger.debug(f"🛡️ BLOCK same-strategy upgrade on {symbol} ({strategy_name} already holds it)")
+                return 'block'
             self.logger.info(f"⬆️ UPGRADE Conflict: New ({float(new_strength or 0):.2f}) > Old ({float(old_strength or 0):.2f} + 0.5). Resizing.")
             return 'upgrade'
             
@@ -4375,7 +4390,7 @@ class StrategyManager:
         # zero rotations (their caps never bound); rotating within a sleeve
         # just relocates the churn we are trying to kill (2026-07-02 sleeved
         # matrix: 165 rotations/month and every leg worse than unsleeved).
-        rotation_allowed = not self.capital_sleeves_enabled
+        rotation_allowed = not self.capital_sleeves_enabled and self.capital_rotation_enabled
 
         # Per-strategy sleeve gate: the strategy's own capital at risk must
         # stay inside its budgeted fraction of the allocation cap.
