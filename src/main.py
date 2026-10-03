@@ -103,15 +103,42 @@ def _signal_handler(signum, frame):
     sys.exit(0)
 
 
-def main():
+def parse_args(argv=None):
+    import argparse
+    parser = argparse.ArgumentParser(description="Hyperliquid trading bot")
+    parser.add_argument('--profile', default=None,
+                        help='Strategy profile (settings strategies.profiles) for a per-subaccount '
+                             'process; pair with HYPERLIQUID_SUBACCOUNT_ADDRESS in that process env')
+    return parser.parse_args(argv)
+
+
+def check_profile_account(config):
+    """
+    A profile process MUST trade its own subaccount: two processes on one
+    account would treat each other's positions as ghosts (and the position
+    sync's smart adoption could take them over). Returns an error string or None.
+    """
+    profile = config.get('runtime_profile')
+    if profile and not (config.get('api', {}).get('subaccount_address') or '').strip():
+        return (f"--profile {profile} requires HYPERLIQUID_SUBACCOUNT_ADDRESS for this process "
+                f"(profiles exist to isolate strategies on separate subaccounts)")
+    return None
+
+
+def main(argv=None):
     """Main function to run the trading bot."""
     global _strategy_manager
+    args = parse_args(argv)
     
     try:
         # Load configuration first
-        config = load_config()
+        config = load_config(profile=args.profile)
         if not config:
             print("ERROR: Failed to load configuration")
+            sys.exit(1)
+        profile_error = check_profile_account(config)
+        if profile_error:
+            print(f"ERROR: {profile_error}")
             sys.exit(1)
         
         # Setup logging with config

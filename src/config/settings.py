@@ -3,16 +3,21 @@ Configuration settings for the trading bot.
 """
 
 import os
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
 
 
-def load_config() -> Dict[str, Any]:
+def load_config(profile: Optional[str] = None) -> Dict[str, Any]:
     """
     Load configuration from environment variables and defaults.
+
+    Args:
+        profile: optional strategy profile (strategies.profiles) for running
+            one bot process per Hyperliquid subaccount. Replaces the instance
+            list and gives the process its own DB and log file.
     
     Returns:
         Dict containing configuration settings
@@ -29,6 +34,9 @@ def load_config() -> Dict[str, Any]:
             "private_key": os.getenv("HYPERLIQUID_PRIVATE_KEY", ""),
             "wallet_address": os.getenv("HYPERLIQUID_WALLET_ADDRESS", ""),
             "public_account_address": os.getenv("HYPERLIQUID_PUBLIC_ACCOUNT_ADDRESS", ""),
+            # Optional Hyperliquid subaccount this process trades (address,
+            # hence .env). Per-strategy isolation: one process per subaccount.
+            "subaccount_address": os.getenv("HYPERLIQUID_SUBACCOUNT_ADDRESS", ""),
             "timeout": int(os.getenv("API_TIMEOUT", "30")),
             
             # Rate limiting configuration (Hyperliquid request-weight units:
@@ -521,6 +529,16 @@ def load_config() -> Dict[str, Any]:
                 # profitable in the Dec-2025 crash regime (+$6k, concentrated in
                 # one ANZ short); Nov/Jan/Feb all negative (PF 0.5-0.8). Keep off.
             ],
+            # Per-subaccount process profiles: `python src/main.py --profile NAME`
+            # with HYPERLIQUID_SUBACCOUNT_ADDRESS set for that process runs
+            # ONLY the profile's instances, on its own subaccount, DB and log.
+            # The default process (no --profile) runs `instances` above.
+            # Co-running on ONE account failed twice (round 1 ensemble, round 6
+            # csm+sentiment: symbol occupancy + capital rotation); separate
+            # subaccounts remove both channels. Example — NOT approved for
+            # live until it passes the round-8 bar on its own subaccount math:
+            #   "sentiment": [{"type": "sentiment_ml", "name": "sentiment_ml_1h", "timeframe": "1h"}],
+            "profiles": {},
             # Note: timeframe is now auto-selected per strategy instance
             "ohlcv_limit": int(os.getenv("OHLCV_LIMIT", "300")), # Increased for EMA200
             "stat_arb": {
@@ -796,7 +814,36 @@ def load_config() -> Dict[str, Any]:
         # RSI Strategy Configuration
         
     }
-    
+
+    if profile:
+        apply_profile(config, profile)
+
+    return config
+
+
+def apply_profile(config: Dict[str, Any], profile: str) -> Dict[str, Any]:
+    """
+    Run a named strategy profile (strategies.profiles[profile]) instead of
+    the default instance list — the per-subaccount process model that
+    research round 6 identified as the prerequisite for co-running
+    strategies (one account = symbol-occupancy + capital interference).
+
+    The profile process gets its own SQLite DB (live_positions, trades,
+    market data) and log file unless PERSISTENCE_DB_PATH is set, so two
+    processes never reconcile each other's positions.
+    """
+    profiles = (config.get('strategies', {}) or {}).get('profiles', {}) or {}
+    if profile not in profiles:
+        raise ValueError(f"Unknown strategy profile {profile!r}; defined: {sorted(profiles)}")
+    config['strategies']['instances'] = [dict(inst) for inst in profiles[profile]]
+    config['runtime_profile'] = profile
+    persistence = config.setdefault('persistence', {})
+    if not persistence.get('db_path'):
+        persistence['db_path'] = f"data/trades_{profile}.db"
+    log_cfg = config.setdefault('logging', {})
+    log_file = log_cfg.get('file') or 'trading_bot.log'
+    if log_file == 'trading_bot.log':
+        log_cfg['file'] = f"trading_bot_{profile}.log"
     return config
 
 

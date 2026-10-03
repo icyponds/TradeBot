@@ -19,3 +19,21 @@ services:
     # Interactive mode for potential debugging attached
     stdin_open: true
     tty: true
+
+  # Per-strategy SUBACCOUNT process (example, disabled). Runs only the
+  # settings.py strategies.profiles["sentiment"] instances on its own
+  # Hyperliquid subaccount, DB (data/trades_sentiment.db) and log file.
+  # tradebot-sentiment:
+  #   image: tradebot:latest
+  #   container_name: tradebot-sentiment
+  #   restart: always
+  #   command: ["python", "src/main.py", "--profile", "sentiment"]
+  #   volumes:
+  #     - ./src:/app/src
+  #     - ./data:/app/data
+  #     - ./logs:/app/logs
+  #   env_file:
+  #     - .env
+  #   environment:
+  #     - PYTHONUNBUFFERED=1
+  #     - HYPERLIQUID_SUBACCOUNT_ADDRESS=0xyour_subaccount_address

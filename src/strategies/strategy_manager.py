@@ -368,7 +368,8 @@ class StrategyManager:
             if 'src.config.settings' in self._sys.modules:
                 self._importlib.reload(self._sys.modules['src.config.settings'])
                 from src.config.settings import load_config
-                new_config = load_config()
+                # Keep this process on its subaccount profile across reloads
+                new_config = load_config(profile=self.config.get('runtime_profile'))
                 
                 # Check if strategies config changed
                 new_instances_cfg = new_config['strategies'].get('instances', [])

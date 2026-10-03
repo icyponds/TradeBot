@@ -808,9 +808,19 @@ class HyperliquidAPI(MarketInterface):
         # If not specified or empty, defaults to wallet_address
         _public_addr = config['api'].get('public_account_address', '')
         self.public_account_address = _public_addr if _public_addr else config['api']['wallet_address']
+
+        # Hyperliquid SUBACCOUNT (per-strategy capital isolation): the master
+        # account's API wallet signs with vault_address=<subaccount>, and every
+        # account read (positions, balances, fills, open orders) targets the
+        # subaccount. One bot process per subaccount (see --profile in main.py).
+        self.subaccount_address = (config['api'].get('subaccount_address') or '').strip()
+        if self.subaccount_address:
+            self.public_account_address = self.subaccount_address
         
         self.logger.info(f"Wallet Address: {self.wallet_address}")
         self.logger.info(f"Public Account Address: {self.public_account_address}")
+        if self.subaccount_address:
+            self.logger.info(f"Trading SUBACCOUNT {self.subaccount_address} (vault_address signing)")
         
         # HIP-3 configuration (Hypurr/Spot-linked assets)
         # Enabled by default to ensure all assets are visible.
@@ -1011,7 +1021,9 @@ class HyperliquidAPI(MarketInterface):
                         self.exchange = Exchange(
                             wallet=wallet,
                             base_url=self.base_url,
-                            # NO vault_address - API wallets don't use vault mechanism
+                            # Plain API wallets don't use vault_address; a SUBACCOUNT
+                            # does (actions are signed on behalf of the subaccount)
+                            vault_address=self.subaccount_address or None,
                             account_address=self.public_account_address,  # For position lookups
                             perp_dexs=self.perp_dexs if self.hip3_enabled else None
                         )
@@ -4072,9 +4084,12 @@ class HyperliquidAPI(MarketInterface):
         """
         try:
             # Fetch recent user fills
-            # user_fills expects address. We use the configured wallet address.
+            # Fills belong to the TRADING account. Querying the API agent
+            # wallet (self.wallet_address) returned no fills whenever the bot
+            # trades on behalf of a main account or subaccount, so every live
+            # trade recorded fees=0.0 (June-2026 trades table).
             def _fetch_fills():
-                return self.info.user_fills(self.wallet_address)
+                return self.info.user_fills(self.public_account_address)
 
             fills = self._rate_limited_call(_fetch_fills, weight=2)
             
