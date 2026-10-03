@@ -461,6 +461,11 @@ class StrategyManager:
                         # Set timeframe if applicable
                         if stimeframe:
                             instance.timeframe = stimeframe
+
+                        # Strategies that read market data directly (funding
+                        # history) need the API the normal init path injects
+                        if hasattr(instance, 'set_market_api'):
+                            instance.set_market_api(self.market_api)
                             
                         self.strategies[name] = instance
                         self.logger.info(f"Strategy {name} ({stype}/{stimeframe}) initialized and added.")
@@ -1485,6 +1490,11 @@ class StrategyManager:
                 elif strategy_type in ('funding_rate_arbitrage', 'funding_carry'):
                     strategies[instance_name] = strategy_class(
                         self.config, self.market_api, timeframe=timeframe
+                    )
+                elif strategy_type == 'cross_sectional_momentum':
+                    # market_api feeds the optional funding filter
+                    strategies[instance_name] = strategy_class(
+                        self.config, timeframe=timeframe, market_api=self.market_api
                     )
                 else:
                     strategies[instance_name] = strategy_class(self.config, timeframe=timeframe)
@@ -4827,7 +4837,12 @@ class StrategyManager:
             # its watchdog threshold while the background scout saturated
             # the limiter (live 2026-07-03: two watchdog respawns in 10min).
             from .base_strategy import BaseStrategy
-            if type(strategy).should_exit is not BaseStrategy.should_exit:
+            needs_data = getattr(strategy, 'needs_exit_data', None)
+            if callable(needs_data):
+                wants_ohlcv = bool(needs_data())
+            else:
+                wants_ohlcv = type(strategy).should_exit is not BaseStrategy.should_exit
+            if wants_ohlcv:
                 try:
                     # Get OHLCV data for this symbol
                     ohlcv = self.market_api.get_ohlcv(position.symbol, strategy.timeframe, strategy.ohlcv_limit)

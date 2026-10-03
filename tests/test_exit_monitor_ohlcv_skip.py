@@ -50,10 +50,10 @@ def _position(strategy='csm_4h'):
 
 
 def test_no_ohlcv_fetch_for_default_should_exit(manager):
-    """csm_4h does not override should_exit -> the fetch must be skipped."""
+    """csm_4h's rank exit is off by default -> the fetch must be skipped."""
     strategy = manager.strategies['csm_4h']
-    assert type(strategy).should_exit is BaseStrategy.should_exit, \
-        "precondition: csm uses the base no-op should_exit"
+    assert not strategy.needs_exit_data(), \
+        "precondition: csm rank-decay exit disabled (exit_rank_percent=0)"
 
     manager.market_api.get_ohlcv = MagicMock()
     manager._should_close_position(_position())
@@ -79,3 +79,28 @@ def test_ohlcv_fetched_for_overriding_strategy(manager):
     manager._should_close_position(_position(strategy='custom'))
 
     manager.market_api.get_ohlcv.assert_called_once()
+
+
+def test_ohlcv_fetched_when_csm_rank_exit_enabled(manager):
+    """Config-gated exits report the gate: rank exit ON -> data fetched."""
+    strategy = manager.strategies['csm_4h']
+    strategy.exit_rank_percent = 0.30
+    manager.market_api.get_ohlcv = MagicMock(return_value=None)
+
+    manager._should_close_position(_position())
+
+    manager.market_api.get_ohlcv.assert_called_once()
+
+
+def test_base_needs_exit_data_tracks_override():
+    class NoExit(BaseStrategy):
+        def generate_signal(self, symbol, ohlcv):
+            return None
+
+    class WithExit(NoExit):
+        def should_exit(self, position, current_price, current_data=None):
+            return False, None
+
+    cfg = {'strategies': {'ohlcv_limit': 100}}
+    assert NoExit(cfg, timeframe='1h').needs_exit_data() is False
+    assert WithExit(cfg, timeframe='1h').needs_exit_data() is True

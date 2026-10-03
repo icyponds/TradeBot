@@ -639,6 +639,17 @@ def load_config() -> Dict[str, Any]:
                 "invert": 0,
                 # EMA200 alignment filter (momentum construct; 0 for reversal)
                 "trend_filter_enabled": 1,
+                # --- research round 8 (2026-10-03), all OFF = validated config ---
+                # Blended-horizon score: [] = single lookback_period above;
+                # e.g. [12, 42, 126] = 2d/7d/21d, mean of per-horizon t-stats.
+                "lookback_periods": [],
+                # Rank-decay exit: 0 = none (exits only via stop/trail/flip);
+                # 0.30 = close a long once it leaves the top 30% (buffer rule).
+                "exit_rank_percent": 0.0,
+                # Funding filter: 0 = off; 0.30 = skip longs above +30% APR
+                # trailing funding and shorts below -30% APR (HL baseline ~11%).
+                "funding_filter_apr": 0.0,
+                "funding_lookback_hours": 24,
             },
 
             # Cross-Sectional Funding Carry (research round 7, 2026-07-03)

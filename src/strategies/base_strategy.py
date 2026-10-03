@@ -118,6 +118,16 @@ class BaseStrategy(ABC):
     # Strategies that need custom stop-loss logic can implement calculate_stop_loss
     # and it will be checked via hasattr in ExecutionEngine.
     
+    def needs_exit_data(self) -> bool:
+        """
+        Whether should_exit consumes OHLCV. The exit monitor only pays for a
+        per-position OHLCV fetch when this is True (live 2026-07-03: wasted
+        fetches starved the monitor past its watchdog). Default: True iff the
+        subclass overrides should_exit; strategies whose exit is config-gated
+        override this to report the gate.
+        """
+        return type(self).should_exit is not BaseStrategy.should_exit
+
     def should_exit(self, position: Any, current_price: float, 
                    current_data: Dict[str, Any] = None) -> Tuple[bool, Optional[str]]:
         """

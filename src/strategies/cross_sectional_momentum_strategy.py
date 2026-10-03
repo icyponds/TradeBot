@@ -17,6 +17,7 @@ cache of returns to determine rankings dynamically.
 """
 
 import logging
+import math
 from typing import Dict, Any, Optional, Tuple, List
 import pandas as pd
 import numpy as np
@@ -36,10 +37,12 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
     _universe_stats: Dict[str, Dict[str, Any]] = {}
     _last_cleanup = datetime.min
     
-    def __init__(self, config: Dict[str, Any], timeframe: str = None):
+    def __init__(self, config: Dict[str, Any], timeframe: str = None, market_api=None):
         super().__init__(config, timeframe)
         
         csm_config = config.get('strategies', {}).get('cross_sectional_momentum', {})
+        # Only needed for the optional funding filter (funding history)
+        self.market_api = market_api
         
         self.lookback_period = csm_config.get('lookback_period', 24) # 24h Momentum
         self.top_n_percent = csm_config.get('top_n_percent', 0.10)   # Top 10%
@@ -81,6 +84,35 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
         self.invert = bool(int(csm_config.get('invert', 0)))
         self.trend_filter_enabled = bool(int(csm_config.get('trend_filter_enabled', 1)))
 
+        # Blended-horizon ranking (research round 8). Empty = the single
+        # `lookback_period` score above, bit-for-bit. Otherwise the score is
+        # the mean over horizons k of ret_k / (sigma_bar * sqrt(k)) — a
+        # t-stat-like normalization so short and long horizons weigh evenly;
+        # blending removes dependence on one hand-picked lookback.
+        raw_periods = csm_config.get('lookback_periods') or []
+        if isinstance(raw_periods, str):  # CLI --param ...lookback_periods=12,42,126
+            raw_periods = [p for p in raw_periods.split(',') if p.strip()]
+        elif isinstance(raw_periods, (int, float)):
+            raw_periods = [raw_periods]
+        self.lookback_periods = [int(k) for k in raw_periods if int(k) > 1]
+
+        # Rank-decay exit with a buffer band (research round 8). 0 = off
+        # (positions end only via stop/trail/flip, the pre-2026-10 behavior).
+        # >0: close a long once its rank falls out of the top
+        # `exit_rank_percent` (shorts: out of the bottom). Entry at top 15% /
+        # exit below top 30% is the textbook buffer rule: held names that
+        # stopped being winners free their slot, while the gap between entry
+        # and exit thresholds prevents churn at the boundary.
+        self.exit_rank_percent = float(csm_config.get('exit_rank_percent', 0.0))
+
+        # Funding filter (research round 8; follow-up flagged in round 7).
+        # 0 = off. >0: skip longs whose trailing mean funding is above +X APR
+        # (crowded longs paying to hold) and shorts below -X APR. HL baseline
+        # funding is ~+11% APR, so useful thresholds sit well above it.
+        self.funding_filter_apr = float(csm_config.get('funding_filter_apr', 0.0))
+        self.funding_lookback_hours = int(csm_config.get('funding_lookback_hours', 24))
+        self._funding_cache: Dict[str, Tuple[datetime, Optional[float]]] = {}
+
         self.logger.info(f"Initialized Cross-Sectional Momentum: "
                         f"Lookback={self.lookback_period}h, "
                         f"Top/Bottom={self.top_n_percent:.0%}, ADX_Min={self.adx_threshold}")
@@ -102,29 +134,7 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
         # 1. Update Universe Stats
         current_price = ohlcv['close'].iloc[-1]
         
-        if len(ohlcv) >= self.lookback_period + self.skip_period:
-            # Calculate Momentum (Return) over the window ending `skip_period`
-            # bars ago (skip=0 preserves the original behavior)
-            end_idx = -1 - self.skip_period
-            ref_price = ohlcv['close'].iloc[end_idx]
-            past_price = ohlcv['close'].iloc[end_idx - self.lookback_period + 1]
-            momentum = (ref_price / past_price) - 1
-
-            # Calculate Volatility (over same lookback period)
-            volatility = ohlcv['close'].iloc[-self.lookback_period:].pct_change().std()
-            if volatility == 0 or np.isnan(volatility):
-                volatility = 1.0 # Avoid div/0
-                
-            # Score = Risk Adjusted Return
-            score = momentum / volatility
-            
-            # Store in shared cache
-            self._universe_stats[symbol] = {
-                'return': momentum,
-                'score': score,
-                'timestamp': datetime.now(),
-                'volatility': volatility
-            }
+        self._update_universe_stats(symbol, ohlcv)
         
         # 1b. Check Market Regime (ADX)
         if len(ohlcv) > 20 and 'high' in ohlcv.columns:
@@ -159,17 +169,9 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
              return None
             
         # Use SCORE for ranking (Risk-Adjusted Momentum)
-        scores = [v.get('score', v.get('return', 0)) for k, v in self._universe_stats.items()]
         my_score = self._universe_stats.get(symbol, {}).get('score', 0)
         my_return = self._universe_stats.get(symbol, {}).get('return', 0)
-        
-        sorted_scores = sorted(scores)
-        try:
-             # Find approximate rank
-             idx = next(i for i, x in enumerate(sorted_scores) if x >= my_score)
-             rank = (idx + 1) / len(sorted_scores)
-        except StopIteration:
-            rank = 1.0
+        rank = self._rank_of(my_score)
 
         signal = 'hold'
         reason = ''
@@ -227,6 +229,19 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
                  self.logger.debug(f"{symbol}: Short signal filtered (Price {current_price:.2f} > EMA200 {trend_ema:.2f})")
                  return None
 
+        # 6b. Funding filter: don't join crowded positioning
+        if self.funding_filter_apr > 0:
+            funding_apr = self._trailing_funding_apr(symbol)
+            if funding_apr is not None:
+                if signal == 'buy' and funding_apr > self.funding_filter_apr:
+                    self.logger.debug(f"{symbol}: long filtered by funding ({funding_apr:.0%} APR > "
+                                      f"{self.funding_filter_apr:.0%})")
+                    return None
+                if signal == 'sell' and funding_apr < -self.funding_filter_apr:
+                    self.logger.debug(f"{symbol}: short filtered by funding ({funding_apr:.0%} APR < "
+                                      f"{-self.funding_filter_apr:.0%})")
+                    return None
+
         # Volatility Targeting for Size?
         # Higher Vol -> Smaller Size (managed by position sizing logic, but we can signal confidence)
         confidence = abs(rank - 0.5) * 2 # 0.5 -> 0, 1.0 -> 1.0
@@ -254,6 +269,148 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
             'momentum': my_return,
             'atr': current_atr,
         }
+
+    # ------------------------------------------------------------------
+    # Scoring / ranking helpers
+    # ------------------------------------------------------------------
+
+    def _compute_stats(self, ohlcv: pd.DataFrame) -> Optional[Dict[str, float]]:
+        """Momentum, risk-adjusted score and bar volatility for one symbol."""
+        close = ohlcv['close']
+        end_idx = -1 - self.skip_period
+
+        if not self.lookback_periods:
+            if len(ohlcv) < self.lookback_period + self.skip_period:
+                return None
+            # Calculate Momentum (Return) over the window ending `skip_period`
+            # bars ago (skip=0 preserves the original behavior)
+            ref_price = close.iloc[end_idx]
+            past_price = close.iloc[end_idx - self.lookback_period + 1]
+            momentum = (ref_price / past_price) - 1
+
+            # Calculate Volatility (over same lookback period)
+            volatility = close.iloc[-self.lookback_period:].pct_change().std()
+            if volatility == 0 or np.isnan(volatility):
+                volatility = 1.0 # Avoid div/0
+
+            # Score = Risk Adjusted Return
+            return {'return': momentum, 'score': momentum / volatility, 'volatility': volatility}
+
+        longest = max(self.lookback_periods)
+        if len(ohlcv) < longest + self.skip_period:
+            return None
+        volatility = close.iloc[-longest:].pct_change().std()
+        if volatility == 0 or np.isnan(volatility):
+            volatility = 1.0
+        ref_price = close.iloc[end_idx]
+        rets, zs = [], []
+        for k in self.lookback_periods:
+            ret_k = (ref_price / close.iloc[end_idx - k + 1]) - 1
+            rets.append(ret_k)
+            zs.append(ret_k / (volatility * math.sqrt(k)))
+        return {'return': float(np.mean(rets)), 'score': float(np.mean(zs)), 'volatility': volatility}
+
+    def _update_universe_stats(self, symbol: str, ohlcv: pd.DataFrame) -> Optional[Dict[str, Any]]:
+        stats = self._compute_stats(ohlcv)
+        if stats is None:
+            return None
+        stats['timestamp'] = datetime.now()
+        # Store in shared cache
+        self._universe_stats[symbol] = stats
+        return stats
+
+    def _rank_of(self, my_score: float) -> float:
+        """Fraction of the universe scoring <= my_score (approximate rank)."""
+        sorted_scores = sorted(v.get('score', v.get('return', 0)) for v in self._universe_stats.values())
+        try:
+            idx = next(i for i, x in enumerate(sorted_scores) if x >= my_score)
+            return (idx + 1) / len(sorted_scores)
+        except StopIteration:
+            return 1.0
+
+    # ------------------------------------------------------------------
+    # Funding filter
+    # ------------------------------------------------------------------
+
+    def set_market_api(self, market_api):
+        """Late injection of the market API (hot-reload parity)."""
+        self.market_api = market_api
+
+    def _now(self) -> datetime:
+        """Simulation time in backtests (mock exposes current_time), else wall clock."""
+        sim_time = getattr(self.market_api, 'current_time', None)
+        return sim_time if sim_time else datetime.now()
+
+    def _trailing_funding_apr(self, symbol: str) -> Optional[float]:
+        """
+        Trailing mean funding, annualized (hourly rate x 8760). None when the
+        API or enough history is unavailable — the filter then fails OPEN
+        (no data never blocks a trade).
+        """
+        if not self.market_api or not hasattr(self.market_api, 'get_funding_history'):
+            return None
+        now = self._now()
+        hour_bucket = now.replace(minute=0, second=0, microsecond=0)
+        cached = self._funding_cache.get(symbol)
+        if cached and cached[0] == hour_bucket:
+            return cached[1]
+
+        hours = self.funding_lookback_hours
+        result: Optional[float] = None
+        try:
+            start_ms = int((now - timedelta(hours=hours)).timestamp() * 1000)
+            end_ms = int(now.timestamp() * 1000)
+            records = self.market_api.get_funding_history(symbol, start_ms, end_ms) or []
+            rates = [float(r['fundingRate']) for r in records if r.get('fundingRate') is not None]
+            if len(rates) >= max(2, hours // 2):
+                result = (sum(rates) / len(rates)) * 24 * 365
+        except Exception as e:
+            self.logger.debug(f"Funding history unavailable for {symbol}: {e}")
+
+        self._funding_cache[symbol] = (hour_bucket, result)
+        return result
+
+    # ------------------------------------------------------------------
+    # Rank-decay exit
+    # ------------------------------------------------------------------
+
+    def needs_exit_data(self) -> bool:
+        """Only fetch OHLCV in the exit monitor when the rank exit is on."""
+        return self.exit_rank_percent > 0
+
+    def should_exit(self, position: Any, current_price: float,
+                    current_data: Dict[str, Any] = None) -> Tuple[bool, Optional[str]]:
+        """
+        Close positions whose rank decayed out of the hold band.
+
+        Long (momentum mode): hold while rank >= 1 - exit_rank_percent.
+        Short: hold while rank <= exit_rank_percent. Reversal mode mirrors
+        both. The held symbol's score is recomputed from the supplied OHLCV
+        so a position never rides a stale cache entry.
+        """
+        if self.exit_rank_percent <= 0:
+            return False, None
+
+        symbol = getattr(position, 'symbol', None)
+        ohlcv = (current_data or {}).get('ohlcv')
+        if isinstance(ohlcv, dict):
+            ohlcv = ohlcv.get(self.timeframe)
+        if symbol and isinstance(ohlcv, pd.DataFrame) and not ohlcv.empty:
+            self._update_universe_stats(symbol, ohlcv)
+
+        stats = self._universe_stats.get(symbol)
+        if not stats or len(self._universe_stats) < 5:
+            return False, None
+
+        rank = self._rank_of(stats['score'])
+        side = str(getattr(position, 'side', '')).lower()
+        # Which tail does this position belong to?
+        holds_top = (side == 'long') != self.invert
+        if holds_top and rank < 1.0 - self.exit_rank_percent:
+            return True, f"rank_decay (rank {rank:.2f} < {1.0 - self.exit_rank_percent:.2f})"
+        if not holds_top and rank > self.exit_rank_percent:
+            return True, f"rank_decay (rank {rank:.2f} > {self.exit_rank_percent:.2f})"
+        return False, None
 
     @classmethod
     def _cleanup_cache(cls):
