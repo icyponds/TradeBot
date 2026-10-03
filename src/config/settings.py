@@ -190,6 +190,16 @@ def load_config() -> Dict[str, Any]:
             "max_positions_per_strategy": int(os.getenv("MAX_POSITIONS_PER_STRATEGY", "5")),  # Limit positions per strategy
             "min_trades_for_ranking": int(os.getenv("MIN_TRADES_FOR_RANKING", "3")),  # Faster weight adaptation
         },
+
+        # Strategy selector behavior
+        "strategy_selection": {
+            # Scale signal strength 0.5-1.5x by the last-10-trade win rate.
+            # Strength feeds leverage, capital rotation and conflict
+            # displacement, so this is a path-dependent rule; for a
+            # low-win-rate / high-payoff momentum book it penalizes ordinary
+            # losing streaks. Research round 8 tests on vs off.
+            "win_rate_strength_modifier": True,
+        },
         
         # Risk Management Configuration
         "risk_management": {
@@ -693,6 +703,9 @@ def load_config() -> Dict[str, Any]:
             "reset_results_db": os.getenv("BACKTEST_RESET_RESULTS_DB", "true").lower() == "true",
             "initial_capital": float(os.getenv("BACKTEST_INITIAL_CAPITAL", "50000.0")),
             "initial_spot_balance": float(os.getenv("BACKTEST_INITIAL_SPOT_BALANCE", "0.0")),
+            # Seed the strategy selector from data/trades.db at backtest start?
+            # False = clean slate (live trades must not leak into simulations).
+            "seed_selector_from_db": False,
             # Execution cost model per leg (see MockMarketAPI). Defaults
             # approximate taker execution; maker-scenario upper bound:
             # BACKTEST_FEE_BPS=1.5 BACKTEST_SLIPPAGE_BPS=0

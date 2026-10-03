@@ -279,11 +279,20 @@ class StrategySelector:
         Args:
             live_db_path: Path to live trades database
         """
-        # 1. Fetch data from both sources (returned as dicts of list of trades)
-        live_history = self._fetch_db_data(live_db_path, "live", "trades")
-        
-        # New unified DB approach: Query backtest_trades from the same DB file
-        bt_history = self._fetch_db_data(live_db_path, "backtest", "backtest_trades")
+        # Backtests must start from a clean slate: seeding from data/trades.db
+        # injected LIVE trade outcomes (incl. trades from older configs and
+        # months after the simulated window) into every backtest's
+        # performance windows, so results depended on whatever the live DB
+        # held at run time (research round 8, 2026-10-03).
+        if self._is_backtest() and not self._backtest_seeding_enabled():
+            self.logger.info("Backtest mode: selector history seeding from DB disabled (clean slate)")
+            live_history, bt_history = {}, {}
+        else:
+            # 1. Fetch data from both sources (returned as dicts of list of trades)
+            live_history = self._fetch_db_data(live_db_path, "live", "trades")
+
+            # New unified DB approach: Query backtest_trades from the same DB file
+            bt_history = self._fetch_db_data(live_db_path, "backtest", "backtest_trades")
         
         scored_strategies = []
         target_sample_size = 20
@@ -360,6 +369,13 @@ class StrategySelector:
                 metrics=metrics,
                 last_updated=datetime.now()
             )
+
+    def _is_backtest(self) -> bool:
+        cfg = self.config or {}
+        return cfg.get('mode') == 'backtest' or bool((cfg.get('backtesting') or {}).get('enabled', False))
+
+    def _backtest_seeding_enabled(self) -> bool:
+        return bool(((self.config or {}).get('backtesting') or {}).get('seed_selector_from_db', False))
 
     def _fetch_db_data(self, db_path: str, source_name: str, table_name: str = "trades") -> Dict[str, List[Dict]]:
         """
@@ -1208,6 +1224,10 @@ class StrategySelector:
         Returns:
             Modifier value between 0.5 and 1.5
         """
+        sel_cfg = (self.config or {}).get('strategy_selection', {}) or {}
+        if not sel_cfg.get('win_rate_strength_modifier', True):
+            return 1.0
+
         if strategy_name not in self.performance_windows:
             return 1.0
             

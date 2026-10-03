@@ -1,6 +1,7 @@
 
 import sys
 import os
+import json
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -35,16 +36,41 @@ def generate_synthetic_data(symbol, start_date, end_date, freq='1h'):
 import random
 
 
-def select_universe(db, symbols, start, end, max_n):
+UNIVERSE_MODES = ('pit', 'window')
+COARSE_EXCLUDED_TIMEFRAMES = ['5m', '15m', '1h']
+
+
+def universe_ranking_window(start, end, mode='pit', lookback_days=30):
+    """
+    The period whose liquidity decides the backtest universe.
+
+    'pit' (point-in-time, default): the `lookback_days` BEFORE the window —
+    only information available at the start. 'window': the test window
+    itself (pre-2026-10 behavior). Volume spikes with large moves, so
+    in-window ranking stocks each month's universe with that month's
+    biggest trenders — exactly what momentum profits from — and its
+    coverage requirement drops names delisted mid-window (survivorship).
+    """
+    if mode == 'pit':
+        return start - timedelta(days=lookback_days), start
+    if mode == 'window':
+        return start, end
+    raise ValueError(f"unknown universe mode {mode!r}; choose from {UNIVERSE_MODES}")
+
+
+def select_universe(db, symbols, start, end, max_n, mode='pit', lookback_days=30):
     """
     Rank candidate symbols by liquidity and history coverage instead of
     alphabetical truncation, and dedupe duplicate underlyings listed on
     multiple HIP-3 dexes (e.g. cash:NVDA / flx:NVDA / xyz:NVDA) by keeping
     the most liquid listing. Ensures backtests cover both crypto-native and
     HIP-3 perps, weighted toward what is actually tradeable.
+
+    Ranking period: see universe_ranking_window (point-in-time by default).
     """
+    rank_start, rank_end = universe_ranking_window(start, end, mode, lookback_days)
     scored = []
-    window_seconds = max(1.0, (end - start).total_seconds())
+    window_seconds = max(1.0, (rank_end - rank_start).total_seconds())
     expected_bars = max(1, int(window_seconds // (4 * 3600)))
 
     # Spot listings are hedge legs, not analysis targets: strategies trade
@@ -59,7 +85,11 @@ def select_universe(db, symbols, start, end, max_n):
             continue
         if df is None or df.empty:
             continue
-        window = df[(df.index >= start) & (df.index <= end)]
+        if mode == 'pit':
+            # strictly before the window: the start bar is not yet observable
+            window = df[(df.index >= rank_start) & (df.index < rank_end)]
+        else:
+            window = df[(df.index >= rank_start) & (df.index <= rank_end)]
         coverage = len(window) / expected_bars
         if coverage < 0.7:
             continue
@@ -80,7 +110,8 @@ def select_universe(db, symbols, start, end, max_n):
     selected = [sym for sym, _, _ in ranked[:max_n]]
 
     n_hip3 = sum(1 for s in selected if ':' in s)
-    print(f"Universe: {len(selected)} symbols by notional volume "
+    print(f"Universe ({mode}, ranked {rank_start:%Y-%m-%d}..{rank_end:%Y-%m-%d}): "
+          f"{len(selected)} symbols by notional volume "
           f"({len(selected) - n_hip3} crypto, {n_hip3} HIP-3); "
           f"top 5: {selected[:5]}")
     return selected
@@ -127,7 +158,58 @@ def apply_risk_overrides(config, overrides):
     apply_section_overrides(config, 'risk_management', overrides)
 
 
-def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None, param_overrides=None, disable_strategies=None, enable_instances=None, max_symbols=None, universe='all', risk_param_overrides=None, trading_param_overrides=None):
+def apply_generic_overrides(config, overrides):
+    """--set section.path.to.key=value for any top-level config section."""
+    for override in overrides or []:
+        section, sep, rest = override.partition('.')
+        if not sep or not rest:
+            print(f"  ⚠ Invalid format '{override}' — expected section.path.to.key=value")
+            continue
+        apply_section_overrides(config, section, [rest])
+
+
+def apply_bar_resolution(config, required_timeframes, bar_resolution, active_timeframes=None):
+    """
+    'native' (default): use every stored timeframe (prices from the finest).
+    '4h': COARSE mode for history where finer candles are unavailable
+    (Hyperliquid retains only ~5000 bars per series: 1h reaches back ~7
+    months, 4h ~2.3 years). Finer timeframes are excluded from loading, so
+    prices and stop checks run on 4h closes. Calibrate against native runs
+    on overlapping windows before trusting absolute numbers.
+    Returns the timeframes a symbol must have data for.
+    """
+    if bar_resolution == 'native':
+        return set(required_timeframes) | {'1h'}
+    if bar_resolution == '4h':
+        active = required_timeframes if active_timeframes is None else active_timeframes
+        too_fine = sorted({tf for tf in active if tf in COARSE_EXCLUDED_TIMEFRAMES})
+        if too_fine:
+            raise ValueError(f"--bar-resolution 4h cannot run strategies on {too_fine}")
+        config.setdefault('backtesting', {})['exclude_timeframes'] = list(COARSE_EXCLUDED_TIMEFRAMES)
+        return ({tf for tf in required_timeframes if tf not in COARSE_EXCLUDED_TIMEFRAMES}) | {'4h'}
+    raise ValueError(f"unknown bar resolution {bar_resolution!r}")
+
+
+def result_record(report, start_date, end_date, extra=None):
+    """Machine-readable run summary (one JSON line, prefixed RESULT_JSON)."""
+    rec = {
+        'start': start_date.strftime('%Y-%m-%d'),
+        'end': end_date.strftime('%Y-%m-%d'),
+        'final_equity': round(float(report.get('total_equity', 0) or 0), 2),
+        'trades': int(report.get('backtest_trades', 0) or 0),
+        'pnl': round(float(report.get('backtest_total_pnl', 0) or 0), 2),
+        'win_rate': round(float(report.get('backtest_win_rate', 0) or 0), 2),
+        'profit_factor': round(float(report.get('backtest_profit_factor', 0) or 0), 3),
+        'max_dd_pct': round(float(report.get('backtest_max_drawdown_pct', 0) or 0), 2),
+        'funding_paid': round(float(report.get('funding_paid', 0) or 0), 2),
+    }
+    rec.update(extra or {})
+    return rec
+
+
+def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None, param_overrides=None, disable_strategies=None, enable_instances=None, max_symbols=None, universe='all', risk_param_overrides=None, trading_param_overrides=None,
+                   universe_mode='pit', universe_lookback_days=30, bar_resolution='native',
+                   results_db=None, generic_overrides=None, interval_minutes=15, tag=None):
     # Increase log level and setup file logging prior to ANY imports or logic
     import logging
     
@@ -152,6 +234,12 @@ def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None, 
     
     # 1. Config
     config = load_config()
+
+    # Per-run results DB (backtest_* tables) so several backtests can run in
+    # parallel; market data is still read from the default data/trades.db.
+    if results_db:
+        config.setdefault('persistence', {})['db_path'] = results_db
+        print(f"Results DB: {results_db}")
     
     # 5. Enable Backtest Mode for PairSelector (load all assets instantly)
     config['mode'] = 'backtest'
@@ -166,10 +254,15 @@ def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None, 
     default_start = default_end - timedelta(days=days or 90)
     
     # Get Timeframes required by current config
-    required_timeframes = set([s.get('timeframe', '1h') for s in config['strategies']['instances']])
-    # Ensure 1h is always present as it's often used for broad market check / funding (fallback)
-    required_timeframes.add('1h')
-    
+    settings_tfs = [s.get('timeframe', '1h') for s in config['strategies']['instances']]
+    # Instances that will actually run (for the coarse-mode resolution check)
+    active_tfs = [s.get('timeframe', '1h') for s in config['strategies']['instances']
+                  if not any(s['name'].startswith(d) for d in (disable_strategies or []))]
+    active_tfs += [spec.split(':')[2] for spec in (enable_instances or []) if spec.count(':') == 2]
+    # Native mode always adds 1h (broad market checks / funding fallback);
+    # coarse 4h mode excludes sub-4h data entirely (see apply_bar_resolution)
+    required_timeframes = apply_bar_resolution(config, settings_tfs, bar_resolution, active_tfs)
+
     print(f"Required Timeframes: {required_timeframes}")
     
     # Dynamic Universe Selection
@@ -247,7 +340,8 @@ def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None, 
     # Selection is liquidity-ranked with HIP-3 dedupe, NOT alphabetical (see select_universe)
     max_symbols = max_symbols or 20
     if len(symbols) > max_symbols:
-        symbols = select_universe(db, symbols, start_date, end_date, max_symbols)
+        symbols = select_universe(db, symbols, start_date, end_date, max_symbols,
+                                  mode=universe_mode, lookback_days=universe_lookback_days)
 
     # Funding-rate arbitrage needs its spot-hedgeable perps in the analyzed
     # universe regardless of volume rank (the strategy is gated to them anyway)
@@ -291,9 +385,10 @@ def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None, 
             except ValueError:
                 print(f"  ⚠ Invalid format '{override}' — expected strategy.param=value")
 
-    # 3.1c Apply any --risk-param / --trading-param overrides from CLI
+    # 3.1c Apply any --risk-param / --trading-param / --set overrides from CLI
     apply_section_overrides(config, 'risk_management', risk_param_overrides)
     apply_section_overrides(config, 'trading', trading_param_overrides)
+    apply_generic_overrides(config, generic_overrides)
 
     # 3.2 Strategy instance adjustments (purely CLI-driven; the old hardcoded
     # sentiment/liquidation-hunter filter was removed - use --disable-strategy)
@@ -327,7 +422,7 @@ def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None, 
     # BacktestEngine only clears trades, but ghost positions leak across runs
     print("Clearing stale backtest data...")
     from src.utils.trade_database import TradeDatabase as BtDb
-    bt_db = BtDb(table_prefix="backtest_")
+    bt_db = BtDb(results_db, table_prefix="backtest_") if results_db else BtDb(table_prefix="backtest_")
     bt_db.delete_all_trades()
     bt_db.clear_open_positions()
     try:
@@ -374,7 +469,7 @@ def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None, 
     
     # 4. Run
     # Use 15m interval to match the primary strategy timeframe
-    report = engine.run(start_date, end_date, interval_minutes=15)
+    report = engine.run(start_date, end_date, interval_minutes=interval_minutes)
     
     # 5. Print Results Summary
     print("\n" + "=" * 60)
@@ -415,6 +510,18 @@ def run_smoke_test(days=None, start_str=None, end_str=None, random_window=None, 
     
     print("=" * 60)
 
+    maker = getattr(engine.mock_api, 'maker_stats', None) or {}
+    rec = result_record(report, start_date, end_date, extra={
+        'tag': tag,
+        'universe_mode': universe_mode,
+        'bar_resolution': bar_resolution,
+        'n_symbols': len(symbols),
+        'maker_attempted': int(maker.get('attempted', 0) or 0),
+        'maker_filled': int(maker.get('filled', 0) or 0),
+    })
+    print("RESULT_JSON: " + json.dumps(rec))
+    return rec
+
 
 if __name__ == "__main__":
     import argparse
@@ -444,6 +551,21 @@ if __name__ == "__main__":
     parser.add_argument('--trading-param', action='append', metavar='path.to.key=value',
                         help='Override a trading setting (repeatable, dotted path). '
                              'E.g. --trading-param maker_entries.enabled=true')
+    parser.add_argument('--set', dest='generic_overrides', action='append', metavar='section.path=value',
+                        help='Override any config value (repeatable). '
+                             'E.g. --set strategy_selection.win_rate_strength_modifier=false')
+    parser.add_argument('--universe-mode', choices=UNIVERSE_MODES, default='pit',
+                        help="Universe ranking period: 'pit' = the --universe-lookback-days BEFORE "
+                             "the window (default, no look-ahead); 'window' = in-window (legacy, biased)")
+    parser.add_argument('--universe-lookback-days', type=int, default=30,
+                        help='Liquidity ranking lookback for --universe-mode pit (default 30)')
+    parser.add_argument('--bar-resolution', choices=['native', '4h'], default='native',
+                        help="'4h' = coarse mode for long history (no sub-4h data loaded)")
+    parser.add_argument('--results-db', default=None,
+                        help='SQLite file for backtest_* result tables (enables parallel runs)')
+    parser.add_argument('--interval-minutes', type=int, default=15,
+                        help='Simulation step size in minutes (default 15)')
+    parser.add_argument('--tag', default=None, help='Label echoed in RESULT_JSON')
 
     args = parser.parse_args()
     
@@ -462,7 +584,14 @@ if __name__ == "__main__":
             max_symbols=args.max_symbols,
             universe=args.universe,
             risk_param_overrides=args.risk_param,
-            trading_param_overrides=args.trading_param
+            trading_param_overrides=args.trading_param,
+            universe_mode=args.universe_mode,
+            universe_lookback_days=args.universe_lookback_days,
+            bar_resolution=args.bar_resolution,
+            results_db=args.results_db,
+            generic_overrides=args.generic_overrides,
+            interval_minutes=args.interval_minutes,
+            tag=args.tag,
         )
     except KeyboardInterrupt:
         print("\nBacktest interrupted by user.")

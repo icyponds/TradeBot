@@ -132,6 +132,23 @@ class BacktestEngine:
 
         return df, original_len - len(df)
 
+    ALL_TIMEFRAMES = ['5m', '15m', '1h', '4h', '1d']
+
+    def _active_timeframes(self) -> List[str]:
+        excluded = set((self.config.get('backtesting') or {}).get('exclude_timeframes') or [])
+        return [tf for tf in self.ALL_TIMEFRAMES if tf not in excluded]
+
+    def _discovery_symbols(self) -> List[str]:
+        """
+        Symbols to load. Native runs key off 1h (simplification: if 1h
+        exists, others might too). Coarse runs exclude 1h, and long-history
+        symbols (incl. delisted perps) may have only 4h/1d candles, so the
+        finest LOADED timeframe drives discovery instead.
+        """
+        active = self._active_timeframes()
+        anchor = '1h' if '1h' in active else next((tf for tf in ('4h', '1d') if tf in active), '1h')
+        return self.db.get_market_data_symbols(anchor)
+
     def _load_data_from_db(self) -> Dict[str, Dict[str, pd.DataFrame]]:
         """
         Load all available market data from database per symbol and timeframe.
@@ -141,11 +158,11 @@ class BacktestEngine:
         total_rows = 0
         total_dropped = 0
 
-        # Timeframes we care about for now
-        timeframes = ['5m', '15m', '1h', '4h', '1d']
+        # Timeframes we care about for now (minus any excluded for coarse
+        # long-history runs: backtesting.exclude_timeframes, see run_backtest)
+        timeframes = self._active_timeframes()
 
-        # Get all distinct symbols from DB (simplification: assume if 1h exists, others might too)
-        symbols = self.db.get_market_data_symbols('1h')
+        symbols = self._discovery_symbols()
 
         for symbol in symbols:
             data[symbol] = {}
@@ -174,9 +191,7 @@ class BacktestEngine:
              return {}
              
         data = {}
-        # reused get_market_data_symbols to get list of symbols
-        # Ideally we should have get_funding_symbols() but this is close enough for now
-        symbols = self.db.get_market_data_symbols('1h') 
+        symbols = self._discovery_symbols()
         
         total_rows = 0
         for symbol in symbols:
