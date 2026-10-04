@@ -23,10 +23,12 @@ class TestConfig:
             
             assert config['api']['base_url'] == "https://api.hyperliquid.xyz"
             assert config['trading']['max_position_size_percentage'] == 15.0
-            # Check instances list logic: csm_4h (gate + whipsaw lockout) is
-            # the enabled instance since 2026-06-10 (validated config)
+            # csm_4h was the only enabled instance (2026-06-10) until research
+            # round 8 (2026-10-03) found no edge on an honest engine — no
+            # strategy is enabled until one passes validation on fresh data
             instances = config['strategies']['instances']
-            assert any(s['name'] == 'csm_4h' for s in instances)
+            assert not any(s['name'] == 'csm_4h' for s in instances)
+            assert instances == []
             assert config['strategies']['cross_sectional_momentum']['require_absolute_momentum'] == 1
             assert config['risk_management']['whipsaw_lockout']['enabled'] is True
 

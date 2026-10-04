@@ -142,10 +142,10 @@ def load_config(profile: Optional[str] = None) -> Dict[str, Any]:
             # backtest model (backtesting.maker_execution): rest at the touch,
             # unfilled after timeout = missed entry, never chased with taker.
             # Exits and reduce-only orders are unaffected (always taker).
-            # Maker fills cut ~10bps/leg to ~1.5bps; at csm's trade rate that
-            # roughly doubles the validated 7-window total (round 4: 5-seed
-            # ensemble all positive, mean +$17k..+$22k). Default OFF pending
-            # live validation at small size.
+            # Maker fills cut ~10bps/leg to ~1.5bps. Round-4/7 "+$17-22k"
+            # ensembles came from the biased engine; round 8 (honest engine)
+            # csm_4h maker 5-seed = -$5.3k over 11 windows. OFF: there is no
+            # validated strategy to pilot it on (live pilot not started).
             "maker_entries": {
                 "enabled": False,
                 # Instance names to route through maker entries; empty = all
@@ -203,9 +203,9 @@ def load_config(profile: Optional[str] = None) -> Dict[str, Any]:
         "strategy_selection": {
             # Scale signal strength 0.5-1.5x by the last-10-trade win rate.
             # Strength feeds leverage, capital rotation and conflict
-            # displacement, so this is a path-dependent rule; for a
-            # low-win-rate / high-payoff momentum book it penalizes ordinary
-            # losing streaks. Research round 8 tests on vs off.
+            # displacement, so this is a path-dependent rule. Round 8 (csm_4h,
+            # 17 untouched windows): OFF -$14.7k vs ON — it damps rotation
+            # churn; kept ON.
             "win_rate_strength_modifier": True,
         },
         
@@ -374,6 +374,9 @@ def load_config(profile: Optional[str] = None) -> Dict[str, Any]:
             # + 44 capital_rotation closes; 20 same-side upgrades) — the
             # "validated" profiles never rotated only because live-trade
             # seeding kept signal strengths low. Defaults = current behavior.
+            # Verdict (csm_4h, 17 untouched windows): rotation OFF +$9.9k but
+            # better in only 7/17 windows; upgrades OFF -$21.1k. Neither met
+            # the adoption bar — re-test with any new strategy.
             # capital_rotation: close the least-profitable position when a
             # stronger signal arrives at the allocation/position limit.
             "capital_rotation": {"enabled": True},
@@ -518,7 +521,20 @@ def load_config(profile: Optional[str] = None) -> Dict[str, Any]:
                 # forward validation at small size; Nov/Mar-style months still
                 # lose ~$5-6k (max DD ~18%). Maker execution (not yet built)
                 # roughly doubles the expected total (ensemble mean +$22.4k).
-                {"type": "cross_sectional_momentum", "name": "csm_4h", "timeframe": "4h"},
+                # 2026-10-03 (research round 8): DISABLED — NO EDGE on an honest
+                # engine. Rounds 1-7 ranked the universe on in-window volume and
+                # seeded the selector with LIVE trades (pinning the win-rate
+                # modifier ~0.5, which suppressed rotation churn); fixed, the
+                # legacy 8 windows give -$600 (t=-0.04, was ~+$9k). Untouched
+                # data, frozen config, taker: Jul/Aug/Sep 2026 -$4.3k/-$2.1k/
+                # -$1.5k; Sep'24-Oct'25 crypto (coarse 4h) -$33.2k; 17 windows
+                # -$41.2k (t=-1.07). Maker 5-seed: Jul-Sep mean -$6.5k. Seven
+                # pre-registered variants (rank exit, blended lookbacks,
+                # funding filter, rotation/upgrade/modifier off) all negative;
+                # none passed the adoption rule. Full numbers:
+                # reports/oos_matrix5/SUMMARY.md. Re-enable only with new
+                # evidence on fresh forward months.
+                # {"type": "cross_sectional_momentum", "name": "csm_4h", "timeframe": "4h"},
 
                 # Trend Following (Donchian / time-series momentum)
                 # 2026-06-10 IS test, top-30 universe: 60/30 bars Dec -$6.1k Feb -$2.8k;
@@ -670,7 +686,9 @@ def load_config(profile: Optional[str] = None) -> Dict[str, Any]:
                 "invert": 0,
                 # EMA200 alignment filter (momentum construct; 0 for reversal)
                 "trend_filter_enabled": 1,
-                # --- research round 8 (2026-10-03), all OFF = validated config ---
+                # --- research round 8 (2026-10-03), all OFF; none adopted ---
+                # 17 untouched windows vs base -$41.2k: exit_rank 0.30 -$36.9k
+                # (8/17 better), blend 12/42/126 -$60.3k, funding 0.30 -$61.5k.
                 # Blended-horizon score: [] = single lookback_period above;
                 # e.g. [12, 42, 126] = 2d/7d/21d, mean of per-horizon t-stats.
                 "lookback_periods": [],
