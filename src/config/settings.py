@@ -549,6 +549,13 @@ def load_config(profile: Optional[str] = None) -> Dict[str, Any]:
                 # factor-style weekly L/S quintiles, rank-band exits, wide
                 # vol-scaled catastrophe stop, no trail/TP. NOT enabled until it
                 # passes reports/oos_matrix6/PREREGISTRATION.md.
+                # 2026-10-04 verdict: FAIL (narrow) — 17 untouched windows
+                # +$11.0k but t=0.87 < 1.0 (positive 11/17; worst -$7.1k;
+                # neighbours 14d +$19.8k / 28d +$6.2k; maker 5-seed +$14.0k).
+                # Nov-2024 alone is +$8.6k; burned legacy8 -$0.6k. First
+                # construction with a consistently positive sign across checks,
+                # but not significant. Keep frozen (no re-tuning on these
+                # windows) and re-test on each new forward month.
                 # {"type": "weekly_momentum", "name": "wmom_4h", "timeframe": "4h"},
 
                 # Cross-Sectional Funding Carry (funding as directional signal)
