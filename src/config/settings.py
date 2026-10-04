@@ -537,6 +537,12 @@ def load_config(profile: Optional[str] = None) -> Dict[str, Any]:
                 # none passed the adoption rule. Full numbers:
                 # reports/oos_matrix5/SUMMARY.md. Re-enable only with new
                 # evidence on fresh forward months.
+                # 2026-10-04 exit-mechanics diagnostic (same 17 windows, so
+                # informative only): no engine TP alone -$48.3k (worse);
+                # stop 8xATR + no TP -$1.1k (t=-0.12; 27 stop-outs vs 366,
+                # but ~1/4 the gross exposure; flips now the main loss,
+                # -$33.7k); + no trail -$5.1k. Best variant ~break-even and
+                # below wmom_4h (+$11.0k) — superseded, keep disabled.
                 # {"type": "cross_sectional_momentum", "name": "csm_4h", "timeframe": "4h"},
 
                 # Trend Following (Donchian / time-series momentum)
