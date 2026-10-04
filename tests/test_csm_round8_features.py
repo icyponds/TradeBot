@@ -229,3 +229,23 @@ def test_funding_lookup_cached_per_hour():
 def test_lookback_periods_accept_cli_string():
     assert make_strategy(lookback_periods='12,42,126').lookback_periods == [12, 42, 126]
     assert make_strategy(lookback_periods=42).lookback_periods == [42]
+
+
+
+# --- exit mechanics (round-8 follow-up diagnostic) ------------------------------
+
+def test_exit_mechanics_defaults_match_history():
+    s = make_strategy()
+    assert s.USES_ENGINE_TAKE_PROFIT is True
+    assert s.get_trailing_stop_config() == {'enabled': True, 'trail_pct': 0.04, 'activation_pct': 0.05}
+
+
+def test_take_profit_opt_out_and_trail_off():
+    s = make_strategy(use_engine_take_profit=0, trail_pct=0)
+    assert s.USES_ENGINE_TAKE_PROFIT is False
+    assert s.get_trailing_stop_config()['enabled'] is False
+
+
+def test_custom_trail():
+    cfg = make_strategy(trail_pct=0.1, trail_activation_pct=0.15).get_trailing_stop_config()
+    assert cfg == {'enabled': True, 'trail_pct': 0.1, 'activation_pct': 0.15}

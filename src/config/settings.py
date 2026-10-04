@@ -715,6 +715,12 @@ def load_config(profile: Optional[str] = None) -> Dict[str, Any]:
                 # trailing funding and shorts below -30% APR (HL baseline ~11%).
                 "funding_filter_apr": 0.0,
                 "funding_lookback_hours": 24,
+                # Exit mechanics (defaults = historical behavior): 1 = accept
+                # the engine's forced take-profit (+100% on margin); trailing
+                # stop trail_pct after activation_pct gain (0 = no trail).
+                "use_engine_take_profit": 1,
+                "trail_pct": 0.04,
+                "trail_activation_pct": 0.05,
             },
 
             # Weekly Cross-Sectional Momentum (research round 9, 2026-10-04).

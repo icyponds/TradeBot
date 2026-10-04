@@ -111,6 +111,14 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
         # funding is ~+11% APR, so useful thresholds sit well above it.
         self.funding_filter_apr = float(csm_config.get('funding_filter_apr', 0.0))
         self.funding_lookback_hours = int(csm_config.get('funding_lookback_hours', 24))
+
+        # Exit mechanics (round-8 follow-up, defaults = historical behavior).
+        # 1 = accept the engine's capital-based take-profit (+100% on
+        # margin); 0 = opt out (USES_ENGINE_TAKE_PROFIT hook).
+        self.USES_ENGINE_TAKE_PROFIT = bool(int(csm_config.get('use_engine_take_profit', 1)))
+        # Trailing stop: trail_pct <= 0 disables it.
+        self.trail_pct = float(csm_config.get('trail_pct', 0.04))
+        self.trail_activation_pct = float(csm_config.get('trail_activation_pct', 0.05))
         self._funding_cache: Dict[str, Tuple[datetime, Optional[float]]] = {}
 
         self.logger.info(f"Initialized Cross-Sectional Momentum: "
@@ -430,12 +438,12 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
         
     def get_trailing_stop_config(self, entry_price: float = None, signal_context: Dict[str, Any] = None) -> Dict[str, Any]:
         """
-        Trailing stop to capture trend collapses.
+        Trailing stop to capture trend collapses (trail_pct <= 0 disables).
         """
         return {
-            'enabled': True,
-            'trail_pct': 0.04,
-            'activation_pct': 0.05
+            'enabled': self.trail_pct > 0,
+            'trail_pct': self.trail_pct,
+            'activation_pct': self.trail_activation_pct
         }
     def calculate_signal_strength(self, ohlcv: Dict[str, pd.DataFrame], symbol: str = None, signal_context: Dict[str, Any] = None) -> float:
         """
