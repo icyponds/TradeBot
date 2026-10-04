@@ -44,6 +44,7 @@ STRATEGY_CLASSES = {
     'cross_sectional_momentum': ('cross_sectional_momentum_strategy', 'CrossSectionalMomentumStrategy'),
     'trend_following': ('trend_following_strategy', 'TrendFollowingStrategy'),
     'funding_carry': ('funding_carry_strategy', 'FundingCarryStrategy'),
+    'weekly_momentum': ('weekly_momentum_strategy', 'WeeklyMomentumStrategy'),
 }
 
 
@@ -104,8 +105,11 @@ class StrategyManager:
         self.position_sync_interval = config['trading']['position_sync_interval']
         self.enable_position_validation = config['trading']['enable_position_validation']
         
-        # Per-strategy position limit (default 5)
+        # Per-strategy position limit (default 5), with per-instance overrides
+        # (a long/short weekly book needs more slots than a 5-name sleeve)
         self.max_positions_per_strategy = config['trading'].get('max_positions_per_strategy', 5)
+        self.max_positions_per_strategy_overrides = dict(
+            config['trading'].get('max_positions_per_strategy_overrides', {}) or {})
 
         # Per-strategy capital sleeves (see risk_management.capital_sleeves)
         sleeves_cfg = (config.get('risk_management', {}) or {}).get('capital_sleeves', {}) or {}
@@ -1278,6 +1282,12 @@ class StrategyManager:
         
         return False
 
+    def _strategy_position_limit(self, strategy_name: Optional[str]) -> int:
+        """Max concurrent positions for a strategy instance (override or global)."""
+        if strategy_name and strategy_name in self.max_positions_per_strategy_overrides:
+            return int(self.max_positions_per_strategy_overrides[strategy_name])
+        return int(self.max_positions_per_strategy)
+
     def _get_effective_strategy_weight(self, strategy_name: str) -> float:
         """Selector weight multiplied by regime multiplier (if enabled)."""
         base_weight = float(self.strategy_selector.get_strategy_weight(strategy_name))
@@ -1498,6 +1508,11 @@ class StrategyManager:
                 elif strategy_type in ('funding_rate_arbitrage', 'funding_carry'):
                     strategies[instance_name] = strategy_class(
                         self.config, self.market_api, timeframe=timeframe
+                    )
+                elif strategy_type == 'weekly_momentum':
+                    # market_api supplies the clock for bar-closure checks
+                    strategies[instance_name] = strategy_class(
+                        self.config, timeframe=timeframe, market_api=self.market_api
                     )
                 elif strategy_type == 'cross_sectional_momentum':
                     # market_api feeds the optional funding filter
@@ -3589,8 +3604,9 @@ class StrategyManager:
         
         # Check per-strategy position limit
         strategy_position_count = self._count_positions_for_strategy(strategy_name)
-        if strategy_position_count >= self.max_positions_per_strategy:
-            self.logger.info(f"⛔ {strategy_name} has {strategy_position_count} positions (limit: {self.max_positions_per_strategy}), skipping {symbol}")
+        strategy_limit = self._strategy_position_limit(strategy_name)
+        if strategy_position_count >= strategy_limit:
+            self.logger.info(f"⛔ {strategy_name} has {strategy_position_count} positions (limit: {strategy_limit}), skipping {symbol}")
             return False
 
         

@@ -196,6 +196,9 @@ def load_config(profile: Optional[str] = None) -> Dict[str, Any]:
             
             # Strategy weighting configuration
             "max_positions_per_strategy": int(os.getenv("MAX_POSITIONS_PER_STRATEGY", "5")),  # Limit positions per strategy
+            # Per-instance overrides of the cap above (a weekly long/short
+            # quintile book on a 30-name universe holds ~12 names)
+            "max_positions_per_strategy_overrides": {"wmom_4h": 14},
             "min_trades_for_ranking": int(os.getenv("MIN_TRADES_FOR_RANKING", "3")),  # Faster weight adaptation
         },
 
@@ -542,6 +545,12 @@ def load_config(profile: Optional[str] = None) -> Dict[str, Any]:
                 # longs -$1.4k) -> no edge at either speed, long-only would not save it.
                 # {"type": "trend_following", "name": "tsmom_4h", "timeframe": "4h"},
 
+                # Weekly cross-sectional momentum (research round 9, 2026-10-04):
+                # factor-style weekly L/S quintiles, rank-band exits, wide
+                # vol-scaled catastrophe stop, no trail/TP. NOT enabled until it
+                # passes reports/oos_matrix6/PREREGISTRATION.md.
+                # {"type": "weekly_momentum", "name": "wmom_4h", "timeframe": "4h"},
+
                 # Cross-Sectional Funding Carry (funding as directional signal)
                 # 2026-07-03 verdict: NO EDGE — 8-window matrix -$15.1k
                 # (nov -2.3k / dec +0.8k / jan -1.4k / feb +0.2k / mar -7.6k
@@ -699,6 +708,24 @@ def load_config(profile: Optional[str] = None) -> Dict[str, Any]:
                 # trailing funding and shorts below -30% APR (HL baseline ~11%).
                 "funding_filter_apr": 0.0,
                 "funding_lookback_hours": 24,
+            },
+
+            # Weekly Cross-Sectional Momentum (research round 9, 2026-10-04).
+            # Literature defaults (Liu-Tsyvinski-Wu 2022: 1-4 week crypto
+            # momentum), fixed BEFORE any backtest — do not tune on the test
+            # windows. See src/strategies/weekly_momentum_strategy.py.
+            "weekly_momentum": {
+                "lookback_days": 21,        # rank on trailing 3-week return
+                "top_n_percent": 0.20,      # long top quintile
+                "bottom_n_percent": 0.20,   # short bottom quintile
+                "hold_percent": 0.40,       # exit at rebalance once outside top/bottom 40%
+                "rebalance_weekday": 0,     # Monday ...
+                "rebalance_hour": 0,        # ... 00:00 UTC bar (acts at its close)
+                "stop_vol_mult": 2.0,       # catastrophe stop = 2 x one-week sigma
+                "min_stop_pct": 0.08,
+                "max_stop_pct": 0.35,
+                "min_universe": 10,
+                "direction": "both",
             },
 
             # Cross-Sectional Funding Carry (research round 7, 2026-07-03)

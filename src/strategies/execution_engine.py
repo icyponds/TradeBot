@@ -183,6 +183,9 @@ class ExecutionEngine:
                 # (volatility_breakout, cross_sectional_momentum) read this;
                 # omitting it silently degraded them to fixed-pct fallbacks
                 'atr': signal.get('atr'),
+                # Stop distance precomputed at signal time (weekly_momentum:
+                # multiple of one-week sigma)
+                'stop_pct': signal.get('stop_pct'),
                 'market_volatility': market_volatility,
                 'signal_strength': signal_strength,
             }
@@ -323,6 +326,13 @@ class ExecutionEngine:
                 else:
                     take_profit = current_price - sl_distance
             
+            # Strategies that manage exits themselves opt out of the engine's
+            # forced take-profit: the capital-based TP above closes at +100%
+            # on margin regardless of the strategy (it truncated csm winners
+            # despite csm "disabling" TP) — fatal for momentum holds.
+            if not getattr(strategy, 'USES_ENGINE_TAKE_PROFIT', True):
+                take_profit = None
+
             # Determine market type from symbol
             market_type = 'spot' if symbol.endswith('_SPOT') else 'perp'
 
